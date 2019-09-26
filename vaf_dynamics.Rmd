@@ -1,0 +1,115 @@
+---
+title: "VAF Dynamics"
+output:
+  html_document: default
+  pdf_document: default
+bibliography: /Users/josegcpa/Google Drive/PhD/00_PRESENTATION_MATERIAL/library.bib
+---
+
+```{r setup, include=FALSE,warning=FALSE,message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library, results='hide',message=FALSE,warning=FALSE}
+source("vaf_dynamics_functions.R")
+```
+
+*Note: the quickest and least effort path to have `greta` functioning in your machine/cluster is to install a `Python` version with shared libraries (`./configure --enable-shared` will do the trick) and *
+
+# Context
+
+The _COHORT NAME_ was in place for _TIME INTERVAL_ to better understand how __. In this regard, Margarete Fabre did deep targetted sequencing on a cohort of roughly 400 individuals in Sardinia (see below). This notebook contains the implementation of models that seek to find the factors underlying VAF dynamics. Models here are implemented using hierarchical variational Bayes in `greta` [@Golding2018].
+
+```{r map sardinia,fig.height=8,fig.width=8,fig.align="center",results='hide',fig.keep='all',warning=FALSE,message=FALSE}
+m_s <- map_sardinia()
+m_s
+```
+
+# Modelling VAF
+
+For simplicity's sake and initially the model will focus on modelling VAF from other covariates. The model was implemented iteratively - increasing the amount of covariates considered on each run. Initially we will consider a model of the form $VAF = a + b * age$, where $a = Y * u$, and:
+
+* $VAF$ is the variant allele frequency for each one of the considered genes, where the counts are modelled as a binomial distribution and divided by the total count to get the $VAF$
+* $Y$ will represent until the end of this report a gene indicator matrix with $n$ columns (one for each individual) and $g$ rows (one for each gene)
+* $u$ is the offset per individual
+* $b$ is the growth rate for each mutation
+* $age$ will be here considered as interacting with all other covariates, which will be further included in $b$
+
+## Implementation of the model
+
+*Note: two ways of "broadcasting" (it has to be done explicitely - despite `greta` being built on top of `tensorflow-probability`, which heavily features broadcasting for memory efficiency):
+
+1. Multiply variables by a unit matrix until the intended size is achieved 
+2. Concatenating vectors/matrices to achieve this
+
+Here we are using the second one out of my own habit.
+
+### Importing and preprocessing data
+
+```{r}
+full_data <- load_data()
+full_formatted_data <- format_data(full_data) # Returns a list with all the necessary data elements to use our model
+
+print(full_data)
+
+for (i in 1:length(full_formatted_data)) {
+  cat(names(full_formatted_data)[i],'\n')
+  cat(str(full_formatted_data[[i]]))
+}
+```
+
+### Defining the model
+
+```{r}
+prepare_model <- function(formatted_data) {
+  n_individuals <- length(formatted_data$unique_individual)
+  n_individuals_true <- length(formatted_data$unique_individual_true)
+  n_genes <- length(formatted_data$unique_gene)
+  n_sites <- length(formatted_data$unique_site)
+  
+  coverage <- formatted_data$coverage %>% 
+    as_data()
+  age <- formatted_data$ages %>%
+    as_data()
+  
+  Y <- formatted_data$individual_indicator # The indicator for the offset per individual
+  X <- (formatted_data$counts / (formatted_data$coverage + 1)) %>%
+    as_data()  # The counts per gene/individual 
+  
+  u <- normal(mean = 0, sd = 1,dim=c(n_individuals_true)) # The term for the offseet per individual
+  offset_per_individual <- t(Y) %*% u %>% t
+  
+  b <- normal(mean = 0,sd = 1,dim = c(n_sites,1)) # The term for the site effect
+  site_effect <- greta_multiply(b, formatted_data$site_indicator)
+  age_term <- greta_multiply(site_effect,age)
+  
+  r <- greta_add(offset_per_individual,age_term)
+  mu <- logit_transform(r)
+  
+  distribution(X) <- binomial(size = coverage,prob = mu)
+  m <- model(u,b) 
+  return(m)
+}
+```
+
+
+
+### Running the model 
+
+```{r}
+n_cval <- 10
+cv_list <- list()
+for (i in 1:n_cval) {
+  formatted_data <- subsample_formatted_data_individuals(full_formatted_data)
+  model <- prepare_model(formatted_data)
+  draws <- mcmc(model,
+              sample = hmc(),
+              n_samples = 1000,
+              n_cores = 16,
+              verbose = T)
+  cv_list[[i]] <- list(formatted_data = formatted_data,
+                       model = model,
+                       draws = draws)
+}
+
+```
