@@ -114,7 +114,7 @@ add_term <- function(data,dist,dist_params) {
 load_data <- function() {
   read.table('data/ALLvariants_exclSynonymous_Xadj.txt',header = T) %>%
     mutate(mutation_identifier = paste(START,END,REF,ALT,sep = '-')) %>% 
-    return 
+    return
 }
 
 load_domain_data <- function() {
@@ -125,20 +125,20 @@ load_domain_data <- function() {
 format_data <- function(full_data) {
   full_data_ <- full_data
   full_data_$individual_age <- paste(full_data_$SardID,full_data_$Age,sep = '-')
-  
+
   full_data_ <- full_data_[order(full_data_$Gene,full_data_$mutation_identifier),]
-  
+
   unique_individual <- full_data_$individual_age %>%
-    unique 
+    unique
   unique_site <- full_data_$mutation_identifier %>%
     unique
   unique_site <- unique_site[unique_site != 'NA-NA-NA-NA']
   unique_domain <- paste(full_data_$Gene,full_data_$Domain_or_NoDomain_Name,sep = '_') %>%
     unique
-  unique_gene <- full_data$Gene %>% 
+  unique_gene <- full_data$Gene %>%
     unique
   unique_individual_true <- full_data_$SardID %>%
-    unique 
+    unique
 
   site_to_individual_indicator <- matrix(0,nrow = length(unique_site),
                                          ncol = length(unique_individual))
@@ -148,25 +148,25 @@ format_data <- function(full_data) {
                            ncol = length(unique_gene))
   individual_indicator <- matrix(0,length(unique_individual_true),
                                  ncol = length(unique_individual))
-  
+
   counts <- matrix(0,nrow = length(unique_site),
                    ncol = length(unique_individual))
   coverage <- matrix(0,nrow = length(unique_site),
                      ncol = length(unique_individual))
-  
+
   ages <- matrix(0,nrow = 1,
                  ncol = length(unique_individual))
-    
+
   individual_age <- lapply(full_data_$individual_age,FUN = function(x) {
     strsplit(x,'-') %>%
-      unlist %>% 
+      unlist %>%
       return
   }) %>%
     do.call(what = rbind) %>%
     data.frame
   colnames(individual_age) <- c("individual","age")
   individual_age$age %>% as.character() %>% as.numeric()
-  
+
   for (ind in unique_individual) {
     sub_df <- full_data_[full_data_$individual_age == ind,]
     sites <- match(sub_df$mutation_identifier,unique_site)
@@ -174,28 +174,27 @@ format_data <- function(full_data) {
     genes <- match(sub_df$Gene,unique_gene)
     domains <- match(sub_df$Domain_or_NoDomain_Name,unique_domain)
     individual_true <- match(sub_df$SardID,unique_individual_true)
-    
+
     na_index <- !is.na(genes)
     sites <- sites[na_index]  
     genes <- genes[na_index]
-    
+
     ages[individual] <- sub_df$Age[1]
-    
+
     individual_indicator[cbind(individual_true,individual)] <- 1
-    
+
     if (length(sites[]) > 0) {
-            
-      gene_to_site_indicator[cbind(sites,genes)] <- 1 
+
+      gene_to_site_indicator[cbind(sites,genes)] <- 1
       domain_to_site_indicator[cbind(sites,domains)] <- 1
-      
+
       site_to_individual_indicator[cbind(sites,individual)] <- 1
       counts[cbind(sites,individual)] <- sub_df$MUTcount[na_index]
       coverage[cbind(sites,individual)] <- sub_df$TOTALcount[na_index]
     }
-    
   }
-  
-  output_list <- list(
+
+  list(
     full_data = full_data_,
     site_to_individual_indicator = site_to_individual_indicator,
     domain_to_site_indicator = domain_to_site_indicator,
@@ -204,11 +203,12 @@ format_data <- function(full_data) {
     counts = counts,
     coverage = coverage,
     unique_gene = unique_gene,
+    unique_domain = unique_domain,
     unique_site = unique_site,
     unique_individual = unique_individual,
     unique_individual_true = unique_individual_true,
     ages = ages
-  ) %>% 
+  ) %>%
     return
 }
 
