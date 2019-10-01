@@ -1,4 +1,4 @@
-source("scripts/vaf_dynamics_functions.R")
+source('scripts/vaf_dynamics_functions.R')
 
 c_args <- commandArgs(trailingOnly=T)
 
@@ -17,20 +17,15 @@ for (i in 1:length(all_rda_files)) {
   print(length(rowSums(formatted_data$site_to_individual_indicator)))
   for (draw_name in names(draws)) {
     tmp_df <- draws[[draw_name]]
-    tmp_df <- tmp_df[,grep("u\\[*",colnames(tmp_df),invert = TRUE)] %>%
-      as.data.frame %>%
-      mutate(draw = draw_name,
-             run = rda_file)
-    output_list[[sprintf("%s%s",rda_file,draw_name)]] <- tmp_df
+    output_list[[i]] <- apply(tmp_df,2,function(x) quantile(x,c(0.025,0.50,0.975))) %>%
+      as.data.frame() %>%
+      mutate(file = rda_file,draw = draw_name,q = c(0.025,0.50,0.975))
   }
 }
 
 output <- do.call(rbind,output_list)
-colnames(output) <- colnames(output) %>%
-  gsub(pattern = ",",replacement = "_")
-output %>% dim %>% print
+colnames(output) <- gsub(",","_",colnames(output))
 output %>%
-  write.csv(sprintf('models/%s_all_parameters.csv',identifier),
-            row.names = F,
-            quote = F)
-
+  write.csv(sprintf('models/%s_quantiles.csv',identifier),
+                    row.names = F,
+                    quote = F)
