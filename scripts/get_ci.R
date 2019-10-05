@@ -16,10 +16,13 @@ for (i in 1:length(all_rda_files)) {
   load(rda_file)
   print(length(rowSums(formatted_data$site_to_individual_indicator)))
   for (draw_name in names(draws)) {
+    print(draw_name)
     tmp_df <- draws[[draw_name]]
-    output_list[[i]] <- apply(tmp_df,2,function(x) quantile(x,c(0.025,0.50,0.975))) %>%
+    output_list[[sprintf('%s_%s',rda_file,draw_name)]] <- apply(tmp_df,2,function(x) quantile(x,c(0.025,0.50,0.975))) %>%
       as.data.frame() %>%
-      mutate(file = rda_file,draw = draw_name,q = c(0.025,0.50,0.975))
+      mutate(file = rda_file,
+             draw = draw_name,
+             q = c(0.025,0.50,0.975))
   }
 }
 

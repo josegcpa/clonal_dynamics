@@ -113,7 +113,7 @@ add_term <- function(data,dist,dist_params) {
 
 load_data <- function() {
   read.table('data/ALLvariants_exclSynonymous_Xadj.txt',header = T) %>%
-    mutate(mutation_identifier = paste(START,END,REF,ALT,sep = '-')) %>% 
+    mutate(mutation_identifier = paste(START,END,REF,ALT,sep = '-')) %>%
     return
 }
 
@@ -133,8 +133,10 @@ format_data <- function(full_data) {
   unique_site <- full_data_$mutation_identifier %>%
     unique
   unique_site <- unique_site[unique_site != 'NA-NA-NA-NA']
+
   unique_domain <- paste(full_data_$Gene,full_data_$Domain_or_NoDomain_Name,sep = '_') %>%
     unique
+
   unique_gene <- full_data$Gene %>%
     unique
   unique_individual_true <- full_data_$SardID %>%
@@ -212,48 +214,120 @@ format_data <- function(full_data) {
     return
 }
 
+subsample_formatted_data_index <- function(formatted_data_,included_ids_individual,included_ids_individual_age) {
+  formatted_data_$unique_individual <- formatted_data_$unique_individual[included_ids_individual_age]
+  formatted_data_$unique_individual_true <- formatted_data_$unique_individual_true[included_ids_individual]
+  formatted_data_$ages <- formatted_data_$ages[,included_ids_individual_age] %>% matrix %>% t
+
+  formatted_data_$site_to_individual_indicator <- formatted_data_$site_to_individual_indicator[,included_ids_individual_age]
+  formatted_data_$individual_indicator <- formatted_data_$individual_indicator[included_ids_individual,included_ids_individual_age]
+
+  formatted_data_$counts <- formatted_data_$counts[,included_ids_individual_age]
+  formatted_data_$coverage <- formatted_data_$coverage[,included_ids_individual_age]
+
+  return(formatted_data_)
+}
+
 subsample_formatted_data_individuals <- function(formatted_data,size = 300) {
   formatted_data_ <- formatted_data
   excluded_ids_individual <- sample(1:length(formatted_data_$unique_individual_true),
                                     size = length(formatted_data_$unique_individual_true) - size,replace = FALSE)
   excluded_ids_individual_age <- formatted_data_$individual_indicator[-excluded_ids_individual,]
   excluded_ids_individual_age <- seq(1,ncol(excluded_ids_individual_age))[colSums(excluded_ids_individual_age) == 0]
-  
-  formatted_data_$unique_individual <- formatted_data_$unique_individual[-excluded_ids_individual_age]
-  formatted_data_$unique_individual_true <- formatted_data_$unique_individual_true[-excluded_ids_individual]
-  formatted_data_$ages <- formatted_data_$ages[,-excluded_ids_individual_age] %>% matrix %>% t
-  
-  formatted_data_$site_to_individual_indicator <- formatted_data_$site_to_individual_indicator[,-excluded_ids_individual_age]
-  formatted_data_$individual_indicator <- formatted_data_$individual_indicator[-excluded_ids_individual,-excluded_ids_individual_age]
-  
-  formatted_data_$counts <- formatted_data_$counts[,-excluded_ids_individual_age]
-  formatted_data_$coverage <- formatted_data_$coverage[,-excluded_ids_individual_age]
-  
-  return(formatted_data_) 
+
+  included_ids_individual <- seq(1,length(formatted_data_$unique_individual_true))[-excluded_ids_individual]
+  included_ids_individual_age <- seq(1,length(formatted_data_$unique_individual))[-excluded_ids_individual_age]
+
+  formatted_data_train <- subsample_formatted_data_index(formatted_data_,included_ids_individual,included_ids_individual_age)
+  formatted_data_validation <- subsample_formatted_data_index(formatted_data_,excluded_ids_individual,excluded_ids_individual_age)
+
+  list(train = formatted_data_train,
+       validation = formatted_data_validation) %>%
+    return
 }
 
 subsample_formatted_data_timepoints <- function(formatted_data,timepoint = c(1)) {
   formatted_data_ <- formatted_data
-  
+
   relative_timepoint_full_data <- formatted_data_$full_data %>%
-    group_by(SardID) %>% 
+    group_by(SardID) %>%
     mutate(relative_timepoint = Phase - min(Phase) + 1) %>%
-    ungroup
+    ungroup %>%
+    subset(individual_age %in% formatted_data_$unique_individual)
+
 
   included_ids_individual_age <- match(relative_timepoint_full_data$individual_age[relative_timepoint_full_data$relative_timepoint %in% timepoint],
                                        formatted_data_$unique_individual)
+
   included_ids_individual <- formatted_data_$individual_indicator[,included_ids_individual_age]
   included_ids_individual <- seq(1,nrow(included_ids_individual))[rowSums(included_ids_individual) >= 1]
-  
-  formatted_data_$unique_individual <- formatted_data_$unique_individual[included_ids_individual_age]
-  formatted_data_$unique_individual_true <- formatted_data_$unique_individual_true[included_ids_individual]
-  formatted_data_$ages <- formatted_data_$ages[,included_ids_individual_age]
-  
-  formatted_data_$site_to_individual_indicator <- formatted_data_$site_to_individual_indicator[,included_ids_individual_age]
-  formatted_data_$individual_indicator <- formatted_data_$individual_indicator[included_ids_individual,included_ids_individual_age]
-  
-  formatted_data_$counts <- formatted_data_$counts[,included_ids_individual_age]
-  formatted_data_$coverage <- formatted_data_$coverage[,included_ids_individual_age]
-  
-  return(formatted_data_) 
+
+  excluded_ids_individual <- seq(1,length(formatted_data_$unique_individual_true))[-included_ids_individual]
+  excluded_ids_individual_age <- seq(1,length(formatted_data_$unique_individual))[-included_ids_individual_age]
+
+  formatted_data_train <- subsample_formatted_data_index(formatted_data_,included_ids_individual,included_ids_individual_age)
+  formatted_data_validation <- subsample_formatted_data_index(formatted_data_,excluded_ids_individual,excluded_ids_individual_age)
+
+  list(train = formatted_data_train,
+       validation = formatted_data_validation) %>%
+    return
+}
+
+# Convenience function to perform the heavy lifting for splitting datasets
+four_way_subsampling <- function(formatted_data,size = 300, timepoint = c(1)) {
+  individual_based_split <- subsample_formatted_data_individuals(formatted_data,size = size)
+
+  train_ind_tp_split <- individual_based_split$train %>%
+    subsample_formatted_data_timepoints(timepoint = timepoint)
+  valid_ind_tp_split <- individual_based_split$validation %>%
+    subsample_formatted_data_timepoints(timepoint = timepoint)
+
+  list(
+    train_1 = train_ind_tp_split$train,
+    validation_1 = train_ind_tp_split$validation,
+    train_2 = valid_ind_tp_split$train,
+    validation_2 = valid_ind_tp_split$validation
+  ) %>%
+    return
+}
+
+between_sequence_variance <- function(sequences) {
+  n <- nrow(sequences)
+  m <- ncol(sequences)
+  averages <- colMeans(sequences)
+  average <- mean(averages)
+  B = (n / (m - 1)) * sum((averages - average)^2)
+  return(B)
+}
+
+within_sequence_variance <- function(sequences) {
+  variances <- apply(sequences,2,var)
+  W = mean(variances)
+  return(W)
+}
+
+potential_scale_reduction <- function(sequences) {
+  n <- nrow(sequences)
+  B <- between_sequence_variance(sequences)
+  W <- within_sequence_variance(sequences)
+  R_hat <- sqrt(((n - 1) / n) + (1/n) * (B/W))
+  return(R_hat)
+}
+
+# Keep in mind that the number of samples **has** to be divisible by n_splits
+# Splitting sequences is essential to assess stationarity
+split_sequences <- function(draws,n_splits,keep_last = 500) {
+  split_list <- seq(1,n_splits)
+  draw_names <- names(draws)
+  scalar_estimands_splits <- list()
+  scalar_estimand_names <- colnames(draws[[draw_names[1]]])
+  n_scalar_estimands <- length(scalar_estimand_names)
+  n_samples <- nrow(draws[[draw_names[1]]])
+  for (i in 1:n_scalar_estimands) {
+    scalar_estimands_splits[[scalar_estimand_names[i]]] <- lapply(
+      draws,
+      function(x) split(tail(x[,i],keep_last),split_list) %>% do.call(what = cbind)) %>%
+      do.call(what = cbind)
+  }
+  return(scalar_estimands_splits)
 }
