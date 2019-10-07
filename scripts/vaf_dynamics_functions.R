@@ -126,7 +126,9 @@ format_data <- function(full_data) {
   full_data_ <- full_data
   full_data_$individual_age <- paste(full_data_$SardID,full_data_$Age,sep = '-')
 
-  full_data_ <- full_data_[order(full_data_$Gene,full_data_$mutation_identifier),]
+  full_data_ <- full_data_[order(as.character(full_data_$Gene),
+                                 as.character(full_data$Domain_or_NoDomain_Name),
+                                 as.character(full_data_$mutation_identifier)),]
 
   unique_individual <- full_data_$individual_age %>%
     unique

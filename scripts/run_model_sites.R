@@ -1,7 +1,7 @@
 source("scripts/vaf_dynamics_functions.R")
 
 c_args <- commandArgs(trailingOnly = T)
-
+c_args <- c(1,16,"SF3B1")
 set.seed(c_args[1])
 
 dir.create('models',showWarnings = F)
@@ -12,87 +12,37 @@ print(model_name)
 
 source("scripts/prepare_data.R")
 
-train_model <- function(formatted_data) {
-  n_individuals <- length(formatted_data$unique_individual)
-  n_individuals_true <- length(formatted_data$unique_individual_true)
-  n_genes <- length(formatted_data$unique_gene)
-  n_sites <- length(formatted_data$unique_site)
+if (c_args[3] == 'all') {
+  c_args[3] <- full_formatted_data$unique_gene
+} 
 
-  coverage <- formatted_data$coverage %>%
-    as_data()
-  age <- formatted_data$ages %>%
-    as_data()
+formatted_data <- formatted_data_train_1
 
-  Y <- formatted_data$individual_indicator # The indicator for the offset per individual
-  X <- (formatted_data$counts / (formatted_data$coverage + 1)) %>%
-  as_data()  # The counts per gene/individual
+source("scripts/prepare_model_init_sites.R")
 
-  u <- normal(mean = 0, sd = 1, dim=c(n_individuals_true)) # The term for the offseet per individual
-  offset_per_individual <- t(Y) %*% u %>% t
+draws <- mcmc(m,
+              sampler = hmc(),
+              n_samples = 1000,
+              warmup = 1000,
+              initial_values = init,
+              n_cores = c_args[2])
 
-  b_mean <- variable(dim = c(n_sites,1))
-  b_sd <- variable(lower = 0,dim = c(n_sites,1))
-  b <- normal(mean = b_mean,sd = b_sd,dim = c(n_sites,1)) # The term for the site effect
-  site_effect <- greta_multiply(b, formatted_data$site_to_individual_indicator)
-  age_term <- greta_multiply(site_effect,age)
+convergence <- FALSE
+iteration <- 1
 
-  r <- greta_add(offset_per_individual,age_term)
-  mu <- logit_transform(r)
+mixing_psr <- list()
+stationary_mixing_psr <- list()
 
-  distribution(X) <- binomial(size = coverage,prob = mu)
+mixing_psr[[iteration]] <- draws %>% 
+  split_sequences(1) %>% 
+  lapply(potential_scale_reduction) %>%
+  do.call(what = c)
+stationary_mixing_psr[[iteration]] <- draws %>% 
+  split_sequences(2) %>% 
+  lapply(potential_scale_reduction) %>%
+  do.call(what = c)
 
-  init = initials(b_mean = rep(0,n_sites),
-                  b_sd = rep(1,n_sites))
-
-  m <- model(u,b,b_mean,b_sd)
-
-  draws <- mcmc(m,
-                sample = hmc(),
-                n_samples = 500,
-                initial_values = init,
-                #n_cores = 8)
-                n_cores = c_args[2])
-  
-  convergence <- FALSE
-  iteration <- 1
-  
-  mixing_psr <- list()
-  stationary_mixing_psr <- list()
-  
-  mixing_psr[[iteration]] <- draws %>% 
-    split_sequences(1) %>% 
-    lapply(potential_scale_reduction) %>%
-    do.call(what = c)
-  stationary_mixing_psr[[iteration]] <- draws %>% 
-    split_sequences(2) %>% 
-    lapply(potential_scale_reduction) %>%
-    do.call(what = c)
-  
-  while (convergence == FALSE) {
-    draws <- extra_samples(draws,500,n_cores = c_args[2])
-    
-    iteration <- iteration + 1
-    mixing_psr[[iteration]] <- draws %>% 
-      split_sequences(1) %>% 
-      lapply(potential_scale_reduction) %>%
-      do.call(what = c)
-    stationary_mixing_psr[[iteration]] <- draws %>% 
-      split_sequences(2) %>% 
-      lapply(potential_scale_reduction) %>%
-      do.call(what = c)
-    
-    print(mean(mixing_psr[[iteration]]))
-    print(mean(mixing_psr[[iteration - 1]]))
-    print(mean(stationary_mixing_psr[[iteration]]))
-    print(mean(stationary_mixing_psr[[iteration - 1]]))
-  }
-  
-  
-  list(draws) %>%
-    return
-}
-
-train_model(formatted_data_train_1)
+draws <- extra_samples(draws)
 
 # Define validation
 
