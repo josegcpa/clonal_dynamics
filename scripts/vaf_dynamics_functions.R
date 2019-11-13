@@ -4,12 +4,14 @@ use_python('/homes/josegcpa/r-crap/bin/python3',required = T)
 Sys.setenv(LD_LIBRARY_PATH = "/homes/josegcpa/r-crap/lib/")
 Sys.setenv(PYTHONPATH = "/homes/josegcpa/r-crap/lib/python3.6/site-packages")
 library(ggplot2)
+library(ggpubr)
 library(greta)
 library(ggmap)
 library(magrittr)
 library(tidyverse)
 library(bayesplot)
 library(openxlsx)
+library(gtools)
 
 map_sardinia <- function() {
   coords <- c(40.1209,9.0129)
@@ -113,12 +115,110 @@ add_term <- function(data,dist,dist_params) {
 
 load_data <- function() {
   read.table('data/ALLvariants_exclSynonymous_Xadj.txt',header = T) %>%
-    mutate(mutation_identifier = paste(START,END,REF,ALT,sep = '-')) %>%
+    mutate(mutation_identifier = paste(Gene,START,END,REF,ALT,sep = '-')) %>%
     return
 }
 
 load_domain_data <- function() {
-  read.xlsx("data/variants_bedfile_withDomainAnnotation.xlsx") %>%
+  domain_data <- read.xlsx("data/variants_bedfile_withDomainAnnotation.xlsx") 
+  colnames(domain_data)[colnames(domain_data) == 'Domain_or_NoDomain_Name'] <- "Domain"
+  
+  domain_data$Domain <- ifelse(
+    grepl("NoDomain*",domain_data$Domain) | is.na(domain_data$Domain),
+    "NoDomain",
+    domain_data$Domain
+  ) %>%
+    gsub(pattern = "Domain[0-9]+_",replacement = "")
+  
+  # ASXL1
+  domain_data$Domain[domain_data$Gene == 'ASXL1'] <- ifelse(
+    grepl("PF*",domain_data$Domain[domain_data$Gene == 'ASXL1']),
+    "ASXL1specific",
+    "Other"
+  )
+  
+  # BRCC3
+  domain_data$Domain[domain_data$Gene == 'BRCC3'] <- ifelse(
+    grepl("PF*",domain_data$Domain[domain_data$Gene == 'BRCC3']),
+    "PF01398",
+    "Other"
+  )
+  
+  # CBL 
+  domain_data$Domain[domain_data$Gene == 'CBL'] <- ifelse(
+    grepl("PF02*",domain_data$Domain[domain_data$Gene == 'CBL']),
+    "Other",
+    domain_data$Domain[domain_data$Gene == 'CBL']
+  ) 
+  domain_data$Domain[domain_data$Gene == 'CBL'] <- ifelse(
+    grepl("NoDom",domain_data$Domain[domain_data$Gene == 'CBL']) | is.na(domain_data$Domain[domain_data$Gene == 'CBL']),
+    "Other",
+    domain_data$Domain[domain_data$Gene == 'CBL']
+  )
+  
+  # CTCF 
+  domain_data$Domain[domain_data$Gene == 'CTCF'] <- ifelse(
+    grepl("PF13465",domain_data$Domain[domain_data$Gene == 'CTCF']),
+    "PF13465",
+    "Other"
+  )
+  
+  # GNB1 
+  domain_data$Domain[domain_data$Gene == 'GNB1'] <- NA
+  
+  # TP53 
+  domain_data$Domain[domain_data$Gene == 'TP53'] <- ifelse(
+    grepl("PF00",domain_data$Domain[domain_data$Gene == 'TP53']),
+    "PF00870",
+    "Other"
+  )
+  
+  # DNMT3A - domains are already relevantly labelled
+  
+  # IDH1
+  domain_data$Domain[domain_data$Gene == 'IDH1'] <- NA
+  
+  # IDH2
+  domain_data$Domain[domain_data$Gene == 'IDH2'] <- NA
+  
+  # JAK2 
+  domain_data$Domain[domain_data$Gene == 'JAK2'] <- NA
+  
+  # KRAS
+  domain_data$Domain[domain_data$Gene == 'KRAS'] <- NA
+  
+  # SF3B1 - domains are already relevantly labelled
+  
+  # PPMD1 - domains are already relevantly labelled
+  
+  # MYD88 - domains are already relevantly labelled
+  domain_data$Domain[domain_data$Gene == 'MYD88'] <- NA
+  
+  # SRSF2 - domains are already relevantly labelled
+  
+  # STAT3 - domains are already relevantly labelled
+  
+  # U2AF1
+  domain_data$Domain[domain_data$Gene == 'U2AF1'] <- NA
+  
+  # TET2
+  domain_data$Domain[domain_data$Gene == 'TET2'] <- ifelse(
+    grepl("CD",domain_data$Domain[domain_data$Gene == 'TET2']),
+    domain_data$Domain[domain_data$Gene == 'TET2'],
+    "Other"
+  )
+  
+  domain_data %>%
+    return
+}
+
+load_included_genes <- function() {
+  read.table("data/included_genes")[,1] %>%
+    return
+}
+
+load_excluded_individuals <- function() {
+  read.table("data/excluded_individuals")[,1] %>%
     return
 }
 
@@ -127,25 +227,32 @@ format_data <- function(full_data) {
   full_data_$individual_age <- paste(full_data_$SardID,full_data_$Age,sep = '-')
 
   full_data_ <- full_data_[order(as.character(full_data_$Gene),
-                                 as.character(full_data$Domain_or_NoDomain_Name),
-                                 as.character(full_data_$mutation_identifier)),]
+                                 as.character(full_data$Domain),
+                                 as.character(full_data_$amino_acid_change)),]
 
   unique_individual <- full_data_$individual_age %>%
     unique
-  unique_site <- full_data_$mutation_identifier %>%
+  unique_site <- full_data_$amino_acid_change %>%
     unique
   unique_site <- unique_site[unique_site != 'NA-NA-NA-NA']
-
-  unique_domain <- paste(full_data_$Gene,full_data_$Domain_or_NoDomain_Name,sep = '_') %>%
+  unique_site_multiple <- full_data_$amino_acid_change[full_data_$single_occurring == FALSE] %>%
     unique
 
-  unique_gene <- full_data$Gene %>%
+  unique_domain <- full_data_$Domain %>%
     unique
+  unique_domain <- grep("-NA",unique_domain,invert = T,value = T)
+
+  unique_gene <- full_data_$Gene %>%
+    unique
+  unique_gene <- unique_gene[!is.na(unique_gene)]
+  
   unique_individual_true <- full_data_$SardID %>%
     unique
 
   site_to_individual_indicator <- matrix(0,nrow = length(unique_site),
                                          ncol = length(unique_individual))
+  site_multiple_to_site_indicator <- matrix(0,nrow = length(unique_site),
+                                            ncol = length(unique_site_multiple))
   domain_to_site_indicator <- matrix(0,nrow = length(unique_site),
                                      ncol = length(unique_domain))
   gene_to_site_indicator <- matrix(0,nrow = length(unique_site),
@@ -169,14 +276,14 @@ format_data <- function(full_data) {
     do.call(what = rbind) %>%
     data.frame
   colnames(individual_age) <- c("individual","age")
-  individual_age$age %>% as.character() %>% as.numeric()
 
   for (ind in unique_individual) {
     sub_df <- full_data_[full_data_$individual_age == ind,]
-    sites <- match(sub_df$mutation_identifier,unique_site)
+    sites <- match(sub_df$amino_acid_change,unique_site)
+    sites_multiple <- match(sub_df$amino_acid_change,unique_site_multiple)
     individual <- match(ind,unique_individual)
     genes <- match(sub_df$Gene,unique_gene)
-    domains <- match(sub_df$Domain_or_NoDomain_Name,unique_domain)
+    domains <- match(sub_df$Domain,unique_domain)
     individual_true <- match(sub_df$SardID,unique_individual_true)
 
     na_index <- !is.na(genes)
@@ -187,20 +294,25 @@ format_data <- function(full_data) {
 
     individual_indicator[cbind(individual_true,individual)] <- 1
 
-    if (length(sites[]) > 0) {
+    if (length(sites) > 0) {
 
       gene_to_site_indicator[cbind(sites,genes)] <- 1
-      domain_to_site_indicator[cbind(sites,domains)] <- 1
-
+      site_multiple_to_site_indicator[cbind(sites,sites_multiple)] <- 1
       site_to_individual_indicator[cbind(sites,individual)] <- 1
-      counts[cbind(sites,individual)] <- sub_df$MUTcount[na_index]
+      counts[cbind(sites,individual)] <- sub_df$MUTcount_Xadj[na_index]
       coverage[cbind(sites,individual)] <- sub_df$TOTALcount[na_index]
     }
+      
+    if (length(!is.na(domains)) > 0) {
+      domain_to_site_indicator[cbind(sites,domains)] <- 1
+    }
+   
   }
 
   list(
     full_data = full_data_,
     site_to_individual_indicator = site_to_individual_indicator,
+    site_multiple_to_site_indicator = site_multiple_to_site_indicator,
     domain_to_site_indicator = domain_to_site_indicator,
     gene_to_site_indicator = gene_to_site_indicator,
     individual_indicator = individual_indicator,
@@ -209,6 +321,7 @@ format_data <- function(full_data) {
     unique_gene = unique_gene,
     unique_domain = unique_domain,
     unique_site = unique_site,
+    unique_site_multiple = unique_site_multiple,
     unique_individual = unique_individual,
     unique_individual_true = unique_individual_true,
     ages = ages
@@ -232,6 +345,7 @@ subsample_formatted_data_index <- function(formatted_data_,included_ids_individu
 
 subsample_formatted_data_individuals <- function(formatted_data,size = 300) {
   formatted_data_ <- formatted_data
+  
   excluded_ids_individual <- sample(1:length(formatted_data_$unique_individual_true),
                                     size = length(formatted_data_$unique_individual_true) - size,replace = FALSE)
   excluded_ids_individual_age <- formatted_data_$individual_indicator[-excluded_ids_individual,]
@@ -240,9 +354,14 @@ subsample_formatted_data_individuals <- function(formatted_data,size = 300) {
   included_ids_individual <- seq(1,length(formatted_data_$unique_individual_true))[-excluded_ids_individual]
   included_ids_individual_age <- seq(1,length(formatted_data_$unique_individual))[-excluded_ids_individual_age]
 
-  formatted_data_train <- subsample_formatted_data_index(formatted_data_,included_ids_individual,included_ids_individual_age)
-  formatted_data_validation <- subsample_formatted_data_index(formatted_data_,excluded_ids_individual,excluded_ids_individual_age)
-
+  formatted_data_train <- subsample_formatted_data_index(formatted_data_,
+                                                         included_ids_individual,
+                                                         included_ids_individual_age)
+  formatted_data_validation <- subsample_formatted_data_index(formatted_data_,
+                                                              excluded_ids_individual,
+                                                              excluded_ids_individual_age)
+  
+  
   list(train = formatted_data_train,
        validation = formatted_data_validation) %>%
     return
@@ -251,24 +370,28 @@ subsample_formatted_data_individuals <- function(formatted_data,size = 300) {
 subsample_formatted_data_timepoints <- function(formatted_data,timepoint = c(1)) {
   formatted_data_ <- formatted_data
 
-  relative_timepoint_full_data <- formatted_data_$full_data %>%
-    group_by(SardID) %>%
-    mutate(relative_timepoint = Phase - min(Phase) + 1) %>%
-    ungroup %>%
-    subset(individual_age %in% formatted_data_$unique_individual)
+  included_ids_individual_age <- match(
+    unique(formatted_data_$full_data$individual_age[formatted_data_$full_data$relative_timepoint %in% timepoint]),
+    formatted_data_$unique_individual) %>% 
+    na.exclude() %>% c
 
-
-  included_ids_individual_age <- match(relative_timepoint_full_data$individual_age[relative_timepoint_full_data$relative_timepoint %in% timepoint],
-                                       formatted_data_$unique_individual)
-
-  included_ids_individual <- formatted_data_$individual_indicator[,included_ids_individual_age]
-  included_ids_individual <- seq(1,nrow(included_ids_individual))[rowSums(included_ids_individual) >= 1]
-
-  excluded_ids_individual <- seq(1,length(formatted_data_$unique_individual_true))[-included_ids_individual]
   excluded_ids_individual_age <- seq(1,length(formatted_data_$unique_individual))[-included_ids_individual_age]
 
-  formatted_data_train <- subsample_formatted_data_index(formatted_data_,included_ids_individual,included_ids_individual_age)
-  formatted_data_validation <- subsample_formatted_data_index(formatted_data_,excluded_ids_individual,excluded_ids_individual_age)
+  formatted_data_train <- formatted_data_
+  formatted_data_train$unique_individual <- formatted_data_train$unique_individual[included_ids_individual_age]
+  formatted_data_train$ages <- formatted_data_train$ages[,included_ids_individual_age] %>% matrix %>% t
+  formatted_data_train$site_to_individual_indicator <- formatted_data_train$site_to_individual_indicator[,included_ids_individual_age]
+  formatted_data_train$individual_indicator <- formatted_data_train$individual_indicator[,included_ids_individual_age]
+  formatted_data_train$counts <- formatted_data_train$counts[,included_ids_individual_age]
+  formatted_data_train$coverage <- formatted_data_train$coverage[,included_ids_individual_age]
+
+  formatted_data_validation <- formatted_data_
+  formatted_data_validation$unique_individual <- formatted_data_validation$unique_individual[excluded_ids_individual_age]
+  formatted_data_validation$ages <- formatted_data_validation$ages[,excluded_ids_individual_age] %>% matrix %>% t
+  formatted_data_validation$site_to_individual_indicator <- formatted_data_validation$site_to_individual_indicator[,excluded_ids_individual_age]
+  formatted_data_validation$individual_indicator <- formatted_data_validation$individual_indicator[,excluded_ids_individual_age]
+  formatted_data_validation$counts <- formatted_data_validation$counts[,excluded_ids_individual_age]
+  formatted_data_validation$coverage <- formatted_data_validation$coverage[,excluded_ids_individual_age]
 
   list(train = formatted_data_train,
        validation = formatted_data_validation) %>%
