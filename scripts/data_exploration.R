@@ -3,6 +3,7 @@ source("scripts/vaf_dynamics_functions.R")
 source("scripts/prepare_data.R")
 
 mutations_per_individual <- full_data %>% 
+  subset(amino_acid_change %in% formatted_data_train_1$unique_site) %>%
   subset(Gene %in% load_included_genes()) %>% 
   subset(relative_timepoint == 1 & MUTcount_Xadj > 0) %>% 
   ggplot(aes(y = Gene,x = as.factor(SardID),fill = MUTcount_Xadj)) + 
@@ -16,7 +17,7 @@ mutation_heatmap <- full_data %>% subset(Gene %in% load_included_genes()) %>%
   group_by(Gene,Domain,amino_acid_change,relative_timepoint) %>% 
   summarise(count = sum(WTcount > 1)) %>% 
   #subset(relative_timepoint == 1) %>% 
-  ggplot(aes(x = Domain,y = amino_acid_change,fill = count)) + 
+  ggplot(aes(x = Domain,y = amino_acid_change,fill = as.factor(count))) + 
   geom_tile() + 
   facet_wrap(~ Gene,scales = "free",nrow = 1) + 
   theme_bw(base_size = 15) + 
@@ -24,7 +25,7 @@ mutation_heatmap <- full_data %>% subset(Gene %in% load_included_genes()) %>%
   theme(strip.background = element_blank(),axis.text.y = element_blank(),
         legend.position = "bottom") + 
   ylab("Site mutations") + 
-  scale_fill_continuous(name = "No. individuals with mutation") + 
+  scale_fill_discrete(name = "No. individuals with mutation") + 
   xlab("")
 
 mutation_barplot_full <- full_data %>% 
@@ -124,11 +125,13 @@ average_correlations_long$mutation_1 <- average_correlations_long$mutation_1 %>%
 average_correlations_long$mutation_2 <- average_correlations_long$mutation_2 %>%
   factor(levels = rev(sort(average_correlations_long$mutation_2 %>% unique)))
 
+average_correlations_long$value ^ 2 %>% max(na.rm = T)
+
 average_correlations_long %>%
   subset(!is.na(value)) %>%
-  ggplot(aes(x = mutation_1,y = mutation_2,fill = value)) + 
+  ggplot(aes(x = mutation_1,y = mutation_2,fill = value ^ 2)) + 
   geom_tile() +
-  scale_fill_distiller(type = "div") +
+  scale_fill_distiller(type = "div",name = "Rsquared") +
   theme_minimal() +
   theme(axis.text = element_blank(),
         axis.ticks = element_blank()) + 
@@ -143,7 +146,7 @@ average_correlations_long %>%
   ungroup() %>%
   mutate(gene_1 = factor(gene_1),gene_2 = factor(gene_2)) %>%
   mutate(gene_2 = factor(gene_2,levels = rev(levels(gene_2)))) %>%
-  ggplot(aes(x = gene_1,y = gene_2,fill = value)) + 
+  ggplot(aes(x = gene_1,y = gene_2,fill = value ^ 2)) + 
   geom_tile(color = "grey2") +
   scale_fill_distiller(type = "div") +
   theme_minimal()

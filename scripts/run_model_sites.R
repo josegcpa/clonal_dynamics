@@ -29,27 +29,31 @@ n_sites_output <- length(output_indicator)
 source("scripts/prepare_hierarchical_model_init_single_site.R")
 
 draws <- mcmc(m,
-              sampler = hmc(Lmin = 5,Lmax = 20),
-              n_samples = 5e3,
+              sampler = hmc(Lmin = 5,Lmax = 10),
+              n_samples = 2.5e3,
               warmup = 2e3,
               initial_values = init,
               n_cores = c_args[2])
 
 saveRDS(draws,file = sprintf("models/model_draws_%s_A.RDS",output_indicator))
 draws <- extra_samples(draws,n_samples = 10e3,n_cores = c_args[2])
-saveRDS(draws,file = sprintf("models/model_draws_%s_B.RDS",output_indicator))
+cosaveRDS(draws,file = sprintf("models/model_draws_%s_B.RDS",output_indicator))
 
-interval <- nrow(draws$`11`) - seq(5e3,0) 
+interval <- (nrow(draws$`11`) - seq(50e3,0)) %>%
+  Filter(f = function(x) ifelse(x >= 0,T,F))
+
 draws[interval,grep(pattern = "_mean",colnames(draws[[names(draws)[1]]]))] %>% 
-  mcmc_trace(facet_args = list(nrow=3))
+  mcmc_trace()
 draws[interval,grep(pattern = "b_gene\\[",colnames(draws[[names(draws)[1]]]))] %>% 
   mcmc_trace()
 draws[interval,grep(pattern = "b_domain\\[",colnames(draws[[names(draws)[1]]]))] %>% 
   mcmc_trace()
 draws[interval,grep(pattern = "b_site\\[",colnames(draws[[names(draws)[1]]]))] %>% 
   mcmc_trace()
-draws[interval,grep(pattern = "u\\[",colnames(draws[[names(draws)[1]]])) %>% sample(20,replace = F)] %>% 
+draws[interval,grep(pattern = "u\\[",colnames(draws[[names(draws)[1]]]))[u_mask %>% as.logical()]] %>% 
   mcmc_trace()
+
+plot_gene(formatted_data_train_1$unique_gene[14],interval)
 
 convergence <- FALSE
 iteration <- 1

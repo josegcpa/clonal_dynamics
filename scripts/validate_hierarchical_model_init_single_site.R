@@ -23,8 +23,11 @@ domain_effect <- t(t(formatted_data_validation_1$site_to_individual_indicator) %
 }
 
 if (include_genes == TRUE) {
-b_gene_inferred <- b_gene_values
-gene_effect <- t(t(formatted_data_validation_1$site_to_individual_indicator) %*% (formatted_data_validation_1$gene_to_site_indicator %*% b_gene_inferred))
+b_gene_inferred <- b_gene_values %>%
+  as_data()
+gene_effect <- t(
+  t(formatted_data_validation_1$site_to_individual_indicator) %*% (formatted_data_validation_1$gene_to_site_indicator %*% b_gene_inferred)
+  )
 }
 
 effect_list <- list()

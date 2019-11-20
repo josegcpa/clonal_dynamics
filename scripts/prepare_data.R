@@ -78,16 +78,17 @@ gene_count <- full_data %>%
 # Signaling single occurring mutations in the dataset
 full_data$single_occurring <- full_data$amino_acid_change %in% data.frame(gene_count)[gene_count$mut_1st_tp <= 1,1]
 
-# Since JAK2 has a single very important mutation, we here remove the identifier for this gene and keep only the
-# coefficient for the mutation
+# Since JAK2 and IDH2 have a single very important mutation, we here remove the effect for these gene and keep only the
+# effects for the site
 full_data$Gene[full_data$Gene == 'JAK2'] <- NA
+full_data$Gene[full_data$Gene == 'IDH2'] <- NA
 
 full_formatted_data <- format_data(full_data) # Returns a list with all the necessary data elements to use our model
 
 set.seed(round(runif(1,max=1000)))
 splits <- full_formatted_data %>% 
-  four_way_subsampling(size = round(length(unique(full_formatted_data$full_data$SardID))*0.9),
-                       timepoint = c(1,2))
+  four_way_subsampling(size = round(length(unique(full_formatted_data$full_data$SardID))*0.8),
+                       timepoint = c(1,2,3,4))
 
 formatted_data_train_1 <- splits$train_1
 formatted_data_train_2 <- splits$train_2

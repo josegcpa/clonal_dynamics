@@ -12,6 +12,7 @@ library(tidyverse)
 library(bayesplot)
 library(openxlsx)
 library(gtools)
+library(cowplot)
 
 map_sardinia <- function() {
   coords <- c(40.1209,9.0129)
@@ -187,11 +188,13 @@ load_domain_data <- function() {
   # KRAS
   domain_data$Domain[domain_data$Gene == 'KRAS'] <- NA
   
-  # SF3B1 - domains are already relevantly labelled
+  # SF3B1 - domains become irrelevant after removing truncating effects
+  domain_data$Domain[domain_data$Gene == 'SF3B1'] <- NA
   
-  # PPMD1 - domains are already relevantly labelled
+  # PPM1D - domains become irrelevant after removing truncating effects
+  domain_data$Domain[domain_data$Gene == 'PPM1D'] <- NA
   
-  # MYD88 - domains are already relevantly labelled
+  # MYD88
   domain_data$Domain[domain_data$Gene == 'MYD88'] <- NA
   
   # SRSF2 - domains are already relevantly labelled
@@ -456,3 +459,27 @@ split_sequences <- function(draws,n_splits,keep_last = 500) {
   }
   return(scalar_estimands_splits)
 }
+
+plot_gene <- function(gene,interval) {
+  print(gene)
+  site_colnames <- colnames(draws[[1]]) %>% grep(pattern = '_site')
+  site_colnames <- site_colnames[formatted_data_train_1$unique_site_multiple %>% grep(pattern = gene)]
+  domain_colnames <- colnames(draws[[1]]) %>% grep(pattern = '_domain')
+  domain_colnames <- domain_colnames[formatted_data_train_1$unique_domain %>% grep(pattern = gene)]
+  gene_colnames <- colnames(draws[[1]]) %>% grep(pattern = '_gene')
+  gene_colnames <- gene_colnames[formatted_data_train_1$unique_gene %>% grep(pattern = gene)]
+  draws[interval,c(site_colnames,domain_colnames,gene_colnames)] %>%
+    mcmc_trace() %>%
+    return
+}
+
+which_max <- function(vec) {
+  unel <- unique(vec)
+  if (length(unel) > 1) {
+    return(which.max(vec))
+  } else {
+    return(NA)
+  }
+}
+
+
