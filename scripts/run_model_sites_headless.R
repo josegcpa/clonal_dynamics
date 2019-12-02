@@ -1,6 +1,7 @@
 source("scripts/vaf_dynamics_functions.R")
 
 c_args <- commandArgs(trailingOnly = T)
+set.seed(c_args[3])
 
 include_sites <- T
 include_domains <- T
@@ -21,7 +22,7 @@ source("scripts/prepare_hierarchical_model_init_single_site.R")
 draws <- mcmc(m,
               sampler = hmc(Lmin = 5,Lmax = 40),
               n_samples = 25e3,
-              warmup = 25e3,
+              warmup = 50e3,
               initial_values = init,
               n_cores = c_args[2])
 

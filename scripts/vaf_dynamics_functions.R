@@ -1,8 +1,8 @@
 library(reticulate)
 #use_virtualenv("/homes/josegcpa/.virtualenvs/r-reticulate/",required = T)
 use_python('/homes/josegcpa/r-crap/bin/python3',required = T)
-Sys.setenv(LD_LIBRARY_PATH = "/homes/josegcpa/r-crap/lib/")
-Sys.setenv(PYTHONPATH = "/homes/josegcpa/r-crap/lib/python3.6/site-packages")
+Sys.setenv(LD_LIBRARY_PATH = paste(Sys.getenv('LD_LIBRARY_PATH'), "/homes/josegcpa/r-crap/lib", sep = ":"))
+Sys.setenv(PYTHONPATH="/homes/josegcpa/r-crap/lib/python3.6/site-packages")
 library(ggplot2)
 library(ggpubr)
 library(greta)
@@ -13,6 +13,7 @@ library(bayesplot)
 library(openxlsx)
 library(gtools)
 library(cowplot)
+tf <- import("tensorflow")
 
 map_sardinia <- function() {
   coords <- c(40.1209,9.0129)
@@ -289,7 +290,7 @@ format_data <- function(full_data) {
     domains <- match(sub_df$Domain,unique_domain)
     individual_true <- match(sub_df$SardID,unique_individual_true)
 
-    na_index <- !is.na(genes)
+    na_index <- !is.na(sites)
     sites <- sites[na_index]  
     genes <- genes[na_index]
 
@@ -298,7 +299,6 @@ format_data <- function(full_data) {
     individual_indicator[cbind(individual_true,individual)] <- 1
 
     if (length(sites) > 0) {
-
       gene_to_site_indicator[cbind(sites,genes)] <- 1
       site_multiple_to_site_indicator[cbind(sites,sites_multiple)] <- 1
       site_to_individual_indicator[cbind(sites,individual)] <- 1
@@ -482,4 +482,143 @@ which_max <- function(vec) {
   }
 }
 
+get_site_indicators <- function(formatted_data,sites) {
+  site_indicator <- formatted_data$unique_site %in% c(sites)
+  multipoint_indicator <- (formatted_data$site_to_individual_indicator[site_indicator,] > 0) %>%
+    as.matrix %>%
+    apply(2,as.numeric)
+  if (length(sites) > 1) {
+    multipoint_indicator <- t(multipoint_indicator)
+  }
+  single_individual_indicator <- formatted_data$individual_indicator %*% multipoint_indicator
+  single_individual_indicator_flat <- single_individual_indicator %>% rowSums %>% as.logical()
+  multipoint_indicator_flat <- multipoint_indicator %>% rowSums %>% as.logical()
+  list(site = site_indicator,
+       single = single_individual_indicator_flat,
+       multipoint = multipoint_indicator_flat) %>%
+    return
+}
 
+apply_indicators <- function(formatted_data,all_site_indicators) {
+  formatted_data_ <- formatted_data
+  site_indicator <- all_site_indicators$site
+  single_individual_indicator_flat <- all_site_indicators$single
+  multipoint_indicator_flat <- all_site_indicators$multipoint
+  
+  formatted_data_$site_to_individual_indicator <- formatted_data_$site_to_individual_indicator[site_indicator,multipoint_indicator_flat]
+  formatted_data_$individual_indicator <- formatted_data_$individual_indicator[single_individual_indicator_flat,multipoint_indicator_flat]
+  formatted_data_$counts <- formatted_data_$counts[site_indicator,multipoint_indicator_flat]
+  formatted_data_$ages <- formatted_data_$ages[,multipoint_indicator_flat]
+  formatted_data_$coverage <- formatted_data_$coverage[site_indicator,multipoint_indicator_flat]
+  formatted_data_$unique_individual <- formatted_data_$unique_individual[multipoint_indicator_flat]
+  formatted_data_$unique_individual_true <- formatted_data_$unique_individual_true[single_individual_indicator_flat]
+  return(formatted_data_)
+}
+
+filter_individuals_sites <- function(formatted_data,sites) {
+  all_site_indicators <- get_site_indicators(formatted_data,sites)
+  formatted_data_ <- apply_indicators(formatted_data,all_site_indicators)
+  return(formatted_data_)
+}
+
+filter_individuals_gene <- function(formatted_data,gene) {
+  formatted_data_ <- formatted_data
+  site_indicator <- formatted_data$unique_site %>% 
+    grepl(pattern = paste0(gene,'-'))
+  multipoint_indicator <- (formatted_data$site_to_individual_indicator[site_indicator,] > 0) %>%
+    apply(2,as.numeric)
+  single_individual_indicator <- formatted_data$individual_indicator %*% t(multipoint_indicator)
+  single_individual_indicator <- rowSums(single_individual_indicator > 0) %>%
+    as.logical()
+  multipoint_indicator <- colSums(multipoint_indicator) %>%
+    as.logical()
+  formatted_data_$site_to_individual_indicator <- formatted_data_$site_to_individual_indicator[site_indicator,multipoint_indicator]
+  formatted_data_$individual_indicator <- formatted_data_$individual_indicator[single_individual_indicator,multipoint_indicator]
+  formatted_data_$counts <- formatted_data_$counts[site_indicator,multipoint_indicator]
+  formatted_data_$ages <- formatted_data_$ages[,multipoint_indicator]
+  formatted_data_$coverage <- formatted_data_$coverage[site_indicator,multipoint_indicator]
+  formatted_data_$unique_individual <- formatted_data_$unique_individual[multipoint_indicator]
+  formatted_data_$unique_individual_true <- formatted_data_$unique_individual_true[single_individual_indicator]
+  return(formatted_data_)
+}
+
+variable_summaries <- function(df) {
+  c_names <- colnames(df)
+  out <- df %>% 
+    apply(2, function(x) {
+      data.frame(
+        values = c(mean(x),var(x),quantile(x,c(0.025,0.05,0.5,0.95,0.975))),
+        labels = c("mean","var","0.025","0.05","0.50","0.95","0.975")
+      )
+    }) %>%
+    do.call(what = rbind)
+  rownames(out) <- NULL
+  out$variable <- rep(c_names,each = 7)
+  return(out)
+}
+
+density_binomial_interval <- function(n,p,size_interval) {
+  sapply(size_interval,function(x) dbinom(x,n,p)) %>%
+    return
+}
+
+unary_vector <- function(idx,max_idx) {
+  uv <- rep(0,max_idx)
+  uv[idx] <- 1
+  return(uv)
+}
+
+linearize <- function(formatted_data){
+  formatted_data_ <- formatted_data
+  indicator_indexes <- (formatted_data$coverage > 0) %>%
+    which(arr.ind = T)
+  linearized_coverage <- formatted_data$coverage[indicator_indexes] %>%
+    matrix
+  linearized_counts <- formatted_data$counts[indicator_indexes] %>%
+    matrix
+  age_indicator <- indicator_indexes[,2] %>% 
+    sapply(function(x) unary_vector(x,max(indicator_indexes[,2])))
+  linearized_ages <- formatted_data_$ages %*% age_indicator
+  linearized_site_indicator <- indicator_indexes[,1] %>% 
+    sapply(function(x) unary_vector(x,max(indicator_indexes[,1])))
+  offset_indicator <- indicator_indexes[,2] %>%
+    sapply(function(x) formatted_data$individual_indicator[,x])
+  list(indicator_indexes = indicator_indexes,
+       coverage = linearized_coverage,
+       counts= linearized_counts,
+       age_indicator = age_indicator,
+       ages = t(linearized_ages),
+       site_indicator = linearized_site_indicator,
+       offset_indicator = offset_indicator) %>%
+    return
+}
+
+submit_r_commands <- function(...,n_cores = 32,mem = 32000) {
+  env_var <- c(
+    "export LSF_BINDIR=/ebi/lsf/ebi/10.1/linux3.10-glibc2.17-x86_64/bin",
+    "export LSF_ENVDIR=/ebi/lsf/ebi/conf",
+    "export LSF_LIBDIR=/ebi/lsf/ebi/10.1/linux3.10-glibc2.17-x86_64/lib",
+    "export LSF_SERVERDIR=/ebi/lsf/ebi/10.1/linux3.10-glibc2.17-x86_64/etc",
+    "export LSNULFILE=/dev/null\n"
+  ) %>% paste(collapse = '\n')
+  template <- paste0(env_var,"bsub -M %s -n %s Rscript -e '%s'")
+  commands <- paste(...,sep = '; ')
+  command <- sprintf(template,mem,n_cores,commands) 
+  cat(paste(command,'\n'))
+  system(command)
+}
+
+submit_commands <- function(...,n_cores = 32,mem = 32000) {
+  env_var <- c(
+    "export LSF_BINDIR=/ebi/lsf/ebi/10.1/linux3.10-glibc2.17-x86_64/bin",
+    "export LSF_ENVDIR=/ebi/lsf/ebi/conf",
+    "export LSF_LIBDIR=/ebi/lsf/ebi/10.1/linux3.10-glibc2.17-x86_64/lib",
+    "export LSF_SERVERDIR=/ebi/lsf/ebi/10.1/linux3.10-glibc2.17-x86_64/etc",
+    "export LSNULFILE=/dev/null\n"
+  ) %>% paste(collapse = '\n')
+  template <- paste0(env_var,"bsub -M %s -n %s '%s'")
+  commands <- paste(...,sep = '; ')
+  command <- sprintf(template,mem,n_cores,commands) 
+  cat(paste(command,'\n'))
+  system(command)
+}

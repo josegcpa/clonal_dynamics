@@ -66,29 +66,23 @@ full_data <- full_data %>%
   mutate(relative_timepoint = Phase - min(Phase) + 1) %>%
   ungroup
 
-# Counting which mutations occur more than once in the first relative timepoint
+# Counting which mutations occur on more than one individual
 gene_count <- full_data %>% 
-  distinct(Gene,Domain,amino_acid_change,SardID,.keep_all = T) %>%
   group_by(amino_acid_change,SardID) %>%
-  summarise(n_mut = table(amino_acid_change)) %>%
+  summarise(n_mut = sum(VAF > 0)) %>%
   ungroup() %>%
   group_by(amino_acid_change) %>%
-  summarise(mut_1st_tp = sum(n_mut))
+  summarise(mut_1st_tp = length(n_mut))
 
 # Signaling single occurring mutations in the dataset
 full_data$single_occurring <- full_data$amino_acid_change %in% data.frame(gene_count)[gene_count$mut_1st_tp <= 1,1]
-
-# Since JAK2 and IDH2 have a single very important mutation, we here remove the effect for these gene and keep only the
-# effects for the site
-full_data$Gene[full_data$Gene == 'JAK2'] <- NA
-full_data$Gene[full_data$Gene == 'IDH2'] <- NA
 
 full_formatted_data <- format_data(full_data) # Returns a list with all the necessary data elements to use our model
 
 set.seed(round(runif(1,max=1000)))
 splits <- full_formatted_data %>% 
-  four_way_subsampling(size = round(length(unique(full_formatted_data$full_data$SardID))*0.8),
-                       timepoint = c(1,2,3,4))
+  four_way_subsampling(size = round(length(unique(full_formatted_data$full_data$SardID))*0.98),
+                       timepoint = c(1,2,3))
 
 formatted_data_train_1 <- splits$train_1
 formatted_data_train_2 <- splits$train_2

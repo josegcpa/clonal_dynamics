@@ -26,8 +26,8 @@ count_mask <- formatted_data_train_1$counts[output_indicator,] > 0
 
 stii <- formatted_data_train_1$site_to_individual_indicator
 
-u_mean <- normal(mean = -5,sd = 1)
-u_sd <- lognormal(meanlog = 0,sdlog = 1,
+u_mean <- normal(mean = -5,sd = 1,truncation = c(-Inf,0))
+u_sd <- lognormal(meanlog = 0,sdlog = 0.01,
                   truncation = c(0,Inf),dim = 1)
 u <- normal(mean = u_mean,sd = u_sd,
             dim = c(n_sites_output,n_individuals_true)) # The term for the offset per individual
@@ -80,7 +80,7 @@ valid_positions_all_final<- valid_positions_all %>%
 gene_identifiability_mask <- !((valid_positions_all_final$gene_count_multiple == 1) | (valid_positions_all_final$gene_count == valid_positions_all_final$max_domain_count_per_gene)) %>%
   as.numeric() %>%
   replicate(n = length(formatted_data_train_1$unique_gene))
-domain_identifiability_mask <- !(valid_positions_all_final$domain_count_multiple == 1) %>%
+domain_identifiability_mask <- !((valid_positions_all_final$domain_count_multiple == 1) | (valid_positions_all_final$domain_count > 1e6)) %>%
   as.numeric() %>%
   replicate(n = length(formatted_data_train_1$unique_domain))
 
@@ -89,8 +89,22 @@ site_mask <- (t(stii) %*% formatted_data_train_1$site_multiple_to_site_indicator
   t
 
 domain_mask <- (t(stii) %*% formatted_data_train_1$domain_to_site_indicator)[formatted_data_train_1$counts[output_indicator,] > 0,] %>%
-  colSums() %>% as.logical() %>% as.numeric() %>%
-  t
+  colSums() * (data.frame(
+    gene = valid_positions_all_final$gene,
+    dom = valid_positions_all_final$domain,
+    ident = domain_identifiability_mask[,1]
+  ) %>% 
+    subset(!(gene %in% c("JAK2","IDH2"))) %>% 
+    subset(!is.na(dom)) %>% 
+    group_by(dom) %>%
+    summarise(indi = sum(ident) %>% as.logical %>% as.numeric) %>%
+    select(indi)
+  )
+domain_mask <- domain_mask$indi %>% 
+  as.logical() %>% 
+  as.numeric() %>%
+  t %>% 
+  as_data()
 
 gene_mask <- (t(stii) %*% formatted_data_train_1$gene_to_site_indicator)[formatted_data_train_1$counts[output_indicator,] > 0,] %>%
   colSums() %>% 
@@ -147,7 +161,11 @@ if (include_domains == TRUE){
 
   b_domain <- normal(mean = b_domain_mean,
                      sd = b_domain_sd,dim = c(n_sites_output,n_domains)) * domain_mask
-  domain_effect <- t(t(stii) %*% (formatted_data_train_1$domain_to_site_indicator %*% t(b_domain)))
+  domain_effect <- t(
+    t(stii) %*% (
+      (formatted_data_train_1$domain_to_site_indicator * domain_identifiability_mask) %*% t(b_domain)
+    )
+    )
 }
 
 if (include_genes == TRUE) {
@@ -169,7 +187,7 @@ model_include_list[["u"]] <- u
 model_include_list[["u_mean"]] <- u_mean
 model_include_list[["u_sd"]] <- u_sd
 
-init_list[["u_mean"]] <- replicate(n = 1,-2) %>% t
+init_list[["u_mean"]] <- replicate(n = 1,-10) %>% t
 
 if (include_sites == TRUE) {
   effect_list[["sites"]] <- site_effect

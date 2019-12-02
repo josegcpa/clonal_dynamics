@@ -64,6 +64,15 @@ mutation_barplot_sites <- full_data %>%
         legend.position = "bottom") + 
   xlab("")
 
+mega_map <- formatted_data_train_1$full_data %>%
+  subset(relative_timepoint == 1) %>%
+  ggplot(aes(y = SardID %>% as.factor,x = amino_acid_change,fill = MUTcount_Xadj)) + 
+  geom_tile() + 
+  facet_wrap(~ Gene,nrow = 1,scales = "free_x") + 
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank())
+
 plot_grid(mutation_heatmap,
           mutation_barplot_full,
           mutation_barplot_sites,

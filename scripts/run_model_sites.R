@@ -2,7 +2,7 @@ source("scripts/vaf_dynamics_functions.R")
 
 c_args <- commandArgs(trailingOnly = T)
 c_args <- c(1,32,"SF3B1")
-set.seed(sample.int(1))
+set.seed(c_args[1])
 
 include_sites <- T
 include_domains <- T
@@ -22,14 +22,14 @@ if (c_args[3] == 'all') {
 
 total_cases <- formatted_data_train_1$site_to_individual_indicator %>% rowSums
 total_cases_order <- total_cases %>% order(decreasing = T)
-print(total_cases[total_cases_order[1:7]])
+print(total_cases[total_cases_order[1:29]])
 output_indicator <- total_cases_order[1]
 n_sites_output <- length(output_indicator)
 
 source("scripts/prepare_hierarchical_model_init_single_site.R")
 
 draws <- mcmc(m,
-              sampler = hmc(Lmin = 5,Lmax = 10),
+              sampler = hmc(Lmin = 10,Lmax = 20),
               n_samples = 2.5e3,
               warmup = 2e3,
               initial_values = init,
@@ -37,23 +37,32 @@ draws <- mcmc(m,
 
 saveRDS(draws,file = sprintf("models/model_draws_%s_A.RDS",output_indicator))
 draws <- extra_samples(draws,n_samples = 10e3,n_cores = c_args[2])
-cosaveRDS(draws,file = sprintf("models/model_draws_%s_B.RDS",output_indicator))
+saveRDS(draws,file = sprintf("models/model_draws_%s_B.RDS",output_indicator))
 
 interval <- (nrow(draws$`11`) - seq(50e3,0)) %>%
   Filter(f = function(x) ifelse(x >= 0,T,F))
 
+draws[interval,grep(pattern = "_sd",colnames(draws[[names(draws)[1]]]))] %>% 
+  mcmc_trace()
 draws[interval,grep(pattern = "_mean",colnames(draws[[names(draws)[1]]]))] %>% 
   mcmc_trace()
-draws[interval,grep(pattern = "b_gene\\[",colnames(draws[[names(draws)[1]]]))] %>% 
+draws[interval,grep(pattern = "b_gene\\[",colnames(draws[[names(draws)[1]]]))[gene_mask %>% as.logical()]] %>% 
   mcmc_trace()
-draws[interval,grep(pattern = "b_domain\\[",colnames(draws[[names(draws)[1]]]))] %>% 
+draws[interval,grep(pattern = "b_domain\\[",colnames(draws[[names(draws)[1]]]))[domain_mask %>% as.logical()]] %>% 
   mcmc_trace()
-draws[interval,grep(pattern = "b_site\\[",colnames(draws[[names(draws)[1]]]))] %>% 
+draws[interval,grep(pattern = "b_site\\[",colnames(draws[[names(draws)[1]]]))[site_mask %>% as.logical()]] %>% 
   mcmc_trace()
 draws[interval,grep(pattern = "u\\[",colnames(draws[[names(draws)[1]]]))[u_mask %>% as.logical()]] %>% 
   mcmc_trace()
 
-plot_gene(formatted_data_train_1$unique_gene[14],interval)
+draws[interval,c(
+  grep(pattern = "b_gene\\[",colnames(draws[[names(draws)[1]]]))[gene_mask %>% as.logical()],
+  grep(pattern = "b_domain\\[",colnames(draws[[names(draws)[1]]]))[domain_mask %>% as.logical()],
+  grep(pattern = "b_site\\[",colnames(draws[[names(draws)[1]]]))[site_mask %>% as.logical()]
+)] %>%
+  mcmc_trace()
+
+plot_gene(formatted_data_train_1$unique_gene[17],interval)
 
 convergence <- FALSE
 iteration <- 1

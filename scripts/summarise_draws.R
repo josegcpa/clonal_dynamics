@@ -23,10 +23,7 @@ include_domains <- T
 include_genes <- T
 
 source("/nfs/research1/gerstung/josegcpa/projects/05VAF_DYNAMICS/scripts/prepare_data.R")
-total_cases <- formatted_data_train_1$site_to_individual_indicator %>% rowSums
-total_cases_order <- total_cases %>% order(decreasing = T)
-print(total_cases[total_cases_order[1:32]])
-output_indicator <- total_cases_order[as.numeric(c_args[1])]
+output_indicator <- as.numeric(c_args[1])
 n_sites_output <- length(output_indicator)
 
 draw_a <- readRDS(

@@ -15,29 +15,31 @@ r2 <- c()
 
 for (summary_file in list.files("summaries",full.names = T)) {
   data_list <- readRDS(summary_file)
+  total_cases_index <- str_match(string = summary_file,pattern = '[0-9]+') %>% as.numeric()
   gene_list[[data_list$gene]] <- data_list$b_gene_summaries %>%
     subset(labels %in% c("0.025","0.975","0.50")) %>%
     spread(value = values,key = labels) %>%
-    mutate(site = data_list$gene,r2 = data_list$r2[2],n = total_cases[str_match(string = summary_file,pattern = '[0-9]+') %>% as.numeric()]) 
+    mutate(site = data_list$gene,r2 = data_list$r2[2],n = total_cases[total_cases_index]) 
   domain_list[[data_list$gene]] <- data_list$b_domain_summaries %>%
     subset(labels %in% c("0.025","0.975","0.50")) %>%
     spread(value = values,key = labels) %>%
-    mutate(site = data_list$gene,r2 = data_list$r2[2],n = total_cases[str_match(string = summary_file,pattern = '[0-9]+') %>% as.numeric()]) 
+    mutate(site = data_list$gene,r2 = data_list$r2[2],n = total_cases[total_cases_index]) 
   site_list[[data_list$gene]] <- data_list$b_site_summaries %>%
     subset(labels %in% c("0.025","0.975","0.50")) %>%
     spread(value = values,key = labels) %>%
-    mutate(site = data_list$gene,r2 = data_list$r2[2],n = total_cases[str_match(string = summary_file,pattern = '[0-9]+') %>% as.numeric()])
-  counts[data_list$gene] <- total_cases[str_match(string = summary_file,pattern = '[0-9]+') %>% as.numeric()]
+    mutate(site = data_list$gene,r2 = data_list$r2[2],n = total_cases[total_cases_index])
+  counts[data_list$gene] <- total_cases[total_cases_index]
   r2[data_list$gene] <- data_list$r2[2]
 }
 
 gene_plot <- gene_list %>%
   do.call(what = rbind) %>%
-  subset(n >= 8) %>%
+  subset(n >= 6) %>%
   mutate(site = factor(site,levels = formatted_data_train_1$unique_site[total_cases_order],ordered = T)) %>%
   ggplot(aes(x = variable, y = `0.50`)) +
   geom_bar(stat = "identity") +
   geom_errorbar(aes(ymin = `0.025`,ymax = `0.975`)) + 
+  geom_hline(yintercept = 0) +
   theme_minimal(base_size = 10) +
   facet_wrap(~ site,ncol = 1,scales = "free_y") +
   ylab("") + 
@@ -46,11 +48,12 @@ gene_plot <- gene_list %>%
 
 domain_plot <- domain_list %>%
   do.call(what = rbind) %>%
-  subset(n >= 8) %>%
+  subset(n >= 6) %>%
   mutate(site = factor(site,levels = formatted_data_train_1$unique_site[total_cases_order],ordered = T)) %>%
   ggplot(aes(x = variable, y = `0.50`)) +
   geom_bar(stat = "identity") +
   geom_errorbar(aes(ymin = `0.025`,ymax = `0.975`)) + 
+  geom_hline(yintercept = 0) +
   theme_minimal(base_size = 10) +
   facet_wrap(~ site,ncol = 1,scales = "free_y") +
   ylab("") + 
@@ -59,11 +62,12 @@ domain_plot <- domain_list %>%
 
 site_plot <- site_list %>%
   do.call(what = rbind) %>%
-  subset(n >= 8) %>%
+  subset(n >= 6) %>%
   mutate(site = factor(site,levels = formatted_data_train_1$unique_site[total_cases_order],ordered = T)) %>%
   ggplot(aes(x = substr(variable,1,20), y = `0.50`)) +
   geom_bar(stat = "identity") +
   geom_errorbar(aes(ymin = `0.025`,ymax = `0.975`)) + 
+  geom_hline(yintercept = 0) +
   theme_minimal(base_size = 10) +
   facet_wrap(~ site,ncol = 1,scales = "free_y") +
   ylab("") + 
@@ -74,7 +78,7 @@ count_plot <- data.frame(
   counts = counts,
   site = factor(names(counts),levels = formatted_data_train_1$unique_site[total_cases_order],ordered = T)
 ) %>%
-  subset(counts >= 8) %>%
+  subset(counts >= 6) %>%
   ggplot(aes(fill = counts, x = 0.5,y = 0.5)) +
   geom_tile() + 
   geom_label(aes(label = counts),fill = "white",alpha = 0.7,label.r = unit(0,"lines"),label.size = 0) +
