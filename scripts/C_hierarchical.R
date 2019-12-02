@@ -1,19 +1,19 @@
 # Global parameters
 
 ## Age-dependent effects
-b_site_mean_sd <- cauchy(location = 0,scale = 0.1,
+b_site_mean_sd <- cauchy(location = 0,scale = 1,
                          truncation = c(0,Inf),dim = 1)
 b_site_mean <- normal(mean = 1,sd = b_site_mean_sd,dim = 1)
 b_site_sd <- lognormal(meanlog = 0,sdlog = 1,
                        truncation = c(0,Inf),dim = 1)
 
-b_domain_mean_sd <- cauchy(location = 0,scale = 0.1,
+b_domain_mean_sd <- cauchy(location = 0,scale = 1,
                          truncation = c(0,Inf),dim = 1)
 b_domain_mean <- normal(mean = 1,sd = b_domain_mean_sd,dim = 1)
 b_domain_sd <- lognormal(meanlog = 0,sdlog = 1,
                          truncation = c(0,Inf),dim = 1)
 
-b_gene_mean_sd <- cauchy(location = 0,scale = 0.1,
+b_gene_mean_sd <- cauchy(location = 0,scale = 1,
                          truncation = c(0,Inf),dim = 1)
 b_gene_mean <- normal(mean = 1,sd = b_gene_mean_sd,dim = 1)
 b_gene_sd <- lognormal(meanlog = 0,sdlog = 1,
@@ -25,9 +25,19 @@ u_mean <- normal(mean = 0,
 u_sd <- lognormal(meanlog = 0,sdlog = 10,
                   truncation = c(0,Inf),dim = 1)
 
+train_subset <- formatted_data_train_1
+
+gene_idxs <- lapply(
+  train_subset$unique_site,
+  function(x) unlist(str_split(x,'-'))[[1]]
+) %>% unlist %in% gene_list
+gene_idxs <- (gene_idxs * (train_subset$site_to_individual_indicator %>% rowSums() >= 3)) %>%
+  as.logical()
+sub_gene_mask <- train_subset$unique_gene %in% gene_list
+
 # Identifiability
 
-gene_count <- site_list %>%
+gene_count <- train_subset$unique_site[gene_idxs] %>%
   lapply(function(x) unlist(str_split(x,'-'))[[1]]) %>%
   unlist %>%
   table %>%
@@ -56,16 +66,6 @@ domain_site_mask <- match(domain_list,domain_site_count$Domain[domain_site_count
   as.logical %>%
   as.numeric %>% 
   t
-
-train_subset <- formatted_data_train_1
-
-gene_idxs <- lapply(
-  train_subset$unique_site,
-  function(x) unlist(str_split(x,'-'))[[1]]
-) %>% unlist %in% gene_list
-gene_idxs <- (gene_idxs * (train_subset$site_to_individual_indicator %>% rowSums() >= 3)) %>%
-  as.logical()
-sub_gene_mask <- train_subset$unique_gene %in% gene_list
 
 n_individuals <- length(train_subset$unique_individual)
 n_individuals_true <- length(train_subset$unique_individual_true)
@@ -100,7 +100,7 @@ b_domain <- normal(mean = b_domain_mean,
                    dim = c(1,length(domain_list))) * domain_site_mask
 b_gene <- normal(mean = b_gene_mean,
                  sd = b_gene_sd,
-                 dim = c(1,length(gene_list))) * gene_mask * gene_domain_mask * t(sub_gene_mask)
+                 dim = c(1,length(gene_list))) * gene_mask * gene_domain_mask
 
 u_idx <- ((train_subset$site_to_individual_indicator[gene_idxs,] %*% t(train_subset$individual_indicator)) > 0) %>%
   which(arr.ind = T)

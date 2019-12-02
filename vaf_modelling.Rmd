@@ -53,6 +53,11 @@ full_data %>% subset(single_occurring == F) %>% ggplot(aes(x = relative_timepoin
 
 ## Modelling 
 
+**General remarks**
+
+* Point and rectangle charts refer to the values for the correlation coefficients - I am a bit wary of using these as most of the times we are assessing a pearson correlation between 2 points, which yields fairly misleading values. The point values refer to R^2 values for sites, while the rectangles refer to the average R^2 per gene
+* Line and point charts are used to observer the values for the coefficients 
+
 ```{r defining_site_domain_gene_lists}
 site_list <- formatted_data_train_1$unique_site_multiple
 domain_list <- formatted_data_train_1$unique_domain
@@ -61,12 +66,12 @@ gene_list <- formatted_data_train_1$unique_gene
 
 ### Model A - modelling each mutant as an effect of the gene
 
-This is the simples model conceivable, despite having a fairly limited scope in explainability. Here, each count is bined in its respective gene.
+This is the simplest model conceivable, despite having a fairly limited scope in explainability. Here, each count is bined in its respective gene.
 
 $$
 adj.counts_i = counts_i + 1
 \\
-\sigma_{\mu_{gene}} \sim Cauchy(0,0.01)
+\sigma_{\mu_{gene}} \sim halfCauchy(0,0.01)
 \\
 Site\ parameters: \mu_{gene} \sim N(0,\sigma_{\mu_{gene}}),\sigma_{gene} \sim logN(0,1)
 \\
@@ -76,33 +81,33 @@ Model_A: adj.counts_i \sim B(coverage,ilogit(age*N(\mu_{gene},\sigma_{gene}) + N
 $$
 
 ```{r, model_A_simulation}
-if (!file.exists('models/model_A.RDS')) {
- submit_r_commands('source("scripts/vaf_dynamics_functions.R")',
-                   'set.seed(42)',
-                   'source("scripts/prepare_data.R")',
-                   'site_list <- formatted_data_train_1$unique_site_multiple',
-                   'domain_list <- formatted_data_train_1$unique_domain',
-                   'gene_list <- formatted_data_train_1$unique_gene',
-                   'source("scripts/A_gene_bin.R")',
-                   'draws <- mcmc(m,sampler = hmc(Lmin = 5,Lmax = 10),n_samples = 10e3,warmup = 2e3,n_cores = 32,thin = 2)',
-                   'b_values <- calculate(b,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                   'b_mean_values <- calculate(b_gene_mean,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                   'b_sd_values <- calculate(b_gene_sd,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                   'u_values <- calculate(u,draws) %>% lapply(function(x) tail(x,2500)) %>%  do.call(what = rbind) %>% variable_summaries()',
-                   'list(b_values=b_values,b_mean_values=b_mean_values,b_sd_values=b_sd_values,u_values=u_values,u_idx=u_idx,gene_idxs=gene_idxs) %>% saveRDS(file = "models/model_A.RDS")',
-                    n_cores = 32,
-                    mem = 64e3)
-}
-
-source("scripts/A_gene_bin.R")
-
-draws <- mcmc(m,
-              sampler = hmc(Lmin = 5,Lmax = 10),
-              n_samples = 10e3,
-              warmup = 0.5e3,
-              n_cores = 32,
-              thin = 2)
-
+# if (!file.exists('models/model_A.RDS')) {
+#  submit_r_commands('source("scripts/vaf_dynamics_functions.R")',
+#                    'set.seed(42)',
+#                    'source("scripts/prepare_data.R")',
+#                    'site_list <- formatted_data_train_1$unique_site_multiple',
+#                    'domain_list <- formatted_data_train_1$unique_domain',
+#                    'gene_list <- formatted_data_train_1$unique_gene',
+#                    'source("scripts/A_gene_bin.R")',
+#                    'draws <- mcmc(m,sampler = hmc(Lmin = 5,Lmax = 10),n_samples = 10e3,warmup = 2e3,n_cores = 32,thin = 2)',
+#                    'b_values <- calculate(b,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                    'b_mean_values <- calculate(b_gene_mean,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                    'b_sd_values <- calculate(b_gene_sd,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                    'u_values <- calculate(u,draws) %>% lapply(function(x) tail(x,2500)) %>%  do.call(what = rbind) %>% variable_summaries()',
+#                    'list(b_values=b_values,b_mean_values=b_mean_values,b_sd_values=b_sd_values,u_values=u_values,u_idx=u_idx,gene_idxs=gene_idxs) %>% saveRDS(file = "models/model_A.RDS")',
+#                     n_cores = 32,
+#                     mem = 64e3)
+# }
+# 
+# source("scripts/A_gene_bin.R")
+# 
+# draws <- mcmc(m,
+#               sampler = hmc(Lmin = 5,Lmax = 10),
+#               n_samples = 10e3,
+#               warmup = 0.5e3,
+#               n_cores = 32,
+#               thin = 2)
+#
 #mcmc_trace(draws[,colnames(draws$`11`)[grepl('b\\[',colnames(draws$`11`))]])
 #mcmc_trace(draws[,colnames(draws$`11`)[grepl('u\\[',colnames(draws$`11`))] %>% sample(20)])
 
@@ -123,9 +128,9 @@ n_individuals_true <- val_subset$unique_individual_true %>%
 
 X_val <- t(val_subset$counts[values_model_a$gene_idxs,] + 1)
 
-b_values_val <- values_model_a$b_values$values[b_values$labels == 'mean'] %>% 
+b_values_val <- values_model_a$b_values$values[values_model_a$b_values$labels == 'mean'] %>% 
   matrix(nrow=1)
-u_values_val_sparse <- values_model_a$u_values$values[u_values$labels == 'mean'] 
+u_values_val_sparse <- values_model_a$u_values$values[values_model_a$u_values$labels == 'mean'] 
 u_values_val <- matrix(0,nrow=sum(values_model_a$gene_idxs),ncol=n_individuals_true)
 u_values_val[values_model_a$u_idx] <- u_values_val_sparse
 
@@ -133,7 +138,7 @@ u <- variable(dim = c(sum(values_model_a$gene_idxs),
                        n_individuals_true))
 b <- variable(dim = dim(b_values_val))
 
-age_effect <- t(val_subset$gene_to_site_indicator[values_model_a$gene_idxs,sub_gene_mask] %*% t(b) %*% val_subset$ages)
+age_effect <- t(val_subset$gene_to_site_indicator[values_model_a$gene_idxs,] %*% t(b) %*% val_subset$ages)
 age_effect <- age_effect * apply(t(val_subset$coverage[values_model_a$gene_idxs,] > 0),2,as.numeric)
 offset_per_individual <- t(u %*% t(val_subset$individual_indicator %>% t))
 r <- age_effect + offset_per_individual
@@ -141,7 +146,7 @@ mu_val <- ilogit(r)
 distribution(X_val) <- binomial(prob = mu_val,size = t(val_subset$coverage[values_model_a$gene_idxs,]))
 
 coverage_mask <- t(val_subset$coverage[values_model_a$gene_idxs,] > 0)
-output <- calculate(target=mu_val,values = list(u = u_values_val,b = b_values_val)) 
+output <- calculate(target=mu_val,values = list(u = u_values_val,b = b_values_val)) * t(val_subset$coverage[values_model_a$gene_idxs,])
 r_values <- c(1:ncol(output)) %>%
   sapply(function(x) {
     o <- data.frame(
@@ -187,7 +192,7 @@ model_a_metrics %>%
 ```
 
 ```{r model_A_coefficients, fig.width=14, fig.height=10}
-values_b <- values_model_a$b_values[grepl("b\\[",b_values$variable),]
+values_b <- values_model_a$b_values[grepl("b\\[",values_model_a$b_values$variable),]
 values_b$site_name <- rep(gene_list,each = 7)
 values_b %>% spread(key = labels,value = values) %>%
   ggplot(aes(y = `0.50`,x = substr(site_name,1,30))) +
@@ -205,6 +210,8 @@ values_b %>% spread(key = labels,value = values) %>%
         strip.text = element_text(size = 5.7,face = "bold"))
 ```
 
+Many (most) sites will not show a pronounced dynamics that would signal growth. As such, it is fairly natural that the coefficients remain close to 0. There still is some unexpected behaviour with JAK2 which, when modelled as and individual site (it only has one mutation) shows a positive trend. This might be due to too restrictive priors on the mean and standard deviations for these distributions.
+
 ### Model B - modelling each recurring site with a single age-dependent effect
 
 Here, the effect for each recurring site (i.e. at least two individuals have this specific site-mutation) is a coefficient following a normal distribution with $\mu_{site}$ mean and standard deviation $\sigma_{site}$. Additionally, the offsets per individual are modelled as a normal distribution with $\mu_{offset}$ mean and standard deviation $\sigma_{offset}$. More concretely:
@@ -212,7 +219,7 @@ Here, the effect for each recurring site (i.e. at least two individuals have thi
 $$
 adj.Counts_i = counts_i + 1
 \\
-\sigma_{\mu_{site}} \sim Cauchy(0,0.01)
+\sigma_{\mu_{site}} \sim halfCauchy(0,0.01)
 \\
 Site\ parameters: \mu_{site} \sim N(0,\sigma_{\mu_{site}}),\sigma_{site} \sim logN(0,1)
 \\
@@ -222,32 +229,32 @@ Model_B: adj.counts_i \sim B(coverage,ilogit(age*N(\mu_{site},\sigma_{site}) + N
 $$
 
 ```{r, model_B_simulation}
-if (!file.exists('models/model_B.RDS')) {
-  submit_r_commands('source("scripts/vaf_dynamics_functions.R")',
-                'set.seed(42)',
-                'source("scripts/prepare_data.R")',
-                'site_list <- formatted_data_train_1$unique_site_multiple',
-                'domain_list <- formatted_data_train_1$unique_domain',
-                'gene_list <- formatted_data_train_1$unique_gene',
-                'source("scripts/B_single_site_with_time_dependency.R")',
-                'draws <- mcmc(m,sampler = hmc(Lmin = 5,Lmax = 10),n_samples = 10e3,warmup = 5e3,n_cores = 32,thin = 2)',
-                'b_values <- calculate(b,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                'b_mean_values <- calculate(b_site_mean,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                'b_sd_values <- calculate(b_site_sd,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                'u_values <- calculate(u,draws) %>% lapply(function(x) tail(x,2500)) %>%  do.call(what = rbind) %>% variable_summaries()',
-                'list(b_values=b_values,b_mean_values=b_mean_values,b_sd_values=b_sd_values,u_values=u_values,u_idx=u_idx) %>% saveRDS(file = "models/model_B.RDS")',
-                n_cores = 32,
-                mem = 32e3)
-}
-
-source("scripts/B_single_site_with_time_dependency.R")
-
-draws <- mcmc(m,
-              sampler = hmc(Lmin = 5,Lmax = 10),
-              n_samples = 20e3,
-              warmup = 1e3,
-              n_cores = 32,
-              thin = 4)
+# if (!file.exists('models/model_B.RDS')) {
+#   submit_r_commands('source("scripts/vaf_dynamics_functions.R")',
+#                 'set.seed(42)',
+#                 'source("scripts/prepare_data.R")',
+#                 'site_list <- formatted_data_train_1$unique_site_multiple',
+#                 'domain_list <- formatted_data_train_1$unique_domain',
+#                 'gene_list <- formatted_data_train_1$unique_gene',
+#                 'source("scripts/B_single_site_with_time_dependency.R")',
+#                 'draws <- mcmc(m,sampler = hmc(Lmin = 5,Lmax = 10),n_samples = 10e3,warmup = 5e3,n_cores = 32,thin = 2)',
+#                 'b_values <- calculate(b,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                 'b_mean_values <- calculate(b_site_mean,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                 'b_sd_values <- calculate(b_site_sd,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                 'u_values <- calculate(u,draws) %>% lapply(function(x) tail(x,2500)) %>%  do.call(what = rbind) %>% variable_summaries()',
+#                 'list(b_values=b_values,b_mean_values=b_mean_values,b_sd_values=b_sd_values,u_values=u_values,u_idx=u_idx) %>% saveRDS(file = "models/model_B.RDS")',
+#                 n_cores = 32,
+#                 mem = 32e3)
+# }
+# 
+# source("scripts/B_single_site_with_time_dependency.R")
+# 
+# draws <- mcmc(m,
+#               sampler = hmc(Lmin = 5,Lmax = 10),
+#               n_samples = 20e3,
+#               warmup = 1e3,
+#               n_cores = 32,
+#               thin = 4)
 #
 #mcmc_trace(draws[,colnames(draws$`11`)[grepl('b\\[',colnames(draws$`11`))]])
 #mcmc_trace(draws[,colnames(draws$`11`)[grepl('u\\[1,',colnames(draws$`11`))] %>% sample(20)])
@@ -285,7 +292,7 @@ mu_val <- ilogit(r)
 distribution(X_val) <- binomial(prob = mu_val,size = t(val_subset$coverage))
 
 coverage_mask <- t(val_subset$coverage > 0)
-output <- calculate(target=mu_val,values = list(u = u_values_val,b = b_values_val)) 
+output <- calculate(target=mu_val,values = list(u = u_values_val,b = b_values_val)) * t(val_subset$coverage)
 r_values <- c(1:ncol(output)) %>%
   sapply(function(x) {
     o <- data.frame(
@@ -331,8 +338,8 @@ model_b_metrics %>%
 ```
 
 ```{r model_B_coefficients, fig.width=14, fig.height=10}
-values_b <- values_model_b$b_values[grepl("b\\[",b_values$variable),]
-values_b$site_name <- rep(val_subset$unique_site_multiple,each = 7)
+values_b <- values_model_b$b_values[grepl("b\\[",values_model_b$b_values$variable),]
+values_b$site_name <- rep(val_subset$unique_site_multiple,each = 5)
 values_b$gene <-  sapply(values_b$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
 values_b %>% spread(key = labels,value = values) %>%
   ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
@@ -374,54 +381,82 @@ $$
 For this task an additional concern comes into play, which is that of variable identifiability. In cases where a single site is being modelled for the whole gene, there is no way of telling which effect (site or gene) contributes towards the effect provided that they are both included in the model. As such, we include only the site these cases.
 
 ```{r, model_c_simulation}
-if (!file.exists('models/model_C.RDS')) {
-  submit_r_commands('source("scripts/vaf_dynamics_functions.R")',
-                    'set.seed(42)',
-                    'source("scripts/prepare_data.R")',
-                    'site_list <- formatted_data_train_1$unique_site_multiple',
-                    'domain_list <- formatted_data_train_1$unique_domain',
-                    'gene_list <- formatted_data_train_1$unique_gene',
-                    'source("scripts/C_hierarchical.R")',
-                    'draws <- mcmc(m,sampler = hmc(Lmin = 5,Lmax = 10),n_samples = 10e3,warmup = 2e3,n_cores = 32,thin = 2)',
-                    'b_site_values <- calculate(b_site,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                    'b_site_mean_values <- calculate(b_site_mean,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                    'b_site_sd_values <- calculate(b_site_sd,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                    'b_domain_values <- calculate(b_domain,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                    'b_domain_mean_values <- calculate(b_domain_mean,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                    'b_domain_sd_values <- calculate(b_domain_sd,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                    'b_gene_values <- calculate(b_gene,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                    'b_gene_mean_values <- calculate(b_gene_mean,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                    'b_gene_sd_values <- calculate(b_gene_sd,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
-                    'u_values <- calculate(u,draws) %>% lapply(function(x) tail(x,2500)) %>%  do.call(what = rbind) %>% variable_summaries()',
-                    'output_list <- list()',
-                    'output_list[["b_site_values"]] <- b_site_values',
-                    'output_list[["b_site_mean_values"]] <- b_site_mean_values',
-                    'output_list[["b_site_sd_values"]] <- b_site_sd_values',
-                    'output_list[["b_domain_values"]] <- b_domain_values',
-                    'output_list[["b_domain_mean_values"]] <- b_domain_mean_values',
-                    'output_list[["b_domain_sd_values"]] <- b_domain_sd_values',
-                    'output_list[["b_gene_values"]] <- b_gene_values',
-                    'output_list[["b_gene_mean_values"]] <- b_gene_mean_values',
-                    'output_list[["b_gene_sd_values"]] <- b_gene_sd_values',
-                    
-                    'output_list[["u_values"]] <- u_values',
-                    'output_list[["u_idx"]] <- u_idx',
-                    'output_list[["gene_idxs"]] <- gene_idxs',
-                    'output_list %>% saveRDS(file = "models/model_C.RDS")',
-                    n_cores = 32,
-                    mem = 64e3)
-}
+# if (!file.exists('models/model_C.RDS')) {
+#   submit_r_commands('source("scripts/vaf_dynamics_functions.R")',
+#                     'set.seed(42)',
+#                     'source("scripts/prepare_data.R")',
+#                     'site_list <- formatted_data_train_1$unique_site_multiple',
+#                     'domain_list <- formatted_data_train_1$unique_domain',
+#                     'gene_list <- formatted_data_train_1$unique_gene',
+#                     'source("scripts/C_hierarchical.R")',
+#                     'draws <- mcmc(m,sampler = hmc(Lmin = 5,Lmax = 10),n_samples = 10e3,warmup = 1e3,n_cores = 32,thin = 2)',
+#                     'b_site_values <- calculate(b_site,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                     'b_site_mean_values <- calculate(b_site_mean,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                     'b_site_sd_values <- calculate(b_site_sd,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                     'b_domain_values <- calculate(b_domain,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                     'b_domain_mean_values <- calculate(b_domain_mean,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                     'b_domain_sd_values <- calculate(b_domain_sd,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                     'b_gene_values <- calculate(b_gene,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                     'b_gene_mean_values <- calculate(b_gene_mean,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                     'b_gene_sd_values <- calculate(b_gene_sd,draws) %>% lapply(function(x) tail(x,2500)) %>% do.call(what = rbind) %>% variable_summaries()',
+#                     'u_values <- calculate(u,draws) %>% lapply(function(x) tail(x,2500)) %>%  do.call(what = rbind) %>% variable_summaries()',
+#                     'output_list <- list()',
+#                     'output_list[["b_site_values"]] <- b_site_values',
+#                     'output_list[["b_site_mean_values"]] <- b_site_mean_values',
+#                     'output_list[["b_site_sd_values"]] <- b_site_sd_values',
+#                     'output_list[["b_domain_values"]] <- b_domain_values',
+#                     'output_list[["b_domain_mean_values"]] <- b_domain_mean_values',
+#                     'output_list[["b_domain_sd_values"]] <- b_domain_sd_values',
+#                     'output_list[["b_gene_values"]] <- b_gene_values',
+#                     'output_list[["b_gene_mean_values"]] <- b_gene_mean_values',
+#                     'output_list[["b_gene_sd_values"]] <- b_gene_sd_values',
+#                     
+#                     'output_list[["u_values"]] <- u_values',
+#                     'output_list[["u_idx"]] <- u_idx',
+#                     'output_list[["gene_idxs"]] <- gene_idxs',
+#                     'output_list %>% saveRDS(file = "models/model_C.RDS")',
+#                     n_cores = 32,
+#                     mem = 64e3)
+# }
+# 
+# source("scripts/C_hierarchical.R")
+# 
+# draws <- mcmc(m,
+#               sampler = hmc(Lmin = 5,Lmax = 10),
+#               n_samples = 5e3,
+#               warmup = 1e3,
+#               n_cores = 32,
+#               thin = 4)
+#
+# b_site_values <- calculate(b_site,draws) %>% lapply(function(x) tail(x,500)) %>% do.call(what = rbind) %>% variable_summaries()
+# b_site_mean_values <- calculate(b_site_mean,draws) %>% lapply(function(x) tail(x,500)) %>% do.call(what = rbind) %>% variable_summaries()
+# b_site_sd_values <- calculate(b_site_sd,draws) %>% lapply(function(x) tail(x,500)) %>% do.call(what = rbind) %>% variable_summaries()
+# b_domain_values <- calculate(b_domain,draws) %>% lapply(function(x) tail(x,500)) %>% do.call(what = rbind) %>% variable_summaries()
+# b_domain_mean_values <- calculate(b_domain_mean,draws) %>% lapply(function(x) tail(x,500)) %>% do.call(what = rbind) %>% variable_summaries()
+# b_domain_sd_values <- calculate(b_domain_sd,draws) %>% lapply(function(x) tail(x,500)) %>% do.call(what = rbind) %>% variable_summaries()
+# b_gene_values <- calculate(b_gene,draws) %>% lapply(function(x) tail(x,500)) %>% do.call(what = rbind) %>% variable_summaries()
+# b_gene_mean_values <- calculate(b_gene_mean,draws) %>% lapply(function(x) tail(x,500)) %>% do.call(what = rbind) %>% variable_summaries()
+# b_gene_sd_values <- calculate(b_gene_sd,draws) %>% lapply(function(x) tail(x,500)) %>% do.call(what = rbind) %>% variable_summaries()
+# u_values <- calculate(u,draws) %>% lapply(function(x) tail(x,500)) %>%  do.call(what = rbind) %>% variable_summaries()
+# 
+# output_list <- list()
+# output_list[["b_site_values"]] <- b_site_values
+# output_list[["b_site_mean_values"]] <- b_site_mean_values
+# output_list[["b_site_sd_values"]] <- b_site_sd_values
+# output_list[["b_domain_values"]] <- b_domain_values
+# output_list[["b_domain_mean_values"]] <- b_domain_mean_values
+# output_list[["b_domain_sd_values"]] <- b_domain_sd_values
+# output_list[["b_gene_values"]] <- b_gene_values
+# output_list[["b_gene_mean_values"]] <- b_gene_mean_values
+# output_list[["b_gene_sd_values"]] <- b_gene_sd_values
+# 
+# output_list[["u_values"]] <- u_values
+# output_list[["u_idx"]] <- u_idx
+# output_list[["gene_idxs"]] <- gene_idxs
+# output_list %>% saveRDS(file = "models/model_C.RDS")
 
-source("scripts/C_hierarchical.R")
 
-draws <- mcmc(m,
-              sampler = hmc(Lmin = 5,Lmax = 10),
-              n_samples = 5e3,
-              warmup = 0.5e3,
-              n_cores = 32,
-              thin = 2)
-
-#mcmc_trace(draws[,colnames(draws$`11`)[grepl('b\\[',colnames(draws$`11`))]])
+#mcmc_trace(draws[,colnames(draws$`11`)[grepl('b_site\\[',colnames(draws$`11`))]])
 #mcmc_trace(draws[,colnames(draws$`11`)[grepl('u\\[1,',colnames(draws$`11`))] %>% sample(20)])
 
 ```
@@ -432,47 +467,60 @@ draws <- mcmc(m,
 values_model_c <- readRDS("models/model_C.RDS")
 ```
 
-``` {r, model_c_validation}
+``` {r, model_c_validation, fig.width = 14}
 val_subset <- formatted_data_validation_1
 
-X_val <- t(val_subset$counts + 1)
+X_val <- val_subset$counts[values_model_c$gene_idxs,] + 1
 
-b_values_val <- values_model_c$b_values$values[values_model_c$b_values$labels == 'mean'] %>% 
-  matrix(nrow=1) %>%
+b_gene_values_val <- values_model_c$b_gene_values$values[values_model_c$b_gene_values$labels == 'mean'] %>% 
+  matrix(ncol=1) %>%
   as_data()
+b_domain_values_val <- values_model_c$b_domain_values$values[values_model_c$b_domain_values$labels == 'mean'] %>% 
+  matrix(ncol=1) %>%
+  as_data()
+b_site_values_val <- values_model_c$b_site_values$values[values_model_c$b_site_values$labels == 'mean'] %>% 
+  matrix(ncol=1) %>%
+  as_data()
+
 u_values_val_sparse <- values_model_c$u_values$values[values_model_c$u_values$labels == 'mean'] 
-u_values_val <- matrix(0,nrow=ncol(b_values_val),ncol=n_individuals_true)
+u_values_val <- matrix(0,nrow=sum(values_model_c$gene_idxs),ncol=length(val_subset$unique_individual_true))
 u_values_val[values_model_c$u_idx] <- u_values_val_sparse
 
 u <- variable(dim = dim(u_values_val))
-b <- variable(dim = dim(b_values_val))
-age_effect <- (val_subset$ages %*% b) * apply(t(val_subset$coverage > 0),2,as.numeric)
-offset_per_individual <- offset_per_individual <- t(u %*% t(val_subset$individual_indicator %>% t))
-r <- age_effect + offset_per_individual
-mu_val <- ilogit(r)
-distribution(X_val) <- binomial(prob = mu_val,size = t(val_subset$coverage))
+b_gene <- variable(dim = dim(b_gene_values_val))
+b_domain <- variable(dim = dim(b_domain_values_val))
+b_site <- variable(dim = dim(b_site_values_val))
 
-coverage_mask <- t(val_subset$coverage > 0)
-output <- calculate(target=mu_val,values = list(u = u_values_val,b = b_values_val)) 
-r_values <- c(1:ncol(output)) %>%
+ae_gene <- val_subset$gene_to_site_indicator[values_model_c$gene_idxs,] %*% b_gene
+ae_domain <- val_subset$domain_to_site_indicator[values_model_c$gene_idxs,] %*% b_domain
+ae_site <- val_subset$site_multiple_to_site_indicator[values_model_c$gene_idxs,] %*% b_site
+
+age_effect <- (ae_gene +  ae_domain + ae_site) %*% val_subset$ages * apply(val_subset$coverage[values_model_c$gene_idxs,] > 0,2,as.numeric)
+offset_per_individual <- offset_per_individual <- t(u %*% t(val_subset$individual_indicator %>% t))
+r <- age_effect + t(offset_per_individual)
+mu_val <- ilogit(r)
+distribution(X_val) <- binomial(prob = mu_val,size = val_subset$coverage[values_model_c$gene_idxs,])
+
+coverage_mask <- val_subset$coverage[values_model_c$gene_idxs,] > 0
+output <- calculate(target=mu_val,values = list(b_gene = b_gene_values_val,b_domain = b_domain_values_val,b_site = b_site_values_val,u = u_values_val)) * val_subset$coverage[values_model_c$gene_idxs,]
+r_values <- c(1:nrow(output)) %>%
   sapply(function(x) {
     o <- data.frame(
-      pred = output[coverage_mask[,x],x] - 1,
-      true = X_val[coverage_mask[,x],x] - 1) %>%
-      cor 
-    o[1,2] %>%
-      return
+      pred = output[x,coverage_mask[x,]] - 1,
+      true = X_val[x,coverage_mask[x,]] - 1)
+    if (nrow(o) > 0) {
+      o$site = val_subset$unique_site[values_model_c$gene_idxs][x]
+    }
+    return(o)
   }
-)
-site_metric_frame <- data.frame(
-  genes = lapply(
-    val_subset$unique_site_multiple,
-    function(x) unlist(str_split(x,'-'))[[1]]) %>% 
-    unlist,
-  sites = val_subset$unique_site_multiple,
-  r = r_values
-) 
-gene_metric_frame <- site_metric_frame %>% 
+) %>%
+  do.call(what = rbind) %>%
+  mutate(genes = sapply(site,function(x) unlist(strsplit(x,'-'))[[1]])) %>%
+  group_by(site) %>%
+  mutate(r = mean((pred - mean(pred)) * (true - mean(true))) / (sd(pred) * sd(true)),
+         n = length(pred))
+
+gene_metric_frame <- r_values %>% 
   group_by(genes) %>%
   summarise(average_r = ifelse(abs(r) == 1,sign(r) * (1 - 1e-8),r) %>%
               Filter(f = function(x) !is.na(x)) %>% 
@@ -481,12 +529,10 @@ gene_metric_frame <- site_metric_frame %>%
               tanh %>%
               return
 )
-model_b_metrics <- merge(site_metric_frame,gene_metric_frame)
-model_b_metrics %>%
-  ggplot(aes(x = sites,y = r ** 2)) +
-  geom_area(aes(x = sites,y = average_r ** 2,fill = genes,group = genes),stat = 'identity',
-            alpha = 0.4) +
-  geom_point(aes(color = genes)) + 
+model_c_metrics <- merge(r_values,gene_metric_frame,by = 'genes')
+model_c_metrics %>%
+  ggplot() +
+  geom_point(aes(x = site,color = genes,y = r ** 2)) + 
   theme_minimal() +
   facet_grid(~ genes,scales = "free_x",space = "free_x") +
   theme(legend.position = "bottom",panel.grid = element_blank(),
@@ -496,5 +542,74 @@ model_b_metrics %>%
   ylab("R^2") + 
   scale_colour_discrete(guide = F) + 
   scale_fill_discrete(name = NULL) 
-
 ```
+
+```{r, fig.width=14, fig.height=10}
+values_b <- values_model_c$b_site_values
+values_b$site_name <- rep(val_subset$unique_site_multiple,each = 7)
+values_b$gene <-  sapply(values_b$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+values_b %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = `0.025`,ymax = `0.975`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_colour_discrete(name = NULL) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r, fig.width=14, fig.height=10}
+values_b <- values_model_c$b_domain_values
+values_b$site_name <- rep(val_subset$unique_domain,each = 7)
+values_b$gene <-  sapply(values_b$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+values_b %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = `0.05`,ymax = `0.95`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_colour_discrete(name = NULL) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r, fig.width=14, fig.height=10}
+values_b <- values_model_c$b_gene_values
+values_b$site_name <- rep(val_subset$unique_gene,each = 7)
+values_b %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = site_name,color = site_name)) +
+  geom_point() +
+  geom_linerange(aes(ymin = `0.05`,ymax = `0.95`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ site_name,scales = "free_x",space = "free_x") +
+  scale_colour_discrete(name = NULL) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+### THM 
+
+* Model A - using only a gene effect does a fairly poor job at capturing the more pronounced dynamics and is "diluted" by the more or less "stationary" dynamics of a few genes 
+* Model B - Looking at the dynamics of specific sites only reveals a fairly interesting picture, we see some old friends with the expected behaviour (i.e. SF3B1-K666N or JAK2-V617F, for instance)
+* Model C - The hierarchical model is still a bit dodgy, I am rerunning it right now - we still recapitulate some effects observed in model B (SF3B1-K666N, a lot of what is observed for DNMT3A and TET2), but the fact that we are "losing" some effects (JAK2) leaves me a bit weary, I changed some things and currently rerunning. Apart from this, I think it is fairly interesting to see effects in this model different from the ones obtained in model B, particularly for U2AF1, where the site effects become much more pronounced 
+  * Regarding the genes with effects ~0 I still do not have a very sure answer for this, but I am looking into it
+  * I am also looking into what is happening with SRSF2 and STAT3 

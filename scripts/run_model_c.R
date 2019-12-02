@@ -9,10 +9,10 @@ gene_list <- formatted_data_train_1$unique_gene
 source("scripts/C_hierarchical.R")
 
 draws <- mcmc(m,sampler = hmc(Lmin = 5,Lmax = 10),
-              n_samples = 5e3,
+              n_samples = 10e3,
               warmup = 0.5e3,
               n_cores = 32,
-              thin = 4)
+              thin = 8)
 
 b_site_values <- calculate(b_site,draws) %>%
   lapply(function(x) tail(x,500)) %>%

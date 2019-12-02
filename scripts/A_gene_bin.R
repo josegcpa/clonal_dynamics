@@ -1,13 +1,13 @@
 
 # Global parameters
 
-b_gene_mean_sd <- cauchy(location = 0,scale = 0.1,
+b_gene_mean_sd <- cauchy(location = 0,scale = 1,
                          truncation = c(0,Inf),dim = 1)
 b_gene_mean <- normal(mean = 1,sd = b_gene_mean_sd,dim = 1)
 b_gene_sd <- lognormal(meanlog = 0,sdlog = 1,
                        truncation = c(0,Inf),dim = 1)
 u_mean <- normal(mean = 0,
-                 sd = 0.1)
+                 sd = 1)
 u_sd <- lognormal(meanlog = 0,sdlog = 10,
                   truncation = c(0,Inf),dim = 1)
 
