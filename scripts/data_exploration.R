@@ -93,6 +93,7 @@ for (individual in unique_individual) {
     if (length(umi) > 1) {
       umi_comb <- combn(subframe$mutation_identifier %>% unique,2) %>%
         t 
+
       for (i in nrow(umi_comb)) {
         comb <- umi_comb[i,]
         a <- subframe %>% 
@@ -104,7 +105,10 @@ for (individual in unique_individual) {
           select(VAF,relative_timepoint)
         
         both <- merge(a,b,by = "relative_timepoint",all = T)
-        c <- cor(both$VAF.x,both$VAF.y)
+        c <- ifelse(
+          nrow(both) > 2,
+          cor.test(both$VAF.x,both$VAF.y)$estimate,
+          0)
         idx_1 <- match(comb[1],unique_mutation)
         idx_2 <- match(comb[2],unique_mutation)
         corr_matrix[idx_1,idx_2] <- c

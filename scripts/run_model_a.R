@@ -6,37 +6,37 @@ site_list <- formatted_data_train_1$unique_site_multiple
 domain_list <- formatted_data_train_1$unique_domain
 gene_list <- formatted_data_train_1$unique_gene
 
+# gene_list <- c(
+#   #"ASXL1",
+#   #"BRCC3",
+#   "SF3B1",
+#   #"DNMT3A",
+#   #"U2AF1",
+#   #"IDH2",
+#   "IDH1"
+#   ) %>%
+#   sort
+
 source("scripts/A_gene_bin.R")
 
-draws <- mcmc(m,sampler = hmc(Lmin = 5,Lmax = 10),
+draws <- mcmc(m,sampler = hmc(Lmin = 2,Lmax = 40),
               n_samples = 10e3,
-              warmup = 0.5e3,
-              n_cores = 32,thin = 8)
+              warmup = 5e3,
+              n_cores = 32,
+              initial_values = init,
+              one_by_one = T)
 
-b_values <- calculate(b,draws) %>%
-  lapply(function(x) tail(x,500)) %>%
-  do.call(what = rbind) %>%
-   variable_summaries()
+b_values <- calculate(b_gene,draws) %>% lapply(function(x) tail(x,5000) %>% variable_summaries)
+u_values <- calculate(u,draws) %>% lapply(function(x) tail(x,5000) %>% variable_summaries)
 
-b_mean_values <- calculate(b_gene_mean,draws) %>%
-  lapply(function(x) tail(x,500)) %>%
-  do.call(what = rbind) %>%
-  variable_summaries()
-
-b_sd_values <- calculate(b_gene_sd,draws) %>%
-  lapply(function(x) tail(x,500)) %>%
-  do.call(what = rbind) %>%
-  variable_summaries()
-
-u_values <- calculate(u,draws) %>%
-  lapply(function(x) tail(x,500)) %>%
-  do.call(what = rbind) %>%
-  variable_summaries()
-
-list(b_values=b_values,
-     b_mean_values=b_mean_values,
-     b_sd_values=b_sd_values,
+list(draws=draws,
+     validation_subset=formatted_data_validation_1,
+     b_values=b_values,
      u_values=u_values,
      u_idx=u_idx,
-     gene_idxs=gene_idxs) %>%
+     interference_idxs=interference_idxs,
+     u_idx=u_idx,
+     ind_o=ind_o,
+     gene_idxs=gene_idxs,
+     min_age=min_age) %>%
   saveRDS(file = "models/model_A.RDS")

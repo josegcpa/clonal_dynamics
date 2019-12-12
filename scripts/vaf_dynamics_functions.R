@@ -289,9 +289,10 @@ format_data <- function(full_data) {
     genes <- match(sub_df$Gene,unique_gene)
     domains <- match(sub_df$Domain,unique_domain)
     individual_true <- match(sub_df$SardID,unique_individual_true)
+    rel_tp <- sub_df$relative_timepoint
 
     na_index <- !is.na(sites)
-    sites <- sites[na_index]  
+    sites <- sites[na_index]
     genes <- genes[na_index]
 
     ages[individual] <- sub_df$Age[1]
@@ -328,7 +329,7 @@ format_data <- function(full_data) {
     unique_individual = unique_individual,
     unique_individual_true = unique_individual_true,
     ages = ages
-  ) %>%
+    ) %>%
     return
 }
 
@@ -342,7 +343,7 @@ subsample_formatted_data_index <- function(formatted_data_,included_ids_individu
 
   formatted_data_$counts <- formatted_data_$counts[,included_ids_individual_age]
   formatted_data_$coverage <- formatted_data_$coverage[,included_ids_individual_age]
-
+  
   return(formatted_data_)
 }
 
@@ -424,13 +425,13 @@ between_sequence_variance <- function(sequences) {
   m <- ncol(sequences)
   averages <- colMeans(sequences)
   average <- mean(averages)
-  B = (n / (m - 1)) * sum((averages - average)^2)
+  B <- (n / (m - 1)) * sum((averages - average)^2)
   return(B)
 }
 
 within_sequence_variance <- function(sequences) {
   variances <- apply(sequences,2,var)
-  W = mean(variances)
+  W <- mean(variances)
   return(W)
 }
 

@@ -1,67 +1,125 @@
-
 # Global parameters
 
-b_gene_mean_sd <- cauchy(location = 0,scale = 1,
-                         truncation = c(0,Inf),dim = 1)
-b_gene_mean <- normal(mean = 1,sd = b_gene_mean_sd,dim = 1)
-b_gene_sd <- lognormal(meanlog = 0,sdlog = 1,
-                       truncation = c(0,Inf),dim = 1)
-u_mean <- normal(mean = 0,
-                 sd = 1)
-u_sd <- lognormal(meanlog = 0,sdlog = 10,
-                  truncation = c(0,Inf),dim = 1)
+# Age dependent terms
+b_gene_mean <- 0
+b_gene_sd <- 1
 
-b <- normal(mean = b_gene_mean,
-            sd = b_gene_sd,
-            dim = c(1,length(gene_list)))
+train_subset <- formatted_data_train_1
 
-formatted_data_gene_subset <- formatted_data_train_1
-
-#gene_list <- c("SF3B1","DNMT3A","JAK2")
 gene_idxs <- lapply(
-  formatted_data_train_1$unique_site,
+  train_subset$unique_site,
   function(x) unlist(str_split(x,'-'))[[1]]
 ) %>% unlist %in% gene_list
-gene_idxs <- (gene_idxs * (formatted_data_gene_subset$site_to_individual_indicator %>% rowSums() >= 3)) %>%
+gene_idxs <- (gene_idxs * (train_subset$site_to_individual_indicator %>% rowSums() >= 3)) %>%
   as.logical()
-sub_gene_mask <- formatted_data_train_1$unique_gene %in% gene_list
+sub_gene_mask <- train_subset$unique_gene %in% gene_list
 
-n_individuals <- length(formatted_data_gene_subset$unique_individual)
-n_individuals_true <- length(formatted_data_gene_subset$unique_individual_true)
-n_genes <- length(formatted_data_gene_subset$unique_gene)
-n_genes_multiple <- length(gene_list)
-  
-Y <- formatted_data_gene_subset$individual_indicator %>%
-  t %>% as_data() # The indicator for the offset per individual
+n_individuals <- length(train_subset$unique_individual)
+n_individuals_true <- length(train_subset$unique_individual_true)
+n_sites <- length(train_subset$unique_site)
+n_sites_multiple <- length(site_list)
 
-X <- (formatted_data_gene_subset$counts[gene_idxs,] + 1) %>%
-  t %>%
-  as_data()  # The counts per gene/individual
-  
-coverage <- (formatted_data_gene_subset$coverage[gene_idxs,] / 2) %>%
-  apply(1,function(x) ifelse(x == 0,x %>% Filter(f = function(y) y > 0) %>% median,x)) %>%
-  apply(1,function(x) ifelse(is.na(x),x %>% Filter(f = function(y) y > 0 | !is.na(y)) %>% median,x)) %>%
-  round %>%
-  t %>% 
-  as_data()
+### Subtracting the minimum age to all ages speeds up convergence
+min_age <- train_subset$individual_indicator %>% 
+  apply(1,function(x) (x * train_subset$ages)) %>% 
+  apply(2,function(x) x %>% 
+          Filter(f = function(x) x > 0) %>% 
+          min) %>% 
+  matrix(nrow = 1) 
 
-age <- formatted_data_gene_subset$ages %>%
-  as_data()
-    
-stii <- formatted_data_gene_subset$gene_to_individual_indicator
+min_age <- train_subset$ages %>% min
+age <- train_subset$ages - min_age
 
-u_idx <- ((formatted_data_gene_subset$site_to_individual_indicator[gene_idxs,] %*% t(formatted_data_gene_subset$individual_indicator)) > 0) %>%
+b_gene <- normal(mean = b_gene_mean,
+                 sd = b_gene_sd,
+                 dim = c(1,length(gene_list)))
+
+u_idx <- ((train_subset$site_to_individual_indicator[gene_idxs,] %*% t(train_subset$individual_indicator)) > 0) %>%
   which(arr.ind = T)
-u_dense <- normal(mean = u_mean,sd = u_sd,
-                  dim = c(sum(gene_idxs),n_individuals_true))
-u <- u_dense[u_idx] 
+u <- variable(dim = c(1,nrow(u_idx)))
+
+age_effect_gene <- train_subset$gene_to_site_indicator[gene_idxs,sub_gene_mask] %*% t(b_gene)
+full_effects <- age_effect_gene
+
+vaf_sums <- ((train_subset$counts/train_subset$coverage)[gene_idxs,]  %>% apply(2,na.replace,replace = 0)) %*% t(train_subset$individual_indicator)
+vaf_means <- vaf_sums/(train_subset$site_to_individual_indicator[gene_idxs,] %*% t(train_subset$individual_indicator))
+interference_list <- list() 
+j <- 1
+for (x in c(1:ncol(vaf_means))) {
+  mut_ind <- vaf_means[,x] 
+  non_na_idx <- which(!is.na(mut_ind))
+  if (length(non_na_idx) > 1) {
+    for (y in non_na_idx) {
+      tmp <- mut_ind 
+      tmp[y] <- 0
+      M <- which.max(tmp)
+      interference_list[[j]] <- cbind(
+        site = c(y),
+        inter_site = c(M),
+        ind = c(x),
+        ind_age = which(train_subset$individual_indicator[x,] > 0))
+      j <- j + 1
+    }
+  } else if (length(non_na_idx) == 0) {
     
-offset_per_individual <- t(u_dense %*% t(Y))
+  } else {
+    interference_list[[j]] <- cbind(
+      site = non_na_idx,
+      inter_site = NA,
+      ind = c(x),
+      ind_age = which(train_subset$individual_indicator[x,] > 0))
+    j <- j + 1
+  }
+}
+interference_idxs <- interference_list %>% 
+  do.call(what = rbind) %>%
+  as.data.frame
 
-age_effect <- t(formatted_data_gene_subset$gene_to_site_indicator[gene_idxs,sub_gene_mask] %*% t(b) %*% age)
-age_effect <- age_effect * t(formatted_data_gene_subset$coverage[gene_idxs,] > 0)
-r <- age_effect + offset_per_individual
+interference_idxs_true <- interference_idxs %>%
+  subset(!is.na(inter_site)) %>%
+  select(site,inter_site,ind) %>%
+  unique
+
+### Sparse model
+
+X_sparse <- t(train_subset$counts[gene_idxs,])[cbind(interference_idxs$ind_age,interference_idxs$site)] %>%
+  as.matrix(ncol = 1) %>%
+  as_data()
+coverage_sparse <- train_subset$coverage[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)] %>%
+  as.matrix(ncol = 1) %>% 
+  as_data()
+
+ind_o <- sapply(c(1:nrow(interference_idxs)),function(x) {
+  M <- u_idx[,1] == interference_idxs$site[x] & u_idx[,2] == interference_idxs$ind[x]
+  M %>%
+    as.numeric %>%
+    return}) 
+
+self_term <- full_effects[interference_idxs$site] 
+offset_per_individual <- t(u %*% ind_o)
+r <- self_term * (age[interference_idxs$ind_age]) + offset_per_individual
 mu <- ilogit(r)
-distribution(X) <- binomial(prob = mu,size = coverage)
+distribution(X_sparse) <- binomial(size = coverage_sparse,prob = mu * 0.5)
 
-m <- model(b_gene_mean,b_gene_sd,u_mean,u_sd,b,u)
+### 
+
+m <- model(b_gene,u)
+
+u_initial <- data.frame(
+  vaf = (train_subset$counts[gene_idxs,]/train_subset$coverage[gene_idxs,])[cbind(interference_idxs$site,interference_idxs$ind_age)],
+  ind = interference_idxs$ind,
+  site = interference_idxs$site,
+  age = age[interference_idxs$ind_age],
+  count = train_subset$counts[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  cov = train_subset$coverage[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)]
+) %>% 
+  group_by(ind,site) %>%
+  summarise(vaf = vaf[which.min(age)] %>% na.replace(0)) 
+u_initial <- u_idx %>% 
+  apply(1, function(x) {
+    u_initial[u_initial$site == x[1] & u_initial$ind == x[2],]$vaf
+  }) 
+u_initial <- (u_initial + 1e-8) %>%
+  gtools::logit() %>%
+  matrix(nrow = 1)
+init <- initials(u = u_initial)

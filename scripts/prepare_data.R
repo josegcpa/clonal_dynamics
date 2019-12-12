@@ -82,7 +82,7 @@ full_formatted_data <- format_data(full_data) # Returns a list with all the nece
 set.seed(round(runif(1,max=1000)))
 splits <- full_formatted_data %>% 
   four_way_subsampling(size = round(length(unique(full_formatted_data$full_data$SardID))*0.98),
-                       timepoint = c(1,2,3))
+                       timepoint = c(1,2,3,4))
 
 formatted_data_train_1 <- splits$train_1
 formatted_data_train_2 <- splits$train_2
