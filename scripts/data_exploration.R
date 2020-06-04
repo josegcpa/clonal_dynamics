@@ -2,6 +2,9 @@ source("scripts/vaf_dynamics_functions.R")
 
 source("scripts/prepare_data.R")
 
+
+# A few figures -----------------------------------------------------------
+
 mutations_per_individual <- full_data %>% 
   subset(amino_acid_change %in% formatted_data_train_1$unique_site) %>%
   subset(Gene %in% load_included_genes()) %>% 
@@ -163,3 +166,110 @@ average_correlations_long %>%
   geom_tile(color = "grey2") +
   scale_fill_distiller(type = "div") +
   theme_minimal()
+
+
+# Figure 1 - Dataset Introduction -----------------------------------------
+
+individuals_per_phase <- full_data %>%
+  group_by(Phase) %>%
+  summarise(N_Individuals = length(unique(SardID)))
+
+Gene_per_Phase <- full_data %>% 
+  group_by(Gene,Phase) %>%
+  summarise(MutationCount = length(amino_acid_change)) %>%
+  merge(individuals_per_phase,by = 'Phase') %>%
+  ggplot(aes(x = Gene,y = Phase)) +
+  geom_point(aes(size = MutationCount / N_Individuals,
+                 color = as.factor(Phase))) + 
+  theme_minimal(base_size = 15) + 
+  rotate_x_text() + 
+  scale_size_continuous(name = "Mutations/Individual") + 
+  theme(legend.position = 'bottom') + 
+  scale_color_lancet(guide = FALSE)
+
+Count_per_Gene <- full_data %>% 
+  group_by(Gene,Phase) %>%
+  summarise(MutationCount = length(amino_acid_change)) %>%
+  merge(individuals_per_phase,by = 'Phase') %>%
+  ggplot(aes(x = Gene,y = MutationCount)) + 
+  geom_bar(aes(fill = as.factor(Phase)),stat = 'identity',
+           position = 'dodge') + 
+  theme_minimal(base_size = 15) + 
+  theme(axis.text.x = element_blank()) + 
+  xlab("") + 
+  ylab("Total No. Mutations") + 
+  scale_fill_lancet(guide = FALSE)
+
+Age_Phase <- full_data %>% 
+  select(SardID,Phase,Age) %>%
+  unique() %>%
+  group_by(Phase) %>%
+  summarise(MinAge = min(Age),
+            MedianAge = median(Age),
+            MaxAge = max(Age),
+            n_individuals = length(unique(SardID))) %>%
+  ggplot(aes(x = MedianAge,y = Phase,xmin = MinAge,xmax = MaxAge)) + 
+  geom_errorbarh(height = 0) +
+  geom_line() + 
+  geom_point(aes(color = as.factor(Phase))) + 
+  theme_minimal(base_size = 15) + 
+  theme(axis.text.y = element_blank()) +
+  xlab("Age") +
+  ylab("") +
+  scale_color_lancet(guide = FALSE) + 
+  coord_flip()
+
+remove_padding <- theme(panel.border = element_blank(),plot.margin = unit(c(0.1,0.1,0.1,0.1),"cm"))
+
+get_legend(Gene_per_Phase) %>% ggsave(filename = 'Figure1LegendSize.svg')
+
+plot_grid(
+  Count_per_Gene + 
+    scale_x_discrete(expand = c(0,0)) + 
+    scale_y_continuous(expand = c(0,0),
+                       trans = 'log10') + 
+    remove_padding,
+  ggplot() + theme_nothing() + remove_padding,
+  Gene_per_Phase + 
+    scale_y_continuous(limits = c(0.5,5.5)) +
+    theme(legend.position = 'none') + 
+    remove_padding,
+  Age_Phase + 
+    scale_y_continuous(limits = c(0.5,5.5)) +
+    remove_padding,
+  align = "hv"
+) + ggsave('Figure1.svg',
+           height = 6,
+           width = 10)
+
+
+# Figure 2 - Dataset examples ---------------------------------------------
+
+full_data %>% 
+  subset(single_occurring == F) %>%
+  group_by(SardID,amino_acid_change) %>%
+  mutate(normalizedVAF = VAF/(VAF[which.min(relative_timepoint)] + 1e-3),
+         normalizedAge = Age - min(Age)) %>%
+  select(normalizedVAF,normalizedAge,Gene) %>% 
+  ggplot(aes(x = normalizedAge,y = normalizedVAF)) + 
+  geom_line(alpha = 0.5, aes(color = paste(SardID,amino_acid_change))) + 
+  geom_smooth(method = "lm",
+              alpha = 0.2,size = 0.8,
+              color = 'grey') +
+  facet_wrap(~ Gene,scales = "free") + 
+  theme_minimal(base_size = 15) +
+  theme(legend.position = 'none') + 
+  scale_y_continuous(trans = 'log10'#,labels = function(x) format(x, scientific = FALSE,drop0trailing = T)
+                     ) + 
+  xlab("Normalized Age") + 
+  ylab("Normalized VAF") + 
+  ggsave("Figure2.svg",height = 7.5,width = 10)
+
+
+# Figure n - What are we predicting? --------------------------------------
+
+r001 <- read_tsv("r001.csv",
+                 col_names = c("V1","V2","V3","V4"))
+
+sub_r001 <- r001 %>%
+  subset(V1 == 1000 & V4 != 0)

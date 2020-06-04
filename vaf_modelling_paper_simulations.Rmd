@@ -1,0 +1,954 @@
+---
+title: "The Natural History and Fitness Landscape of Clonal Haematopoiesis"
+subtitle: "Simulations and modelling"
+author: José Guilherme de Almeida & Moritz Gerstung
+output: 
+  html_document:
+    theme: lumen
+    highlight: tango
+    code_folding: hide
+    df_print: paged
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 4
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,fig.align = "center")
+```
+
+```{r import_functions, include=FALSE}
+source("scripts/vaf_dynamics_functions.R")
+set.seed(42)
+source("scripts/prepare_data.R")
+```
+
+# Validating inference through simulations 
+
+Here we present the modelling work that validates this approach. We simulate several Fischer-Wright dynamics with passenger and driver mutations across a grid of different driver mutation rates ($0.1*10^{-9}$ to $40.0*10^{-9}$) and fitness values ($0.001$ to $0.040$) per generation for a fixed population of 200000 HSC. We assume that HSCs divide 13 times *per* year, yielding for 100 years, 1300 generations. An example of some of these runs is presented below. We also assume that 10 driver and 200 passenger sites exist for each of these mutation rates and fitness values.
+
+```{r get_all_runs}
+all_files <- list.files(path = "/gpfs/nobackup/gerstung/josegcpa/projects/05VAF_DYNAMICS/hsc_output/",
+                        full.names = T,
+                        recursive = T,
+                        pattern = "csv")
+pop_size <- 2e5
+```
+
+We wish to determine if a model such as the one posited by us and in a similar scenario can accurately infer the fitness effects. As such, we need to simulate the same data collection circumstances, namely:
+
+  * Sample one individual between 3 and 5 times with the earliest timepoint being sampled from a Gamma distribution fitted to the first timepoints from the collected data and the following times separated by approximately 3 years (40 generations)
+  * Coverage is also simulated according to what was observed in our data, simmulating this using a Gamma distribution fitted to the coverage for all timepoints
+  * Sampling at each timepoint for each individual is done by sampling from a beta binomial distribution with the sampled coverage as the number of trials, the probabilities as the allele frequencies of the driver mutations, and a fixed technical dispersion (with $\alpha = \frac{p\beta}{1-p}$ and $\beta=dispersion$). We only account for drivers because we are working with targetted sequencing, which focuses on mutations known to be associated with CH
+
+## Inspecting and fitting distributions for age and coverage
+
+```{r preprocessing_data}
+plot(main="Coverage density",density(full_data$TOTALcount))
+full_data %>%
+  select(SardID,Age) %>%
+  distinct %>% 
+  group_by(SardID) %>%
+  filter(Age == min(Age)) %>%
+  ungroup %>%
+  select(Age) %>%
+  unlist %>% 
+  density %>%
+  plot(main = "Age at first timepoint density")
+```
+
+```{r fitting_distributions}
+min_age_data <- full_data %>%
+  select(SardID,Age) %>%
+  distinct %>% 
+  group_by(SardID) %>%
+  filter(Age == min(Age)) %>%
+  ungroup %>%
+  select(Age) %>%
+  unlist
+
+coverage_distr <- fitdistrplus::fitdist(full_data$TOTALcount,
+                                        method = "mme",
+                                        #probs = c(0.1,0.9),
+                                        distr = "gamma")
+min_age_distr <- fitdistrplus::fitdist(min_age_data,
+                                       method = "mge",
+                                       distr = "gamma")
+
+plot(min_age_distr)
+plot(coverage_distr)
+
+sample_age <- function(n) {
+  s <- rgamma(n,min_age_distr$estimate[1],min_age_distr$estimate[2])
+  s <- ifelse(s < min(min_age_data),min(min_age_data),s)
+  s <- ifelse(s > max(min_age_data),max(min_age_data),s)
+  return(s)
+}
+
+sample_coverage <- function(n) {
+  s <- rgamma(n,coverage_distr$estimate[1],coverage_distr$estimate[2])
+  s <- ifelse(s < min(full_data$TOTALcount),
+              min(full_data$TOTALcount),s)
+  s <- ifelse(s > max(full_data$TOTALcount),
+              max(full_data$TOTALcount),s)
+  return(round(s))
+}
+```
+
+While these fits are not perfect they are good enough to help us simulate the conditions under the experimental data was obtained.
+
+## Simulating the sampling process
+
+```{r sampling_entries}
+set.seed(4242)
+N_DRIVERS <- 20
+#file <- "/gpfs/nobackup/gerstung/josegcpa/projects/05VAF_DYNAMICS/hsc_output//hsc_0.001_01.450/r002.csv"
+sample_lists <- list()
+beta_values <- readRDS("models/overdispersion.RDS")
+dispersion <- beta_values[1,1]
+dispersion_sd <- beta_values[2,1]
+
+clone_counts <- list()
+
+for (i in 1:length(all_files)) {
+  if (i %% 500 == 0) {
+    print(i)
+  }
+  file <- all_files[i]
+  split_file <- str_split(file,pattern = '/')[[1]]
+  root <- split_file[10]
+  fitness_mr <- as.numeric(unlist(str_match_all(root,"[0-9.]+")))
+  fitness <- fitness_mr[1]
+  mut_rate <- fitness_mr[2] * 1e-9
+  R <- as.numeric(str_match(split_file[11],pattern = '[0-9]+'))
+  df <- read_tsv(file,progress = F,
+                 col_names = c("Gen","Count","Clone","Mutation"),
+                 col_types = list(col_double(),col_double(),
+                                  col_double(),col_double()))
+  N_tp <- round(runif(1,3,5))
+  min_age <- floor(13*sample_age(1)/20)*20
+  ages <- round(min_age) + seq(0,N_tp) * 40
+  
+  tmp <- df %>%
+    subset(Mutation != 0) %>% 
+    arrange(Mutation,Gen) %>% 
+    group_by(Mutation) %>%
+    filter(length(Gen) > 1) %>%
+    mutate(Break = Gen - c(0,Gen[1:max(0,(length(Gen)-1))]) > 20) %>% 
+    mutate(Component = cumsum(Break)) %>%
+    ungroup() %>%
+    mutate(Mutation_C = paste(Mutation,Component,sep = '_')) %>%
+    group_by(Mutation_C) %>% 
+    mutate(GenAtCloneFoundation = min(Gen)) %>%
+    ungroup() 
+  
+  true_counts <- tmp %>%
+    subset(Mutation <= N_DRIVERS) %>% 
+    subset(Gen %in% ages) %>%
+    group_by(Mutation_C,Mutation,Gen) %>% 
+    summarise(Count = sum(Count),
+              GenAtCloneFoundation = GenAtCloneFoundation[1]) %>%
+    mutate(Prob = Count / 2e5) %>% 
+    filter(Prob > 0)
+  
+  DetectableClones <- tmp %>% 
+    group_by(Mutation_C,Mutation,Gen) %>% 
+    summarise(Count = sum(Count),
+              GenAtCloneFoundation = GenAtCloneFoundation[1]) %>%
+    ungroup %>% 
+    mutate(Gen = ceiling(Gen/100)*100) %>% 
+    group_by(Mutation_C,Gen) %>%
+    filter(Count / 2e5 > 0.005) %>%
+    summarise(Mutation = Mutation[1]) %>%
+    group_by(Gen) %>%
+    summarise(NClones = length(Mutation_C),
+              NDrivers = sum(Mutation <= N_DRIVERS)) %>%
+    mutate(
+      fitness = fitness,
+      mutation_rate = mut_rate,
+      Replicate = R
+    )
+  
+  clone_counts[[file]] <- DetectableClones
+  if (nrow(true_counts) > 0) {
+    S <- true_counts %>%
+      ungroup() %>% 
+      mutate(coverage = sample_coverage(nrow(true_counts))) %>% 
+      mutate(
+        sample = rbbinom(
+          nrow(true_counts),
+          size = coverage,
+          alpha = (Prob * dispersion) / (1 - Prob),
+          beta = dispersion),
+        fitness = fitness,
+        mutation_rate = mut_rate,
+        Replicate = R) 
+    sample_lists[[file]] <- S
+  }
+}
+
+simulated_samples <- sample_lists %>%
+  do.call(what = rbind) %>% 
+  mutate(Individual = paste(fitness,mutation_rate,Replicate,sep = '_')) %>%
+  group_by(Individual) 
+
+simulated_samples <- simulated_samples %>%
+  mutate(VAF = sample / coverage) %>% 
+  filter(sample > 0) %>%
+  group_by(Individual,Mutation) %>%
+  filter(any(VAF > 0.005)) %>%
+  filter(length(VAF) > 2) 
+
+clone_count_df <- clone_counts %>%
+  do.call(what = rbind)
+```
+
+```{r visualise_dynamics,fig.width=20,fig.height=5}
+set.seed(4242)
+Data <- simulated_samples %>%
+  ungroup() %>% 
+  group_by(Individual) %>% 
+  filter(all(sample/coverage/2 < 0.45)) %>%
+  group_by(fitness) %>%
+  filter(Individual %in% sample(
+    x = Individual,
+    size = min(length(Individual),50),
+    replace = F))
+
+mutation_trajectories_plot <- Data %>%
+  ggplot(aes(x = Gen,y = VAF/2,group = paste(Individual,Mutation),colour = mutation_rate/1e-9)) +
+  geom_line(alpha = 0.3) +
+  theme_minimal() + 
+  theme(legend.position = "bottom") + 
+  scale_color_material(name = "Mutation rate (x10^-9)",
+                       palette = "light-blue") + 
+  facet_wrap(~fitness,nrow = 3) + 
+  ggtitle("Samples from our simulated cohort for each fitness value")
+mutation_trajectories_plot
+```
+
+We now need to set a model similar to the one described below, which is similar to the one used on the Sardinian cohort. The main difference here is that the model here presented does not have three distinct levels of a genetic effect (gene, domain and site) and has a single effect whose prior is the addition of the three previous priors ($N(0,0.1) + N(0,0.1) + N(0,0.1) = N(0,0.17)$). We also choose to not have mutations with $VAF > 0.45$ for all timepoints because this is an unrealistic scenario which we do not observe in our data.
+
+```{r setting_model,fig.width=10}
+Data$fitness_factor <- as.numeric(as.factor(Data$fitness))
+Data$individual_factor <- as.numeric(as.factor(paste(Data$Individual,Data$Mutation)))
+Age <- Data$Gen/13
+Age <- Age - min(Age)
+Counts <- round(t(Data$sample / 2)) %>% as_data()
+Coverage <- Data$coverage
+
+genetic_coef <- normal(0,sqrt(sum(rep(0.1^2,3))),dim = c(1,length(unique(Data$fitness))))
+clone_specific_coef <- normal(0,0.05,dim = c(1,length(unique(Data$individual_factor))))
+individual_offset <- uniform(-50,0,dim = c(1,length(unique(Data$individual_factor))))
+
+genetic_effect_indicator <- matrix(0,nrow = ncol(genetic_coef),ncol = nrow(Data))
+for (i in 1:nrow(Data)) {
+  genetic_effect_indicator[Data$fitness_factor[i],i] <- 1
+}
+
+genetic_effect <- genetic_coef %*% genetic_effect_indicator * t(Age)
+clone_specific_effect <- t(clone_specific_coef[Data$individual_factor]) * t(Age)
+individual_offset_effect <- t(individual_offset[Data$individual_factor])
+
+p <- ilogit(genetic_effect + clone_specific_effect + individual_offset_effect) / 2
+
+beta_coefficient <- normal(dispersion,dispersion_sd,truncation = c(0,Inf))
+alpha_coefficient <- (beta_coefficient * p) / (1-p)
+
+distribution(Counts) <- beta_binomial(
+  t(Coverage),
+  alpha_coefficient,
+  beta_coefficient
+)
+
+m <- model(genetic_coef,
+           clone_specific_coef,
+           individual_offset,
+           beta_coefficient)
+
+draws <- mcmc(m,
+              warmup = 1e3,
+              sampler = hmc(Lmin = 200,Lmax = 300),
+              n_samples = 2e3,
+              n_cores = 4)
+```
+
+## Assessing the quality of the fit
+
+### MCMC convergence diagnostic
+
+```{r diagnostics,fig.height=7,fig.width=10}
+mcmc_trace(draws,regex_pars = "genetic")
+
+rg_stat <- coda::gelman.diag(draws)
+ess <- coda::effectiveSize(draws)
+plot(rg_stat$psrf[,1],main = "Distribution of Rubin-Gelman Statistic",ylab = "Rubin Gelman Statistic",xlab = "Variable index")
+plot(ess,main = "Effective sample sizes for all variables",ylab = "Effective sample size",xlab = "Variable index",ylim = c(0,max(ess)),axes=F)
+axis(side = 2, at=seq(0,max(ess),by = 500),las=2)
+axis(side = 1)
+```
+
+We can see clearly from analysing the draws for the genetic coefficients that the MCMC has converged. Additionally, the above plots shows Rubin-Gelman statistic values are very close to 1 for all variables and effective sample sizes are at least 500. These 3 separate analysis combined together indicate that convergence has been achieved and that our estimates are acceptable.
+
+### Goodness of fit (residual effect)
+
+To assess the goodness of fit we assume that, for each trajectory, the probability density of our true counts under the inferred model - $p$ - should follow a uniform distribution if the fit is perfect. As such, the normal normal quantiles of $p$ should follow a normal distribution and the sum of their squares should follow a Chi-squared distribution. This allows us to have a "goodness of fit" for each trajectory varying between 0 (not good) and 1 (perfect), which can be stated as $s=CDF_{\chi^2}(\sum_{i=1}^{n}Q_{N(0,1)}(CDF_{BBinom(coverage,\alpha_{inferred},\beta_{inferred})}(counts))^2)$ (here $p=CDF_{BBinom(coverage,\alpha_{inferred},\beta_{inferred})}(counts)$). Using this, we now define a residual effect (RE) as $RE = 1 - s$ and 0.7 as a threshold for declaring a trajectory as good ($RE\lt0.7$) or bad ($RE\geq0.7$).
+
+```{r calculate_gof,fig.height=4,fig.width=4}
+min_age <- min(Data$Gen/13)
+all_predicted_variables <- variable_summaries(do.call(rbind,draws)) %>% 
+  as_tibble() %>%
+  mutate(variable_no = as.numeric(str_match(variable,'[0-9]+(?=\\])'))) %>% 
+  mutate(true_fitness = unique(simulated_samples$fitness)[variable_no]) %>% 
+  mutate(true_fitness_per_year = log(exp(true_fitness) ^ 13)) %>%
+  spread(key = labels,value = values)
+genetic_effect_inferred <- all_predicted_variables %>%
+  subset(grepl('genetic',variable)) %>%
+  arrange(variable_no)
+clone_effect_inferred <- all_predicted_variables %>%
+  subset(grepl('clone',variable)) %>%
+  arrange(variable_no)
+individual_effect_inferred <- all_predicted_variables %>%
+  subset(grepl('individual',variable)) %>%
+  arrange(variable_no)
+
+beta_val <- all_predicted_variables %>%
+  subset(variable == 'beta_coefficient')
+
+r_values <- data.frame(
+  fitness = Data$fitness,
+  genetic_effect = t(genetic_effect_inferred$mean %*% genetic_effect_indicator),
+  genetic_effect_005 = t(genetic_effect_inferred$`0.05` %*% genetic_effect_indicator),
+  genetic_effect_095 = t(genetic_effect_inferred$`0.95` %*% genetic_effect_indicator),
+  clone_effect = clone_effect_inferred$mean[Data$individual_factor],
+  clone_effect_005 = clone_effect_inferred$`0.05`[Data$individual_factor],
+  clone_effect_095 = clone_effect_inferred$`0.95`[Data$individual_factor],
+  individual_offset = individual_effect_inferred$mean[Data$individual_factor],
+  individual_offset_005 = individual_effect_inferred$`0.05`[Data$individual_factor],
+  individual_offset_095 = individual_effect_inferred$`0.95`[Data$individual_factor],
+  true_clone_age = Data$GenAtCloneFoundation/13,
+  true_count = Data$sample/2,
+  coverage = Data$coverage,
+  age = Age,
+  Mutation = Data$Mutation,
+  Individual = Data$Individual) %>%
+  as_tibble() %>% 
+  mutate(mu_val = inv.logit((genetic_effect + clone_effect)*age + individual_offset) / 2) %>%
+  mutate(
+    tail_prob = extraDistr::pbbinom(
+    q = true_count,
+    size = coverage,
+    alpha = (mu_val * beta_val$mean)/(1 - mu_val),
+    beta = beta_val$mean)) %>% 
+  group_by(individual_offset) %>%
+  mutate(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)))
+
+gof_plot_values <- r_values %>%
+  na.omit() %>% 
+  select(fitness,sum_stat) %>%
+  distinct() %>%
+  mutate(bad = sum_stat >= 0.7)
+explained_variants_plot <- gof_plot_values %>%
+  ggplot(aes(x = fitness,y = sum_stat,group = fitness,color = bad)) + 
+  geom_hline(yintercept = 0.7,alpha = 0.6,linetype=2) + 
+  geom_point(position = position_jitter(height = 0,width = 0),
+             alpha=0.7) +
+  theme_minimal() + 
+  annotate(geom = "label",
+           label = sprintf("Explained variants:\n%i/%i (%.3f)",
+                           nrow(gof_plot_values)-sum(gof_plot_values$bad),
+                           nrow(gof_plot_values),
+                           1-(sum(gof_plot_values$bad)/nrow(gof_plot_values))),
+           x = 0.00001,y = 1,hjust = 0,
+           vjust = 1,
+           label.r = unit(0,"cm"),
+           label.size = unit(0,"cm"),
+           alpha = 0.8
+           ) +
+  scale_color_lancet(guide=F) + 
+  ylab("Residual effect") + 
+  xlab("Fitness") 
+
+explained_variants_plot
+```
+
+The graphic shown above shows that a fairly good amount of trajectories ($\sim84\%$) are explained by our model. We exclude the non-explained trajectories from the calculation of age at clone foundation.
+
+### Genetic coefficients
+
+```{r check_parameters,fig.height=5,fig.width=5}
+predicted_variables <- variable_summaries(do.call(rbind,draws)) %>% 
+  as_tibble() %>%
+  subset(grepl('genetic',variable)) %>% 
+  mutate(variable_no = as.numeric(str_match(variable,'[0-9]+(?=\\])'))) %>% 
+  mutate(true_fitness = unique(simulated_samples$fitness)[variable_no]) %>% 
+  mutate(true_fitness_per_year = log(exp(true_fitness) ^ 13)) %>%
+  spread(key = labels,value = values)
+predicted_coefficients_plot <- predicted_variables %>%
+  ggplot(aes(y = `0.50`,ymin = `HDPI_low`,ymax = `HDPI_high`,x = true_fitness_per_year)) + 
+  geom_abline(slope=1,intercept = 0,linetype=2) +
+  #geom_smooth(method = 'lm',formula = y ~ x,color = 'grey4',linetype=2,size=1,se=F) +
+  geom_pointrange() + 
+  theme_minimal() + 
+  xlab("Observed genetic selection coefficient") + 
+  ylab("Inferred genetic\n selection coefficient")
+
+predicted_coefficients_plot
+```
+
+```{r correlation_inference}
+cor_test_inference <- cor.test(predicted_variables$true_fitness_per_year,predicted_variables$`0.50`)
+cor_test_inference
+cat(paste("Rsquared =",cor_test_inference$estimate^2))
+```
+
+The coefficients closely agree with the data, with high correlation ($R^2>0.85$) between the inferred and the true coefficients.
+
+### Age at clone foundation
+
+The advantage of these simulations is that we have a very precise value for when the mutation first appeared. This allows us to assess how closely we can estimate the age at clone foundation.
+
+```{r calculate_ages,fig.height=5,fig.width=10}
+age_data_list <- lapply(list(c(2,5e4),c(13,5e4),c(2,2e5),c(13,2e5)),function(x) {
+  gen_time <- x[1]
+  population <- x[2]
+  r_values %>% 
+    subset(sum_stat < 0.7) %>%
+    select(fitness,
+           individual_offset,individual_offset_005,individual_offset_095,
+           genetic_effect,genetic_effect_005,genetic_effect_095,
+           clone_effect,clone_effect_005,clone_effect_095,
+           true_clone_age,Individual,Mutation) %>%
+    distinct() %>%
+    mutate(gen_time = gen_time,
+           population = population) %>%
+    mutate(estimated_clone_age = t0_adjusted(individual_offset,genetic_effect + clone_effect,gen_time,population)+min_age,
+           estimated_clone_age_005 = t0_adjusted(individual_offset_005,genetic_effect_005 + clone_effect_005,gen_time,population)+min_age,
+           estimated_clone_age_095 = t0_adjusted(individual_offset_095,genetic_effect_095 + clone_effect_095,gen_time,population)+min_age) %>%
+    subset(estimated_clone_age_005 < 125 & estimated_clone_age_005 > -20) %>% 
+    mutate(true_clone_age_intervals = 10*round(true_clone_age/10) + 5)
+})
+age_data_full <- age_data_list %>% 
+  do.call(what = rbind) %>%
+  as_tibble()
+age_data <- age_data_list[[4]]
+
+estimated_ages_plot <- age_data_full %>% 
+  ggplot(aes(x = true_clone_age,y = estimated_clone_age,shape = paste(gen_time,population,sep=', '))) + 
+  geom_abline(slope=1,intercept=0,linetype=2,color = 'grey4') + 
+  #geom_smooth(se=F,method = 'glm',color = 'red4',linetype=3) +
+  geom_pointrange(aes(x = true_clone_age,
+                      ymin = estimated_clone_age_005,
+                      ymax = estimated_clone_age_095,
+                      shape = paste(gen_time,population,sep=', '),
+                      color = exp(fitness)^13),
+                  size = 0.5,
+                  alpha = 0.8) + 
+  geom_boxplot(
+    aes(group = true_clone_age_intervals),
+    alpha = 0.7,
+    outlier.alpha = 0
+  ) + 
+  scale_color_gradient(low = "pink",high = "red4",name = "True fitness") + 
+  theme_minimal() + 
+  ylab("Inferred age\n at clone foundation") +
+  xlab("Observed age at clone foundation") + 
+  theme(legend.position = 'right') +
+  scale_shape_discrete(name = "Generation time, population size")
+
+estimated_ages_plot
+```
+
+```{r correlation_age}
+cor_test_ages <- cor.test(age_data$true_clone_age,age_data$estimated_clone_age)
+cor_test_ages
+cat(paste("Rsquared =",cor_test_ages$estimate^2))
+```
+
+```{r age_residuals}
+age_data$residuals_005 <- age_data$true_clone_age - age_data$estimated_clone_age_005
+age_data$residuals <- age_data$true_clone_age - age_data$estimated_clone_age
+age_data$residuals_095 <- age_data$true_clone_age - age_data$estimated_clone_age_095
+age_data <- age_data %>%
+  mutate(residuals_min = ifelse(residuals_095 > residuals_005,residuals_005,residuals_095),
+         residuals_max = ifelse(residuals_095 < residuals_005,residuals_005,residuals_095)) 
+ggplot(age_data,aes(x = true_clone_age,y = residuals,ymax = residuals_max,ymin = residuals_min,color = fitness)) + 
+  geom_point() + 
+  #geom_linerange() + 
+  theme_minimal() + 
+  scale_color_material()
+
+car::qqPlot(age_data$residuals,
+            col = colorRampPalette(c('orange','brown'))(5)[as.numeric(cut(age_data$fitness,breaks = 5))],
+            xlab = "Theoretical quantiles",
+            ylab = "Observed quantiles")
+```
+
+The estimate for the ages, while not as good as the estimate for the coefficients, appears to be quite close to the true value. Below we inspect the clones for which the difference between predicted and true age at clone foundation differed more than by 20 years.
+
+```{r inspecting_bad_ones, fig.width=10,fig.height=6.5}
+root <- "/gpfs/nobackup/gerstung/josegcpa/projects/05VAF_DYNAMICS/hsc_output/hsc_%s_%s/r00%s.csv"
+
+individuals_mutations <- age_data %>% 
+  mutate(difference = abs(true_clone_age - estimated_clone_age)) %>% 
+  subset(difference > 20) %>% 
+  arrange(difference)
+file_ids <- str_split(individuals_mutations$Individual,pattern = '_') %>%
+  do.call(what = rbind) %>%
+  as.data.frame()
+colnames(file_ids) <- c("fitness","mutation_rate","replicate")
+file_ids <- file_ids %>% 
+  mutate(mutation_rate = as.numeric(str_match(file_ids$mutation_rate,'[0-9.]+')),
+         div = as.numeric(str_match(file_ids$mutation_rate,'[0-9.]+$')) - 9
+  ) %>%
+  mutate(mutation_rate = mutation_rate / (10^div)) %>% 
+  select(-div)
+file_ids$mutation <- sapply(individuals_mutations$Mutation,function(x) str_split(x,'_')[[1]][1]) %>%
+  as.numeric
+bad_predictions <- file_ids %>%
+  apply(1,function(x) {
+    x <- as.numeric(x)
+    if (x[2] < 1) {
+      mr <- as.character(format(x[2],nsmall=3))
+    } else {
+      mr <- as.character(paste0(0,format(x[2],nsmall=3)))
+    }
+    while (nchar(x[1]) < 6) {
+      x[1] <- paste0(x[1],"0")
+    }
+    file_name <- sprintf(root,x[1],mr,x[3])
+    tmp <- read_tsv(file_name,
+                    col_names = c("Gen","Count","Clone","Mutation"),
+                    col_types = list(col_number(),col_number(),
+                                     col_number(),col_number())) %>%
+      mutate(bad = Mutation == x[4]) %>%
+      mutate(fitness = x[1],
+             mutation_rate = x[2],
+             replicate = x[3])
+    return(tmp)
+  }) %>%
+  do.call(what = rbind) %>% 
+  mutate_all(as.numeric) %>% 
+  mutate(bad = as.logical(bad)) %>% 
+  filter(Mutation > 0) %>%
+  group_by(Mutation,Gen,fitness,mutation_rate,replicate,bad) %>%
+  summarise(Count = sum(Count)) %>%
+  group_by(Mutation) %>%
+  filter(length(Count) > 10) %>% 
+  mutate(Driver = Mutation <= (N_DRIVERS)) %>% 
+  mutate(Alpha = ifelse(Driver,0.9,0.05)) %>% 
+  ungroup()
+
+bad_predictions %>% 
+  ggplot(aes(x = Gen,y = Count,color = Driver,alpha=Alpha,
+             group = Mutation,
+             size = as.numeric(Driver))) + 
+  geom_hline(aes(yintercept = (1 - (1+fitness)^-1) / (1 - (1+fitness)^-pop_size) * pop_size),
+             size = 1.0) +
+  geom_line(aes(linetype = bad)) + 
+  scale_y_continuous(trans = 'log',
+                     breaks = c(10^seq(0,5),2e5)) + 
+  scale_alpha(guide = F) + 
+  theme_minimal() + 
+  scale_color_d3(name = NULL,labels = c("Passenger","Driver")) + 
+  theme(legend.position = "bottom") + 
+  scale_size(labels = c(FALSE,TRUE),
+             breaks = c(FALSE,TRUE),
+             limits = c(FALSE,TRUE),
+             range = c(0.5,1.5),
+             guide = F) + 
+  ylab("Count") + 
+  facet_wrap(~ fitness + mutation_rate + replicate,nrow = 2)
+```
+
+## Assessing the number of detected clones at different depths
+
+With these simulations we are also able to answer a question central to studying CH - if we are able to sequence everything at increasingly high depths, what do we get? Is it still CH if everything ends up being a clone? To assess this we "sequence" 1000 randomly sampled simulations at different timepoints (every 130 generations) at different coverages (20x,50x,100x,1000x,10000x).
+
+```{r investigating_sequencing_depths,fig.height=8,fig.width=4}
+set.seed(4242)
+random_samples <- list()
+for (i in sample.int(length(all_files),size=1000,replace = F)) {
+  file <- all_files[i]
+  split_file <- str_split(file,pattern = '/')[[1]]
+  root_name <- split_file[10]
+  fitness_mr <- as.numeric(unlist(str_match_all(root_name,"[0-9.]+")))
+  fitness <- fitness_mr[1]
+  mut_rate <- fitness_mr[2] * 1e-9
+  R <- as.numeric(str_match(split_file[11],pattern = '[0-9]+'))
+  df <- read_tsv(file,progress = F,
+                 col_names = c("Gen","Count","Clone","Mutation"),
+                 col_types = list(col_double(),col_double(),
+                                  col_double(),col_double()))
+  ages <- seq(0,1300,by = 100)
+  
+  tmp <- df %>%
+    subset(Mutation != 0) %>% 
+    arrange(Mutation,Gen) %>% 
+    group_by(Mutation) %>%
+    filter(length(Gen) > 1) %>%
+    mutate(Break = Gen - c(0,Gen[1:max(0,(length(Gen)-1))]) > 20) %>% 
+    mutate(Component = cumsum(Break)) %>%
+    ungroup() %>%
+    mutate(Mutation_C = paste(Mutation,Component,sep = '_')) %>%
+    group_by(Mutation_C) %>% 
+    mutate(GenAtCloneFoundation = min(Gen)) %>%
+    ungroup()  %>%
+    subset(Gen %in% ages) %>%
+    group_by(Mutation_C,Mutation,Gen) %>% 
+    summarise(Count = sum(Count),
+              GenAtCloneFoundation = GenAtCloneFoundation[1]) %>%
+    mutate(Prob = Count / 2e5) %>% 
+    filter(Prob > 0) %>%
+    ungroup()
+
+  S <- sapply(
+    c(20,50,100,1000,10000),
+    function(x) {
+      tot <- tmp %>% 
+        group_by(Gen) %>%
+        summarise(TotalClones = length(unique(Mutation_C)))
+      tmp %>%
+        mutate(coverage = x) %>% 
+        mutate(
+          sample = rbbinom(
+            nrow(tmp),
+            size = coverage,
+            alpha = (Prob * dispersion) / (1 - Prob),
+            beta = dispersion),
+          NClonesAtCoverageThreshold = Prob > 1/coverage,
+          NClonesAtDeterministicGrowth = Prob >  (1 - (1+fitness)^-1) / (1 - (1+fitness)^(-2e5)),
+          fitness = fitness,
+          mutation_rate = mut_rate,
+          Replicate = R) %>%
+        mutate(NClonesAtDeterministicGrowth = ifelse(Mutation <= N_DRIVERS,NClonesAtDeterministicGrowth,0.5)) %>%
+        merge(tot,by = "Gen") %>%
+        as_tibble() %>% 
+        return
+    },
+    simplify = F
+  ) %>%
+    do.call(what = rbind)
+  random_samples[[file]] <- S
+}
+
+random_sample_df <- random_samples %>%
+  do.call(what=rbind) %>%
+  group_by(Gen,coverage,mutation_rate,fitness,Replicate) %>% 
+  summarise(TrueNClones = length(unique(Mutation_C)),
+            TrueNDrivers = length(unique(Mutation_C[Mutation <= N_DRIVERS])),
+            NClonesAtThreshold = length(unique(Mutation_C[NClonesAtCoverageThreshold])),
+            NDriversAtThreshold = length(unique(Mutation_C[NClonesAtCoverageThreshold & Mutation <= N_DRIVERS])),
+            NClones = length(unique(Mutation_C[sample > 0])),
+            NDrivers = length(unique(Mutation_C[sample > 0 & Mutation <= N_DRIVERS])),
+            NClonesAtDeterministicGrowth = length(unique(Mutation_C[NClonesAtDeterministicGrowth & Mutation <= N_DRIVERS])))
+
+NClones_plot <- random_sample_df %>%  
+  ggplot(aes(x = Gen,y = NClones,color = as.factor(coverage))) + 
+  geom_line(aes(group = paste(as.factor(coverage),mutation_rate,fitness,Replicate)),
+            alpha=0.02) +
+  stat_summary(geom='line',fun = mean,
+               size = 1) + 
+  stat_summary(geom='linerange',fun.data = function(x) return(
+    list(ymin=quantile(x,0.05),
+         ymax=quantile(x,0.95))
+    ),
+    size = 0.3) + 
+  theme_minimal() + 
+  scale_color_lancet(name = "Coverage") + 
+  theme(legend.position = "bottom") +
+  scale_x_continuous(breaks = seq(0,1300,130)) + 
+  scale_y_continuous(expand = c(0,0.05),trans = 'log2',
+                     breaks = 2^seq(0,10))
+
+NClonesAtThreshold_plot <- random_sample_df %>%  
+  ggplot(aes(x = Gen,y = NClonesAtThreshold,color = as.factor(coverage))) + 
+  geom_line(aes(group = paste(as.factor(coverage),mutation_rate,fitness,Replicate)),
+            alpha=0.02) +
+  stat_summary(geom='line',fun = mean,
+               size = 1) + 
+  theme_minimal() + 
+  scale_color_lancet(name = "Coverage") + 
+  theme(legend.position = "bottom") +
+  scale_x_continuous(breaks = seq(0,1300,130)) + 
+  scale_y_continuous(expand = c(0,0.05),trans = 'log2',
+                     breaks = 2^seq(0,10))
+
+NDrivers_plot <- random_sample_df %>%  
+  ggplot(aes(x = Gen,y = NDrivers,color = as.factor(coverage))) + 
+  stat_summary(geom='line',fun = mean,
+               size = 1) + 
+  # stat_summary(geom='line',fun.data = function(x) return(
+  #   list(ymin=quantile(x,0.05),
+  #        y=mean(x),
+  #        ymax=quantile(x,0.95))
+  #   ),
+  #   size = 0.3,
+  #   alpha = 0.4) + 
+  theme_minimal() + 
+  scale_color_lancet(name = "Coverage") + 
+  theme(legend.position = "bottom") +
+  scale_x_continuous(breaks = seq(0,1300,130)) + 
+  scale_y_continuous(expand = c(0,0))
+
+NDriversAtThreshold_plot <- random_sample_df %>%  
+  ggplot(aes(x = Gen,y = NDriversAtThreshold,color = as.factor(coverage))) + 
+  stat_summary(geom='line',fun = mean,
+               size = 1) + 
+  # stat_summary(geom='line',fun.data = function(x) return(
+  #   list(ymin=quantile(x,0.05),
+  #        y=mean(x),
+  #        ymax=quantile(x,0.95))
+  #   ),
+  #   size = 0.3,
+  #   alpha = 0.4) + 
+  theme_minimal() + 
+  scale_color_lancet(name = "Coverage") + 
+  theme(legend.position = "bottom") +
+  scale_x_continuous(breaks = seq(0,1300,130)) + 
+  scale_y_continuous(expand = c(0,0))
+
+plot_grid(
+  NClones_plot + theme(legend.position = "none"),
+  NDrivers_plot + theme(legend.position = "none"),
+  NClonesAtThreshold_plot + theme(legend.position = "none"),
+  NDriversAtThreshold_plot + theme(legend.position = "none"),
+  get_legend(NClonesAtThreshold_plot),
+  rel_heights = c(1,1,1,1,0.2),
+  ncol=1
+)
+```
+
+```{r,fig.height=6,fig.width=5}
+BarPlotDetectableClones <- random_sample_df %>% 
+  group_by(Gen,coverage) %>%
+  summarise(PropDetectedClones = mean(NClonesAtThreshold/TrueNClones)) %>%
+  spread(key = "coverage",value = "PropDetectedClones") %>%
+  mutate(`20` = `20`,
+         `50` = `50` - `20`,
+         `100` = `100` - `50`,
+         `1000` = `1000` - `100`,
+         `10000` = `10000` - `1000`) %>% 
+  gather(key = "coverage",value = "PropDetectedClones",-Gen) %>% 
+  mutate(coverage = factor(coverage,levels = sort(unique(as.numeric(as.character(coverage)))))) %>% 
+  ggplot(aes(x = Gen,y = PropDetectedClones,fill = as.factor(coverage))) + 
+  geom_bar(stat="identity",color='black') + 
+  theme_minimal() + 
+  scale_fill_aaas(name="Minimum coverage\nfor detection") + 
+  theme(legend.position = "bottom") + 
+  xlab("Generation") + 
+  ylab("Proportion of detected clones")
+
+BarPlotDetectableDrivers <- random_sample_df %>% 
+  group_by(Gen,coverage) %>%
+  summarise(
+    PropDetectedClones = mean(na.omit(NDriversAtThreshold/TrueNDrivers))) %>%
+  spread(key = "coverage",value = "PropDetectedClones") %>%
+  # mutate(`20` = `20`,
+  #        `50` = `50` - `20`,
+  #        `100` = `100` - `50`,
+  #        `1000` = `1000` - `100`,
+  #        `10000` = `10000` - `1000`) %>% 
+  gather(key = "coverage",value = "PropDetectedClones",-Gen) %>% 
+  mutate(coverage = factor(coverage,levels = sort(unique(as.numeric(as.character(coverage)))))) %>% 
+  ggplot(aes(x = Gen,y = PropDetectedClones,fill = as.factor(coverage))) + 
+  geom_bar(stat="identity",color='black',position = 'dodge') + 
+  theme_minimal() + 
+  scale_fill_aaas(name="Coverage\nfor detection") + 
+  theme(legend.position = "bottom") + 
+  xlab("Generation") + 
+  ylab("Proportion of detected drivers")
+
+plot_grid(BarPlotDetectableClones,
+          BarPlotDetectableDrivers,
+          ncol=1)
+```
+
+```{r, fig.height=5,fig.width=12}
+random_sample_df %>%
+  subset(NClonesAtThreshold > 0) %>%
+  ggplot(aes(x = NClonesAtThreshold,fill = as.factor(1/coverage))) + 
+  geom_bar(color=NA) +
+  facet_grid( ~ Gen) +
+  theme_minimal() +
+  coord_flip() +
+  rotate_x_text() +
+  scale_y_continuous(trans = 'log10') +
+  scale_fill_lancet(name = "Detection threshold") +
+  theme(legend.position = "none")
+```
+
+```{r}
+random_sample_df %>%  
+  ggplot(aes(x = Gen,y = NClones/NClonesAtThreshold,color = as.factor(coverage))) + 
+  geom_line(aes(group = paste(as.factor(coverage),mutation_rate,fitness,Replicate)),
+            alpha=0.02) +
+  stat_summary(geom='line',fun = mean,
+               size = 1) + 
+  stat_summary(geom='linerange',fun.data = function(x) return(
+    list(ymin=quantile(x,0.05),
+         ymax=quantile(x,0.95))
+    ),
+    size = 0.3) + 
+  theme_minimal() + 
+  scale_color_lancet(name = "Coverage") + 
+  theme(legend.position = "bottom") +
+  scale_x_continuous(breaks = seq(0,1300,130)) + 
+  scale_y_continuous(name = "Fraction of detected and detectable clones",
+                     expand = c(0,0.05),trans = 'log2',
+                     breaks = 2^seq(0,10))
+```
+
+Analysing these figures quickly reveals a few aspects of how CH is generally treated, as well as a few caveats of CH: 
+
+1. **Using sufficient depth, CH is detectable at very young ages.** This goes against several reports defining CH as the formation of distinct genetic subpopulations in HSC. Indeed, what most studies have done is using targeted sequencing to define these subpopulations. This is, however, not realistic and a proper definition of CH as it is currently studied should contemplate this technical selection aspect - CH is the formation of distinct *and specific* genetic subpopulations in HSC as selected by the researcher
+
+2. **The number of clones depends, as expected, on the sequencing coverage.** While this is not necessarily surprising, it does warrant a specific caution: unless looking at drivers, one should not blanketly use the number of clones as a tool for prognosis, particularly if we do not have a better understanding of their dynamics. 
+
+3. **At lower sequencing depths, non-detectable clones are detected.** Non-detectable clones are defined as clones which do not represent $1/coverage$ of the population. At low sequencing depths we detect 3-15 more clones than should be detected. This may be due to the fact that we simulate the experimentally determined technical overdispersion associated with each sample through a beta-binomial distribution, leading us to detect clones which actually exist at lower depths. Assuming our simulations are technically correct and relevant, this makes a good case on the importance of sequencing at high depths when studying CH. At lower ages we also observe the detection of non-detectable clones for coverages of 1000, once again due to the simulation of technical overdispersion. This may be not as relevant for the CH research since these studies often contemplate older ages. 
+
+## Generating a final summary figure
+
+```{r example_trajectory}
+counts <- Data %>%
+  group_by(fitness,mutation_rate,Replicate) %>%
+  summarise(L = length(unique(Mutation_C))) %>%
+  filter(L > 1) 
+chosen_one <- counts %>% 
+  filter(L == 2)
+chosen_one <- chosen_one[2,]
+
+params <- c(f = chosen_one$fitness,
+            m = chosen_one$mutation_rate/(10^-9),
+            r = chosen_one$Replicate)
+
+if (params[2] < 1) {
+      params[2] <- as.character(format(params[2],nsmall=3))
+    } else {
+      params[2] <- as.character(paste0(0,format(params[2],nsmall=3)))
+    }
+
+while (nchar(params[1]) < 6) {
+  params[1] <- paste0(params[1],"0")
+}
+
+file <- sprintf(root,params[1],params[2],as.numeric(params[3]))
+
+df <- read_tsv(file,
+               col_names = c("Gen","Count","Clone","Mutation"),
+               col_types = list(col_number(),col_number(),
+                                col_number(),col_number()))
+
+fit_adv <- as.numeric(str_match_all(file,"[0-9.]+")[[1]][2])
+population_threshold <- (1 - (1+fit_adv)^-1) / (1 - (1+fit_adv)^-pop_size) #* pop_size 
+
+example_trajectory <- df %>% 
+  filter(Mutation > 0) %>%
+  group_by(Mutation,Gen) %>%
+  summarise(Count = sum(Count)) %>%
+  group_by(Mutation) %>%
+  filter(length(Count) > 1) %>% 
+  mutate(Driver = Mutation <= (N_DRIVERS)) %>% 
+  mutate(Alpha = ifelse(Driver,0.9,0.05)) %>% 
+  mutate(Break = Gen - c(0,Gen[1:max(0,(length(Gen)-1))]) > 20) %>% 
+  mutate(Component = cumsum(Break)) %>%
+  ungroup() %>%
+  mutate(Mutation = paste(Mutation,Component,sep = '_')) %>%
+  mutate(Count = Count/2e5)
+
+big_clone <- example_trajectory$Mutation[which.max(example_trajectory$Count)]
+big_clone_fixation <- example_trajectory$Gen[which.min(which(example_trajectory$Count > population_threshold))]
+  
+example_trajectory_plot <- example_trajectory %>% 
+  ggplot(aes(x = Gen,y = Count,color = Driver,alpha=Alpha,
+             group = Mutation,
+             size = as.numeric(Driver))) + 
+  geom_hline(yintercept = population_threshold,size = 1.0) +
+  geom_line() + 
+  annotate(geom = 'label',
+           x = 20,
+           y = 10^((log10(population_threshold)+log10(1/2e5))/2),
+           label = "Stochastic\ngrowth",
+           hjust = 0,
+           label.size = unit(0,"cm"),
+           label.r = unit(0,"cm"),
+           alpha = 0.8) +
+  annotate(geom = 'label',
+           x = 100,
+           y = sqrt(population_threshold),
+           label = "Deterministic\ngrowth",
+           hjust = 0,
+           label.size = unit(0,"cm"),
+           label.r = unit(0,"cm"),
+           alpha = 0.8) +
+  geom_errorbar(
+    inherit.aes = F,
+    data = data.frame(
+      ymin = c(min(example_trajectory$Count),population_threshold),
+      ymax = c(population_threshold,1.0),
+      x = c(20,100)
+    ),
+    aes(ymin = ymin, 
+        ymax = ymax,
+        x = x,
+        group = x),
+    color = 'black',
+    size = 0.5) + 
+  scale_y_continuous(trans = 'log10',
+                     breaks = c(10^c(-5:0)),limits = c(5e-6,1),
+                     expand = c(0,0.01)) + 
+  scale_alpha(guide = F) + 
+  theme_minimal() + 
+  scale_color_d3(name = NULL,labels = c("Neutral","Driver")) + 
+  theme(legend.position = "bottom") + 
+  scale_size(labels = c(FALSE,TRUE),
+             breaks = c(FALSE,TRUE),
+             limits = c(FALSE,TRUE),
+             range = c(0.5,1.5),
+             guide = F) + 
+  ylab("VAF") +
+  xlab("Generation")
+
+example_trajectory_plot
+```
+
+```{r big_picture,fig.height=6.5,fig.width=10}
+plot_list <- list(example_trajectory_plot + theme(legend.position = "top"),
+                  predicted_coefficients_plot,
+                  explained_variants_plot,
+                  estimated_ages_plot + theme(legend.position = "right"))
+
+main_results <- plot_grid(plotlist = plot_list,nrow = 2,labels = c("A","B","C","D"))
+
+main_results_w_trajectories <- plot_grid(mutation_trajectories_plot,
+                                         main_results,
+                                         ncol=1)
+
+main_results
+ggsave(main_results,filename = "figures/simulations/simulation_plot.pdf",height = 6,width = 10)
+ggsave(example_trajectory_plot + theme(legend.position = "top"),
+       filename = "figures/simulations/example_trajectory_plot.pdf",height = 3,width = 5)
+ggsave(predicted_coefficients_plot,
+       filename = "figures/simulations/predicted_coefficients_plot.pdf",height = 3,width = 5)
+ggsave(explained_variants_plot + theme(legend.position = "top"),
+       filename = "figures/simulations/explained_variants_plot.pdf",height = 3,width = 5)
+ggsave(estimated_ages_plot + theme(legend.position = "right"),
+       filename = "figures/simulations/estimated_ages_plot.pdf",height = 3,width = 5)
+```
+
+# Session details
+
+```{r session_details}
+cat(system("git log -n1", intern=TRUE), sep="\n")
+```
+
+```{r session_objects}
+l <- ls()
+data.frame(variable=l, Reduce("rbind",lapply(l, function(x) data.frame(classes=paste(class(get(x)),collapse = ','), size=format(object.size(get(x)), units="auto")))))
+```
+
+```{r session_packages}
+sessionInfo()
+```

@@ -1,0 +1,1295 @@
+---
+title: "The Natural History and Fitness Landscape of Clonal Haematopoiesis"
+subtitle: "Post-hoc analysis"
+author: 
+    - José Guilherme de Almeida
+    - Moritz Gerstung
+output: 
+  html_document:
+    theme: lumen
+    highlight: tango
+    code_folding: hide
+    df_print: paged
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 4
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r import_functions, include=FALSE}
+source("scripts/vaf_dynamics_functions.R")
+set.seed(42)
+```
+
+# Post-hoc analysis
+
+```{r loading_data}
+load(file = "vaf_modelling_coefficients.Rdata")
+values_model_f2 <- readRDS(file = "models/model_F2_full.RDS")
+source("scripts/prepare_data.R")
+```
+
+## What if - recreating mutation prevalence
+
+An interesting scenario is to use our growth coefficients and defined dynamics to see how this would affect mutation prevalence through different age brackets. 
+
+```{r observing incidence, fig.width=4,fig.height=7}
+INTERVAL <- 5
+incidence <- r_values %>%
+  subset(coverage > 0) %>%
+  mutate(AgeGroup = floor(age/INTERVAL) * INTERVAL) %>%
+  mutate(AgeGroupLabel = paste(AgeGroup,AgeGroup+INTERVAL,sep = '-')) %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  group_by(AgeGroup,AgeGroupLabel) %>%
+  mutate(TotalIndividuals = length(unique(individual))) %>%
+  ungroup() %>%
+  group_by(AgeGroup,AgeGroupLabel,genes,individual) %>%
+  summarise(MutPresence = any(true / coverage > 0.005),
+            TotalIndividuals = TotalIndividuals[1]) %>%
+  group_by(AgeGroup,AgeGroupLabel,genes) %>%
+  summarise(MutCount = sum(MutPresence),
+            TotalIndividuals = TotalIndividuals[1]) %>%
+  mutate(y = (MutCount) / (TotalIndividuals),
+         ymax = qbeta(0.99,MutCount,TotalIndividuals - MutCount + 1),
+         ymin = qbeta(0.01,MutCount,TotalIndividuals - MutCount + 1))
+
+true_incidence <- incidence %>%
+    subset(AgeGroup <= 90 & AgeGroup > 50) %>% 
+    ggplot(aes(x = AgeGroupLabel,
+               fill = genes,label = genes,
+               y = y)) +
+  theme_minimal(base_size = 12) +
+  scale_fill_manual(values = gene_colours,
+                    name = NULL) + 
+  geom_bar(stat = "identity",color = 'black') +
+  scale_x_discrete() + 
+  rotate_x_text() +
+  xlab("Age ranges") + 
+  ylab("Cummulative frequency") + 
+  ggsave("figures/prevalence/Prevalence.pdf",height = 7,width = 4)
+```
+
+```{r modelling incidence,warning=F}
+n_points <- load_data() %>%
+  select(SardID,Phase) %>%
+  distinct() %>%
+  group_by(SardID) %>%
+  summarise(n = length(SardID)) %>% 
+  group_by(n) %>%
+  summarise(N = length(n)) %>%
+  mutate(N = N / sum(N))
+coverage <- r_values$coverage
+coverage <- coverage[coverage != 0]
+coverage_distribution <- fitdistrplus::fitdist(coverage,"gamma",method = "mme")
+min_coverage <- min(coverage)
+BETA <- values_model_f2$beta_values[[1]][1,1]
+
+# sample from age distribution and not unfiorm 
+
+unique_combinations <- r_values %>%
+  group_by(individual) %>%
+  mutate(min_age = min(age),n_timepoints = length(unique(age)),
+         max_age = max(age)) %>%
+  ungroup() %>%
+  select(individual,site,coefficient,b_clone,u_values,genes,min_age,n_timepoints,max_age) %>% 
+  distinct
+
+unique_individuals <- r_values %>%
+  select(individual) %>%
+  unlist %>%
+  unique
+
+age_diff <- full_data %>% 
+  select(SardID,Age) %>% 
+  distinct() %>% 
+  arrange(SardID,Age) %>% 
+  group_by(SardID) %>% 
+  mutate(Age = c(Age) - c(Age[2:length(Age)],Age[length(Age)])) %>% 
+  subset(Age != 0) %>% 
+  ungroup() %>% 
+  summarise(AgeDiff = mean(Age)) %>% 
+  unlist %>% 
+  abs
+
+samples_through_time <- list()
+
+for (ind in unique_individuals) {
+  tmp <- unique_combinations %>%
+    subset(individual == ind)
+  n_timepoints <- tmp$n_timepoints[1]
+
+  ages <- tmp$min_age[1] + seq(0,(n_timepoints - 1)) * age_diff - values_model_f2$min_age
+  inferred_counts <- ages %>%
+    sapply(
+      function(x) {
+        tmp %>%
+          mutate(p = inv.logit((coefficient + b_clone) * x + u_values) * 0.5,
+                 age = x,
+                 coverage = round(rgamma(length(coefficient),
+                                         shape = coverage_distribution$estimate[1],
+                                         rate = coverage_distribution$estimate[2]))) %>%
+          mutate(coverage = ifelse(coverage < min_coverage,
+                                   min_coverage,
+                                   coverage)) %>%
+          mutate(counts = rbbinom(1,coverage,(BETA * p)/(1 - p)),BETA)
+      },
+      simplify = F
+    ) %>%
+    do.call(what = rbind) %>%
+    mutate(sample = counts / coverage) %>%
+    select(individual,site,sample,age,genes)
+  samples_through_time[[as.character(ind)]] <- inferred_counts
+}
+
+incidence_interpolation <- samples_through_time %>%
+  do.call(what = rbind) %>%
+  mutate(age = age + values_model_f2$min_age) %>%
+  mutate(AgeGroup = floor(age/INTERVAL) * INTERVAL) %>%
+  mutate(AgeGroupTrue = AgeGroup) %>%
+  mutate(AgeGroup = factor(paste(AgeGroup,AgeGroup+INTERVAL,sep = '-'),
+                           levels = paste(sort(unique(AgeGroup)),sort(unique(AgeGroup)) + INTERVAL,sep = '-'))) %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  group_by(AgeGroup,AgeGroupTrue) %>%
+  mutate(TotalIndividuals = length(unique(individual))) %>%
+  group_by(AgeGroup,AgeGroupTrue,genes,individual) %>%
+  summarise(MutPresence = any(sample > 0.005),
+            TotalIndividuals = TotalIndividuals[1]) %>%
+  group_by(AgeGroup,AgeGroupTrue,genes) %>%
+  summarise(MutCount = sum(MutPresence),
+            TotalIndividuals = TotalIndividuals[1]) %>%  
+  mutate(y = (MutCount) / (TotalIndividuals),
+         ymax = qbeta(0.99,MutCount,TotalIndividuals - MutCount + 1),
+         ymin = qbeta(0.01,MutCount,TotalIndividuals - MutCount + 1))
+
+simulated_incidence <- incidence_interpolation %>%
+    subset(AgeGroupTrue <= 90 & AgeGroupTrue > 50) %>% 
+    ggplot(aes(x = AgeGroup,
+               fill = genes,label = genes,
+               y = y)) +
+  theme_minimal(base_size = 12) +
+  scale_fill_manual(values = gene_colours,
+                    name = NULL) + 
+  geom_bar(stat = "identity",color = 'black') +
+  scale_x_discrete() + 
+  rotate_x_text() + 
+  xlab("Age ranges") + 
+  ylab("Cummulative frequency") + 
+  ggsave("figures/prevalence/PrevalenceSimulated.pdf",height = 7,width = 4)
+```
+
+```{r plotting_incidences,fig.width=8,fig.height=7}
+plot_grid(true_incidence + ggtitle("True incidence"),
+          simulated_incidence + ggtitle("Simulated incidence"),
+          nrow = 1) + 
+  ggsave("figures/prevalence/PrevalenceBoth.pdf") 
+```
+
+Using the trajectories we can replicate the observed prevalence to some extent. We overestimate the prevalence of a few clones early on life (JAK2, SRSF2) and overestimate the prevalence of DNMT3A and TP53 later in life. However, it is reassuring to see that the broad picture is till maintained.
+
+## dN/dS associations
+
+A popular measure of evolutionary selection in cancer is the dN/dS ratio as per Martincorena, which uses the ratio of non-synonymous mutations to synonymous mutations normalised by nucleotide context as a proxy for evolutionary selection. However, what is observable is that there is no correlation between the expected values for dN/dS and growth coefficients; indeed, a few genes appear to have higher than expected growth coefficients when considering their relative prevalence in our cohort (i.e. U2AF1-Q157R and SRSF2-P95H). 
+
+```{r dnds_comparison, fig.height=4,fig.width=8}
+values_b <- values_model_f2$b_values[[1]]
+values_b$site_name <- rep(full_formatted_data$unique_site[values_model_f2$gene_idxs],
+                          each = length(unique(values_model_f2$b_values[[1]]$labels)))
+values_b$gene <- values_b$site_name %>% 
+  sapply(function(x) unlist(str_split(x,pattern = '-'))[1])
+
+dnds_data <- load_dnds()
+dnds_site <- dnds_data$site %>%
+  mutate(site_merge = paste(gene,aachange,sep = '-'))
+coefficients_dnds <- values_b %>%
+  spread(key = "labels",value = "values") %>%
+  mutate(genes_corrected = str_match(gene,"[A-Z0-9]+")) %>%
+  mutate(site_merge = paste(genes_corrected,str_match(site_name,'[a-zA-Z0-9:>;\\.\\+]+$'),sep = '-')) %>% 
+  merge(dnds_site,by = "site_merge") %>%
+  subset(sig == T) %>%
+  select(HDPI_low,`0.025`,`0.50`,`0.975`,HDPI_high,
+         "dnds","genes_corrected","site_merge","aachange") %>%
+  distinct()
+
+dnds_cor_test <- cor.test(coefficients_dnds$`0.50`,log10(coefficients_dnds$dnds))
+dnds_site_plot <- coefficients_dnds %>%
+  ggplot(aes(x = dnds,
+             y = `0.50`,
+             ymax = `0.025`,
+             ymin = `0.975`)) +
+  geom_smooth(method = 'lm',linetype = 2,color = 'black',
+              alpha = 0.05,
+              formula = y ~ x - 1) + 
+  geom_point(aes(color = genes_corrected)) + 
+  geom_errorbar(aes(color = genes_corrected),
+                alpha=0.50) + 
+  theme_minimal() + 
+  # annotate(geom = 'text',x = 1000,y = min(coefficients_dnds$`0.025`,na.rm = T),
+  #          label = sprintf("Rsquared = %s\np-value = %s",
+  #                          round(dnds_cor_test$estimate^2,2),
+  #                          round(dnds_cor_test$p.value,2))) +
+  scale_color_manual(values = gene_colours,name = NULL) + 
+  theme(legend.position = "bottom") +
+  xlab('log(Site-specific dN/dS)') + 
+  ylab("Genetic clone growth coefficient") + 
+  scale_y_continuous(limits = c(-0.2,0.5)) + 
+  scale_x_continuous(trans='log10') + 
+  #ggtitle("dN/dS associations with genetic growth coefficients") + 
+  ggsave(filename = "figures/dnds/dnds.pdf",height = 5,width = 5)
+
+dnds_gene <- dnds_data$genes %>%
+  subset(sig == T) %>% 
+  select(gene_name,
+         dNdS_NT=wmis_cv,
+         dNdS_NT_0025=mis_95CIlow,
+         dNdS_NT_0975=mis_95CIhigh,
+         dNdS_T=wnon_cv,
+         dNdS_T_0025=trunc_95CIlow,
+         dNdS_T_0975=trunc_95CIhigh)
+dnds_gene <- rbind(
+  data.frame(Gene=dnds_gene$gene_name,
+             Value=dnds_gene$dNdS_NT,
+             Value_0025 = dnds_gene$dNdS_NT_0025,
+             Value_0975 = dnds_gene$dNdS_NT_0975,
+             Truncating=F),
+  data.frame(Gene=dnds_gene$gene_name,
+             Value=dnds_gene$dNdS_T,
+             Value_0025 = dnds_gene$dNdS_T_0025,
+             Value_0975 = dnds_gene$dNdS_T_0975,
+             Truncating=T)
+) %>%
+  mutate(Gene=as.character(Gene))
+
+values_b_gene <- values_model_f2$b_gene_values[[1]] 
+values_b_gene$Gene <- rep(full_formatted_data$unique_gene,
+                          each = length(unique(values_model_f2$b_gene_values[[1]]$labels)))
+values_b_gene <- values_b_gene %>% 
+  spread(key = "labels",value = "values") %>% 
+  mutate(Truncating = grepl('[0-9A-Z]t',Gene)) %>%
+  mutate(Gene = as.character(str_match(Gene,'[0-9A-Z]+'))) %>%
+  select(-variable) 
+coefficients_dnds_gene <- values_b_gene %>%
+  merge(dnds_gene,by = c("Gene","Truncating"))
+dnds_cor_test_gene <- cor.test(coefficients_dnds_gene$`0.50`,log10(coefficients_dnds_gene$Value))
+dnds_gene_plot <- coefficients_dnds_gene %>%
+  ggplot(aes(y=`0.50`,ymin=`0.025`,ymax=`0.975`,
+             x=Value,xmin=Value_0025,xmax=Value_0975,
+             color=Gene,shape = Truncating)) + 
+  geom_smooth(method = 'glm',inherit.aes=F,
+              mapping = aes(y=`0.50`,x=Value),
+              color='black',linetype=2,
+              alpha=0.05,
+              formula = y ~ x - 1) + 
+  geom_point() + 
+  geom_errorbar(alpha=0.5) + 
+  geom_errorbarh(alpha=0.5) + 
+  theme_minimal() + 
+  # annotate(geom = 'text',x = 1,y = min(coefficients_dnds_gene$`0.025`),
+  #          label = sprintf("Rsquared = %s\np-value = %s",
+  #                          round(dnds_cor_test_gene$estimate^2,2),
+  #                          round(dnds_cor_test_gene$p.value,2))) +
+  scale_shape(labels = c("Non-truncating","Truncating"),name = NULL) +
+  scale_color_manual(values = gene_colours,name = NULL) + 
+  theme(legend.position = "bottom") +
+  xlab('log(Gene dN/dS)') + 
+  ylab("Gene-only clone growth coefficient") + 
+  #ggtitle("dN/dS association with gene growth coefficients") + 
+  scale_x_continuous(trans='log10') + 
+  scale_y_continuous(limits = c(-0.2,0.35)) +
+  ggsave(filename = "figures/dnds/dnds_gene.pdf",height = 5,width = 5) 
+
+legend_dnds <- get_legend(dnds_gene_plot)
+plot_grid(dnds_gene_plot + theme(legend.position = "none"),
+          dnds_site_plot + theme(legend.position = "none")) %>%
+  plot_grid(legend_dnds,rel_heights = c(1,0.30),ncol=1)
+```
+
+## Associations between VAF and blood counts and blood biochemistry
+
+Here we calculate if/how changes in VAF are affected by changes in blood count and blood chemistry data.
+
+```{r load data and merge}
+stat_sign_individuals <- statistics_data %>%
+  group_by(individual) %>%
+  summarise(sig = sum(sum_stat < 0.7) > 0) %>%
+  subset(sig == T)
+
+blood_count_data <- load_blood_count_data()
+fuller_data <- merge(full_data,blood_count_data,by = c("SardID","Phase")) %>%
+  subset(!(SardID %in% c(load_excluded_individuals(),load_excluded_individuals_lymph()))) %>%
+  subset(SardID %in% stat_sign_individuals$individual)
+```
+
+```{r data preprocessing}
+complete_blood_counts <- fuller_data %>%
+  select(SardID,Phase,VAF,Age,amino_acid_change,relative_timepoint,single_occurring,
+         RBC,HB,MCV,MCH,WBC,NEUT_PERC,LYMPH_PERC,MONO_PERC,EOS_PERC,BASO_PERC,
+         PLT,Glucose,SerumInsulin,BLoodUreaNitrogen,Creatinine,ALT = ALT.y,AST,GGT,Fibrinogen,
+         TotalCholesterol,HDLcholesterol,Triglycerides,Iron,Transferrin,UricAcid,ESR,Phase,Age) %>%
+  group_by(SardID) %>%
+  mutate(complete = sum(is.na(RBC)) == 0) %>%
+  ungroup() %>%
+  subset(complete == T) %>%
+  mutate(
+    NEUT = WBC * NEUT_PERC/100,
+    MONO = WBC * MONO_PERC/100,
+    LYMPH = WBC * LYMPH_PERC/100,
+    BASO = WBC * BASO_PERC/100,
+    EOS = WBC * EOS_PERC/100
+  )
+```
+
+Latent class mixture models allow us to define different classes for time series. For our case, the time series we consider here are those described by blood count and chemistry parameters through time, allowing us to stratify individuals based on their growth. This was inspired by [this work](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6819541/pdf/12889_2019_Article_7752.pdf).
+
+```{r prepare_lcmm}
+complete_blood_counts_lcmm <- complete_blood_counts %>% 
+  subset(!(SardID %in% c(load_excluded_individuals(),load_excluded_individuals_lymph()))) %>%
+  merge(distinct(select(full_data,SardID,Gender)),by = "SardID",all = F) %>%
+  group_by(SardID) %>%
+  mutate(MinAge = min(Age),
+         Age = Age - min(Age),
+         subject = as.numeric(SardID)) %>%
+  distinct()
+
+LINK <- "linear"
+MIXTURE_FORMULA <- formula(" ~ Age + Age:factor(Gender) + factor(Gender)")
+
+LCMM_MODELS <- list()
+```
+
+```{r lcmm_esr, fig.height=10,fig.width=5}
+LCMM_MODELS$ESR <- list()
+
+lcmm_fit <- lcmm(
+  fixed = ESR ~ Age +  Age:factor(Gender) + factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  mixture = MIXTURE_FORMULA,
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  idiag = T,
+  ng = 2)
+
+LCMM_MODELS$ESR$MODEL_FULL <- lcmm(
+  fixed = ESR ~ Age +  Age:factor(Gender) + factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  idiag = 1)
+
+summary(lcmm_fit)
+
+tmp <- which.max(table(lcmm_fit$pprob$class))
+
+lcmm_fit$pprob$class <- ifelse(
+  lcmm_fit$pprob$class == tmp,
+  '1',
+  '2'
+)
+
+LCMM_MODELS$ESR$MODEL <- lcmm_fit
+LCMM_MODELS$ESR$TRAJECTORIES <- complete_blood_counts_lcmm %>%
+  merge(lcmm_fit$pprob,by = "subject") %>%
+  ggplot(aes(x = Age,y = ESR)) + 
+  geom_line(aes(group = SardID),alpha = 0.3) +
+  facet_wrap( ~ class) +
+  geom_smooth(method = 'lm',formula = y ~ x,
+              linetype = 4,
+              colour = 'red') + 
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = 'bottom') + 
+  xlab("Years since study entry")
+
+LCMM_MODELS$ESR$BOXPLOT <- r_values %>%
+  select(individual,coefficient,b_clone) %>%
+  group_by(individual) %>%
+  filter((b_clone) == max(b_clone)) %>%
+  distinct() %>%
+  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject") %>%
+  merge(distinct(select(full_data,SardID,Gender)),by.x = 'individual',by.y = "SardID") %>%
+  ggplot(aes(x = as.factor(class),y = b_clone)) + 
+  geom_boxplot(alpha = 0.8) + 
+  geom_signif(comparisons = list(c("1","2")),
+              map_signif_level = function(x) return(paste("p-value =",round(x,4))),
+              test = wilcox.test) + 
+  stat_summary(geom = 'text',
+               fontface = 'italic',
+               fun.data = function(x) return(list(y = 0.18,label = sprintf('n = %s',length(x))))) +
+  xlab("Trajectory type") + 
+  ylab("Growth effect") + 
+  theme_minimal(base_size = 15)
+```
+
+```{r lcmm_wbc, fig.height=10,fig.width=5}
+LCMM_MODELS$WBC <- list()
+
+lcmm_fit <- lcmm(
+  fixed = WBC ~ Age + Age:factor(Gender) + factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  mixture = MIXTURE_FORMULA,
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  idiag = T,
+  ng = 2)
+
+LCMM_MODELS$WBC$MODEL_FULL <- lcmm(
+  fixed = WBC ~ Age +  Age:factor(Gender) + factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  idiag = 1)
+
+summary(lcmm_fit)
+
+tmp <- which.max(table(lcmm_fit$pprob$class))
+
+lcmm_fit$pprob$class <- ifelse(
+  lcmm_fit$pprob$class == tmp,
+  '1',
+  '2'
+)
+
+LCMM_MODELS$WBC$MODEL <- lcmm_fit
+LCMM_MODELS$WBC$TRAJECTORIES <- complete_blood_counts_lcmm %>%
+  merge(lcmm_fit$pprob,by = "subject") %>%
+  ggplot(aes(x = Age,y = WBC)) + 
+  geom_line(aes(group = SardID),alpha = 0.3) +
+  facet_wrap( ~ class) +
+  geom_smooth(method = 'lm',formula = y ~ x,
+              linetype = 4,
+              colour = 'red') + 
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = 'bottom') + 
+  xlab("Years since study entry") 
+
+LCMM_MODELS$WBC$BOXPLOT <- r_values %>%
+  select(individual,coefficient,b_clone) %>%
+  group_by(individual) %>%
+  filter((b_clone) == max(b_clone)) %>%
+  distinct() %>%
+  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject") %>%
+  merge(distinct(select(full_data,SardID,Gender)),by.x = 'individual',by.y = "SardID") %>%
+  ggplot(aes(x = as.factor(class),y = b_clone)) + 
+  geom_boxplot(alpha = 0.8) + 
+  geom_signif(comparisons = list(c("1","2")),
+              map_signif_level = function(x) return(paste("p-value =",round(x,4))),
+              test = wilcox.test) + 
+  stat_summary(geom = 'text',
+               fontface = 'italic',
+               fun.data = function(x) return(list(y = 0.18,label = sprintf('n = %s',length(x))))) +
+  xlab("Trajectory type") + 
+  ylab("Growth effect") + 
+  theme_minimal(base_size = 15)
+```
+
+```{r lcmm_hb, fig.height=10,fig.width=5}
+LCMM_MODELS$HB <- list()
+
+lcmm_fit <- lcmm(
+  fixed = HB ~ Age + Age:factor(Gender) + factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  mixture = MIXTURE_FORMULA,
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  idiag = T,
+  ng = 2)
+
+LCMM_MODELS$HB$MODEL_FULL <- lcmm(
+  fixed = HB ~ Age +  Age:factor(Gender) + factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  idiag = T)
+
+summary(lcmm_fit)
+
+tmp <- which.max(table(lcmm_fit$pprob$class))
+
+lcmm_fit$pprob$class <- ifelse(
+  lcmm_fit$pprob$class == tmp,
+  '1',
+  '2'
+)
+
+LCMM_MODELS$HB$MODEL <- lcmm_fit
+LCMM_MODELS$HB$TRAJECTORIES <- complete_blood_counts_lcmm %>%
+  merge(lcmm_fit$pprob,by = "subject") %>%
+  ggplot(aes(x = Age,y = HB)) + 
+  geom_line(aes(group = SardID),alpha = 0.3) +
+  facet_wrap( ~ class) +
+  geom_smooth(method = 'lm',formula = y ~ x,
+              linetype = 4,
+              colour = 'red') + 
+  theme_minimal(base_size = 15) +
+  theme(legend.position = 'bottom') + 
+  xlab("Years since study entry")
+
+LCMM_MODELS$HB$BOXPLOT <- r_values %>%
+  select(individual,coefficient,b_clone) %>%
+  group_by(individual) %>%
+  filter((b_clone) == max(b_clone)) %>%
+  distinct() %>%
+  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject") %>%
+  merge(distinct(select(full_data,SardID,Gender)),by.x = 'individual',by.y = "SardID") %>%
+  ggplot(aes(x = as.factor(class),y = b_clone)) + 
+  geom_boxplot(alpha = 0.8) + 
+  geom_signif(comparisons = list(c("1","2")),
+              map_signif_level = function(x) return(paste("p-value =",round(x,4))),
+              test = wilcox.test) + 
+  stat_summary(geom = 'text',
+               fontface = 'italic',
+               fun.data = function(x) return(list(y = 0.18,label = sprintf('n = %s',length(x))))) +
+  xlab("Trajectory type") + 
+  ylab("Growth effect") + 
+  theme_minimal(base_size = 15)
+```
+
+```{r lcmm_plt, fig.height=10,fig.width=5}
+LCMM_MODELS$PLT <- list()
+
+lcmm_fit <- lcmm(
+  fixed = PLT ~ Age + Age:factor(Gender) + factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  mixture = MIXTURE_FORMULA,
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  idiag = T,
+  ng = 2)
+
+LCMM_MODELS$PLT$MODEL_FULL <- lcmm(
+  fixed = PLT ~ Age +  Age:factor(Gender) + factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  idiag = 1)
+
+summary(lcmm_fit)
+
+tmp <- which.max(table(lcmm_fit$pprob$class))
+
+lcmm_fit$pprob$class <- ifelse(
+  lcmm_fit$pprob$class == tmp,
+  '1',
+  '2'
+)
+
+LCMM_MODELS$PLT$MODEL <- lcmm_fit
+LCMM_MODELS$PLT$TRAJECTORIES <- complete_blood_counts_lcmm %>%
+  merge(lcmm_fit$pprob,by = "subject") %>%
+  ggplot(aes(x = Age,y = PLT)) + 
+  geom_line(aes(group = SardID),alpha = 0.3) +
+  facet_wrap( ~ class) +
+  geom_smooth(method = 'lm',formula = y ~ x,
+              linetype = 4,
+              colour = 'red')  + 
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = 'bottom') + 
+  xlab("Years since study entry")
+
+LCMM_MODELS$PLT$BOXPLOT <- r_values %>%
+  select(individual,coefficient,b_clone,genes) %>%
+  group_by(individual) %>%
+  filter((b_clone) == max(b_clone)) %>%
+  distinct() %>%
+  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject") %>%
+  merge(distinct(select(full_data,SardID,Gender)),by.x = 'individual',by.y = "SardID") %>%
+  ggplot(aes(x = as.factor(class),y = b_clone)) + 
+  geom_boxplot(alpha = 0.8) + 
+  geom_signif(comparisons = list(c("1","2")),
+              map_signif_level = function(x) return(paste("p-value =",round(x,4))),
+              test = wilcox.test) + 
+  stat_summary(geom = 'text',
+               fontface = 'italic',
+               fun.data = function(x) return(list(y = 0.18,label = sprintf('n = %s',length(x))))) +
+  xlab("Trajectory type") + 
+  ylab("Growth effect") + 
+  theme_minimal(base_size = 15)
+```
+
+```{r visualise_all_lcmm,fig.height = 6.5,fig.width = 14}
+plot_grid(
+  plot_grid(LCMM_MODELS$WBC$TRAJECTORIES + 
+              ggtitle("WBC") + 
+              theme(plot.title = element_text(hjust = 0.5)) + 
+              xlab("") + 
+              ylab("Parameter value"),
+            LCMM_MODELS$WBC$BOXPLOT + 
+              xlab("") + 
+              ylab("Clone-specific effect") + 
+              theme(panel.grid.major.x = element_blank()),
+            ncol = 1,
+            rel_heights = c(0.9,0.8)),
+  plot_grid(LCMM_MODELS$HB$TRAJECTORIES + 
+              ggtitle("Hb") + 
+              theme(plot.title = element_text(hjust = 0.5)) + 
+              ylab(""),
+            LCMM_MODELS$HB$BOXPLOT + 
+              ylab("") + 
+              theme(panel.grid.major.x = element_blank()),
+            ncol = 1,
+            rel_heights = c(0.9,0.8)),
+  plot_grid(LCMM_MODELS$PLT$TRAJECTORIES + ggtitle("Plt") + 
+              theme(plot.title = element_text(hjust = 0.5)) + 
+              xlab("") +
+              ylab(""),
+            LCMM_MODELS$PLT$BOXPLOT + 
+              xlab("") + 
+              ylab("") + 
+              theme(panel.grid.major.x = element_blank()),
+            ncol = 1,
+            rel_heights = c(0.9,0.8)),
+  plot_grid(LCMM_MODELS$ESR$TRAJECTORIES + ggtitle("ESR") + 
+              theme(plot.title = element_text(hjust = 0.5)) + 
+              xlab("") + 
+              ylab(""),
+            LCMM_MODELS$ESR$BOXPLOT + 
+              xlab("") + 
+              ylab("") + 
+              theme(panel.grid.major.x = element_blank()),
+            ncol = 1,
+            rel_heights = c(0.9,0.8)),
+  nrow = 1
+) + 
+  ggsave(filename = "figures/phenotype_associations/FigureBloodCounts.pdf",height = 6.5,width = 14) +
+  ggsave(filename = "figures/phenotype_associationsFigureBloodCounts.svg",height = 6.5,width = 14)
+```
+
+```{r compare_trajectories}
+trajectory_class_data <- rbind(
+  data.frame(LCMM_MODELS$ESR$MODEL$pprob[,c(1,2)],
+             Parameter = "ESR"),
+  data.frame(LCMM_MODELS$WBC$MODEL$pprob[,c(1,2)],
+             Parameter = "WBC"),
+  data.frame(LCMM_MODELS$HB$MODEL$pprob[,c(1,2)],
+             Parameter = "Hb"),
+  data.frame(LCMM_MODELS$PLT$MODEL$pprob[,c(1,2)],
+             Parameter = "Plt")
+) %>%
+  group_by(subject) %>%
+  mutate(N = sum(class == 2)) %>%
+  ungroup() %>%
+  arrange(N) %>%
+  mutate(subject = factor(subject,
+                          levels = rev(unique(subject)),
+                          ordered = T)) 
+
+N_trajectory_plot <- trajectory_class_data %>%
+  ggplot(aes(y = "N",x = subject,fill = N)) + 
+  geom_tile() +
+  scale_fill_material(palette = "blue") + 
+  theme_minimal() +
+  scale_x_discrete(expand = c(0,0)) + 
+  scale_y_discrete(expand = c(0,0)) + 
+  theme(axis.text.x = element_blank(),
+        legend.position = 'none') + 
+  ylab("") + 
+  xlab("")
+
+class_trajectory_plot <- trajectory_class_data %>%
+  ggplot(aes(x = subject,y = Parameter,fill = class)) + 
+  geom_tile(color = 'black') + 
+  theme_minimal() + 
+  scale_x_discrete(expand = c(0,0)) + 
+  scale_y_discrete(expand = c(0,0)) +
+  theme(axis.text.x = element_blank(),
+        legend.position = 'bottom') +
+  scale_fill_lancet(name="Trajectory") + 
+  xlab("Individual")
+
+plot_grid(
+  N_trajectory_plot,
+  class_trajectory_plot,
+  ncol=1,
+  rel_heights = c(0.15,1.0),align = T
+)
+```
+
+```{r table_trajectory_coefficients}
+trajectory_coefficient_data <- rbind(
+  data.frame(coeff = c(coef(LCMM_MODELS$WBC$MODEL)[c(3,4)],
+                       coef(LCMM_MODELS$WBC$MODEL_FULL)[1]),
+             Parameter = "WBC",
+             class = c(1,2,"Full")),
+  data.frame(coeff = c(coef(LCMM_MODELS$HB$MODEL)[c(3,4)],
+                       coef(LCMM_MODELS$HB$MODEL_FULL)[1]),
+             Parameter = "Hb",
+             class = c(1,2,"Full")),
+  data.frame(coeff = c(coef(LCMM_MODELS$PLT$MODEL)[c(3,4)],
+                       coef(LCMM_MODELS$PLT$MODEL_FULL)[1]),
+             Parameter = "Plt",
+             class = c(1,2,"Full")),
+  data.frame(coeff = c(coef(LCMM_MODELS$ESR$MODEL)[c(3,4)],
+                       coef(LCMM_MODELS$ESR$MODEL_FULL)[1]),
+             Parameter = "ESR",
+             class = c(1,2,"Full"))
+)
+
+trajectory_coefficient_data %>% 
+  spread(key = "class",value = "coeff") 
+```
+
+To better assess the relevance of these data we need to compare them with reference values. A few studies ([here](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3446744/) and [here](https://www.jstage.jst.go.jp/article/geriatrics1964/28/4/28_4_509/_pdf/-char/ja)) have assessed this, so we can use them to approximate a reference value. 
+
+```{r reference_values}
+reference_values_women_HD <- data.frame(
+  Decade = c("50-59","60-69","70-79","80-89","+90"),
+  Decade_numeric = c(5,6,7,8,9),
+  Hb = c(12.1,10.5,10.2,9.3,8.8),
+  Plt = c(442.40,385.91,443.72,388.04,360.02),
+  WBC = c(4.6,3.2,4.5,4.2,4.0),
+  N = c(122,100,121,111,49),
+  Sex = "F",
+  Place = "HD"
+)
+reference_values_men_HD <- data.frame(
+  Decade = c("50-59","60-69","70-79","80-89","+90"),
+  Decade_numeric = c(5,6,7,8,9),
+  Hb = c(12.1,11.7,9.9,9.6,9.7),
+  Plt = c(136.5,123.9,82.8,104.8,137.4),
+  WBC = c(4.3,3.9,4.1,4.2,NA),
+  N = c(99,102,105,113,20),
+  Sex = "M",
+  Place = "HD"
+)
+
+reference_values_women_JP_1 <- data.frame(
+  Decade = c("50-59","60-69","70-79","80-89","+90"),
+  Decade_numeric = c(5,6,7,8,9),
+  Hb = c(13.6,13.3,NA,NA,NA),
+  Plt = c(235,244,NA,NA,NA),
+  WBC = c(5.4,5.5,NA,NA,NA),
+  N = c(152,33,NA,NA,NA),
+  Sex = "F",
+  Place = "JP"
+)
+reference_values_men_JP_1 <- data.frame(
+  Decade = c("50-59","60-69","70-79","80-89","+90"),
+  Decade_numeric = c(5,6,7,8,9),
+  Hb = c(15.3,15.0,14.6,NA,NA),
+  Plt = c(231,232,237,NA,NA),
+  WBC = c(6.3,6.1,5.9,NA,NA),
+  N = c(300,110,6,NA,NA),
+  Sex = "M",
+  Place = "JP"
+)
+
+reference_values_women_JP_2 <- data.frame(
+  Decade = c("50-59","60-69","70-79","80-89","+90"),
+  Decade_numeric = c(5,6,7,8,9),
+  Hb = c(NA,13.8,13.8,13.4,13.5),
+  Plt = c(NA,279,268,269,205),
+  WBC = c(NA,5.9,5.8,5.8,5.3),
+  N = c(NA,81,208,109,4),
+  Sex = "F",
+  Place = "JP"
+)
+reference_values_men_JP_2 <- data.frame(
+  Decade = c("50-59","60-69","70-79","80-89","+90"),
+  Decade_numeric = c(5,6,7,8,9),
+  Hb = c(NA,13.8,13.8,13.4,13.5),
+  Plt = c(NA,269,261,239,269),
+  WBC = c(NA,6.7,6.3,6.6,6.2),
+  N = c(NA,72,106,61,4),
+  Sex = "M",
+  Place = "JP"
+)
+
+reference_values <- rbind(
+  reference_values_women_HD,
+  reference_values_women_JP_1,
+  reference_values_women_JP_2,
+  reference_values_men_HD,
+  reference_values_men_JP_1,
+  reference_values_men_JP_2
+)
+
+glm(Hb ~ Decade_numeric + Place,data = reference_values,weights = reference_values$N) %>%
+  summary
+glm(Plt ~ Decade_numeric + Place,data = reference_values,weights = reference_values$N) %>%
+  summary 
+glm(WBC ~ Decade_numeric + Place,data = reference_values,weights = reference_values$N) %>%
+  summary
+```
+
+## Sex, smoking and other factors
+
+```{r differences_sex, fig.width=15,fig.height=5}
+effect_distribution_gender <- complete_blood_counts_lcmm %>%
+  select(individual = SardID,Gender) %>% 
+  distinct %>%
+  merge(r_values %>% select(individual,site,coefficient,b_clone,genes),by = c('individual')) %>%
+  group_by(individual) %>%
+  mutate(effect = coefficient) %>% 
+  distinct() %>% 
+  filter(effect == max(effect)) %>%
+  mutate(Gender = ifelse(Gender == 'F','Female','Male')) %>%
+  mutate(Truncating = !grepl("nt",genes)) %>%
+  mutate(Truncating = ifelse(is.na(Truncating),F,T)) %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  ggplot(aes(x = as.factor(Gender),y = effect)) + 
+  geom_boxplot(alpha = 0.8) + 
+  theme_minimal(base_size = 15) + 
+  geom_signif(comparisons = list(c("Male","Female")),
+              map_signif_level = function(x) return(paste("p-value =",format(x,scientifier = T,digits = 4))),
+              test = wilcox.test) + 
+  ylab("Genetic effect") + 
+  xlab("Sex") 
+
+gene_mutation_distribution_gender <- complete_blood_counts_lcmm %>%
+  select(individual = SardID,Gender) %>% 
+  distinct %>%
+  merge(r_values %>% select(individual,site,coefficient,b_clone,genes),by = c('individual')) %>%
+  mutate(full_effect = coefficient + b_clone) %>% 
+  group_by(individual) %>%
+  filter(coefficient == max(coefficient)) %>%
+  mutate(Gender = ifelse(Gender == 'F','Female','Male')) %>%
+  mutate(Truncating = !grepl("nt",genes)) %>%
+  mutate(Truncating = ifelse(is.na(Truncating),F,T)) %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  ggplot(aes(x = genes,fill = Gender)) + 
+  geom_bar(stat = "count",position = 'dodge') + 
+  theme_minimal(base_size = 15) +
+  scale_fill_lancet(name = NULL) + 
+  rotate_x_text() + 
+  theme(legend.position = "bottom") + 
+  ylab("Count") + 
+  xlab("Gene")
+
+age_distribution_gender <- complete_blood_counts_lcmm %>%
+  select(individual = SardID,Gender) %>% 
+  distinct %>%
+  merge(r_values %>% select(age,individual,site,coefficient,b_clone,genes),by = c('individual')) %>%
+  mutate(full_effect = coefficient + b_clone) %>% 
+  group_by(individual) %>%
+  filter(coefficient == max(coefficient)) %>%
+  mutate(Gender = ifelse(Gender == 'F','Female','Male')) %>%
+  mutate(Truncating = !grepl("nt",genes)) %>%
+  mutate(Truncating = ifelse(is.na(Truncating),F,T)) %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  ggplot(aes(x = Gender,y = age,fill = Gender)) + 
+  geom_boxplot() + 
+  theme_minimal(base_size = 15) +
+  scale_fill_lancet(name = NULL) + 
+  rotate_x_text() + 
+  theme(legend.position = "bottom") + 
+  ylab("Mutation count") + 
+  xlab("Gene")
+
+effect_distribution_gender %>% 
+  ggsave(filename = "figures/phenotype_associations/FigureGender.svg",width = 3.5,height = 4)
+effect_distribution_gender %>% 
+  ggsave(filename = "figures/phenotype_associations/FigureGender.pdf",width = 3.5,height = 4)
+
+plot_grid(gene_mutation_distribution_gender,effect_distribution_gender,nrow = 1,rel_widths = c(1,0.3)) + 
+  ggsave(filename = "figures/phenotype_associations/FigureGenderWithBarplot.pdf",width = 15,height = 4.5)
+```
+
+```{r gene_composition}
+load_smoking_data() %>% 
+  mutate(status = ifelse(QuitSmoking == 'N' & CurrentSmoker == 'N',"Never smoked",
+                         ifelse(QuitSmoking == 'N' & CurrentSmoker == 'Y',"Smoker",
+                                "Previous smoker"))) %>% 
+  subset(!is.na(CurrentSmoker)) %>% 
+  group_by(SardID) %>%
+  summarise(
+    status = ifelse(
+      sum(status == 'Smoker') > 0,'Smoked during study',
+      ifelse(sum(status == 'Previous smoker') > 0, 'Smoked before study',
+             'Never smoked')
+    )
+  ) %>% 
+  merge(clone_ages,by.x = "SardID",by.y = "individual") %>% 
+  select(genes,SardID,status) %>%
+  distinct() %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  group_by(status) %>%
+  mutate(total = length(unique(SardID))) %>%
+  ungroup() %>% 
+  mutate(total_individuals = length(unique(SardID))) %>% 
+  group_by(status) %>%
+  mutate(smoker_proportion = total / total_individuals) %>%
+  group_by(genes,status) %>%
+  summarise(proportion = length(unique(SardID))/total[1],
+            total = total[1],
+            smoker_proportion = smoker_proportion[1]) %>%
+  ggplot(aes(x = genes,y = proportion,fill = status)) +
+  geom_bar(stat = 'identity',position = 'dodge') + 
+  #geom_text(aes(label = total)) +
+  theme_minimal() + 
+  theme(legend.position = 'bottom') + 
+  rotate_x_text() + 
+  xlab("Gene") + 
+  ylab("Enrichment") +
+  scale_fill_lancet(name = NULL)
+```
+
+```{r differences_smoking_coefficient, fig.height=7,fig.width=6}
+load_smoking_data() %>% 
+  mutate(status = ifelse(QuitSmoking == 'N' & CurrentSmoker == 'N',"Never smoked",
+                         ifelse(QuitSmoking == 'N' & CurrentSmoker == 'Y',"Smoker",
+                                "Previous smoker"))) %>% 
+  subset(!is.na(CurrentSmoker)) %>% 
+  group_by(SardID) %>%
+  summarise(
+    status = ifelse(
+      sum(status == 'Smoker') > 0,'During',
+      ifelse(sum(status == 'Previous smoker') > 0, 'Before',
+             'Never')
+    )
+  ) %>% 
+  mutate(status = factor(status,levels = c("Never","Before","During"))) %>%
+  merge(r_values,by.x = "SardID",by.y = "individual") %>%
+  mutate(individual = SardID) %>%
+  merge(statistics_data,by = c("individual","site")) %>%
+  subset(sum_stat < 0.7) %>% 
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  group_by(SardID) %>%
+  mutate(effect = coefficient) %>%
+  filter(effect == max(effect)) %>% 
+  select(SardID,effect,status) %>%
+  distinct() %>% 
+  ggplot(aes(x = status,y = effect)) + 
+  #geom_point(alpha = 0.8) +
+  geom_boxplot(alpha = 0.8) +
+  theme_minimal(base_size = 15) +
+  geom_signif(comparisons = list(c("Never","Before")),
+              y_position = 0.45,
+              #map_signif_level = function(x) return(format(x,scientifier = T,digits = 4)),
+              test = wilcox.test) + 
+  geom_signif(comparisons = list(c("Never","During")),
+              #map_signif_level = function(x) return(format(x,scientifier = T,digits = 4)),
+              test = wilcox.test) +
+  geom_signif(comparisons = list(c("Before","During")),
+              y_position = 0.45,
+              #map_signif_level = function(x) return(format(x,scientifier = T,digits = 4)),
+              test = wilcox.test) + 
+  theme(legend.position = 'bottom') + 
+  scale_color_manual(values = gene_colours,name = NULL) + 
+  xlab("Smoked") + 
+  ylab("Genetic effect") + 
+  ggsave(filename = "figures/phenotype_associations/FigureSmoking.svg",width = 2.8,height = 4) +
+  ggsave(filename = "figures/phenotype_associations/FigureSmoking.pdf",width = 2.8,height = 4)
+
+load_smoking_data() %>% 
+  mutate(status = ifelse(QuitSmoking == 'N' & CurrentSmoker == 'N',"Never smoked",
+                         ifelse(QuitSmoking == 'N' & CurrentSmoker == 'Y',"Smoker",
+                                "Previous smoker"))) %>% 
+  subset(!is.na(CurrentSmoker)) %>% 
+  group_by(SardID) %>%
+  summarise(
+    status = ifelse(
+      sum(status == 'Smoker') > 0,'During',
+      ifelse(sum(status == 'Previous smoker') > 0, 'Before',
+             'Never')
+    )
+  ) %>% 
+  mutate(status = factor(status,levels = c("Never","Before","During"))) %>%
+  merge(r_values,by.x = "SardID",by.y = "individual") %>%
+  mutate(individual = SardID) %>%
+  merge(statistics_data,by = c("individual","site")) %>%
+  subset(sum_stat < 0.7) %>% 
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  group_by(SardID) %>%
+  mutate(effect = coefficient) %>%
+  filter(effect == max(effect)) %>% 
+  select(SardID,effect,status) %>%
+  mutate(status = ifelse(status == 'Never','No','Yes')) %>%
+  distinct() %>% 
+  ggplot(aes(x = status,y = effect)) + 
+  #geom_point(alpha = 0.8) +
+  geom_boxplot(alpha = 0.8) +
+  theme_minimal(base_size = 15) +
+  geom_signif(comparisons = list(c("Yes","No")),
+              y_position = 0.45,
+              map_signif_level = function(x) return(paste("p-value =",format(x,scientifier = T,digits = 4))),
+              test = wilcox.test) + 
+  theme(legend.position = 'bottom') + 
+  scale_color_manual(values = gene_colours,name = NULL) + 
+  xlab("Smoked") + 
+  ylab("Genetic effect") + 
+  ggsave(filename = "figures/phenotype_associations/FigureSmoking_2levels.svg",width = 3.5,height = 4) +
+  ggsave(filename = "figures/phenotype_associations/FigureSmoking_2levels.pdf",width = 3.5,height = 4)
+```
+
+```{r smoking_clone_age, fig.width=8, fig.height=3}
+INTERVAL <- 5
+smoking_clone_ages <- load_smoking_data() %>% 
+  mutate(status = ifelse(QuitSmoking == 'N' & CurrentSmoker == 'N',"Never smoked",
+                         ifelse(QuitSmoking == 'N' & CurrentSmoker == 'Y',"Smoker",
+                                "Previous smoker"))) %>% 
+  subset(!is.na(CurrentSmoker)) %>% 
+  group_by(SardID) %>%
+  filter(phase == max(phase)) %>%
+  ungroup() %>%
+  merge(clone_ages,by.x = "SardID",by.y = "individual") %>%
+  mutate(individual = SardID) %>%
+  #merge(statistics_data,by = c("individual","site")) %>%
+  subset(sum_stat < 0.7) %>% 
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  group_by(SardID) %>%
+  mutate(effect = (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj)/2) %>%
+  filter(age == max(age)) %>%
+  select(SardID,effect,site,CurrentSmoker, QuitYears,status,age) %>% 
+  subset(effect > 18 & effect < 100) %>% 
+  mutate(effect = age - effect) %>% 
+  mutate(QuitYears = ifelse(CurrentSmoker == 'Y',0,QuitYears)) %>% 
+  mutate(CurrentlySmoking = effect > QuitYears) %>%
+  mutate(CurrentlySmoking = ifelse(status == "Never smoked",FALSE,CurrentlySmoking)) %>%
+  mutate(AgeGroups = floor((age - effect) / INTERVAL) * INTERVAL) %>%
+  subset(AgeGroups <= 60) %>% 
+  mutate(AgeGroups = paste(AgeGroups,AgeGroups + INTERVAL,sep='-')) %>% 
+  mutate(AgeGroups = ifelse(AgeGroups == '10-20','18-20',AgeGroups)) %>%
+  group_by(SardID,AgeGroups) %>% 
+  summarise(NClones = length(site),
+            CurrentlySmoking = CurrentlySmoking[1])
+smoking_clone_ages %>% 
+  ggplot(aes(x = AgeGroups,
+             y = NClones,
+             fill = CurrentlySmoking,
+             colour = CurrentlySmoking,
+             group = paste(AgeGroups,CurrentlySmoking))) +
+  stat_summary(geom = 'line',
+               inherit.aes = F,
+               alpha = 0.4,
+               mapping = aes(x = AgeGroups,
+                             y = NClones,
+                             colour = CurrentlySmoking,
+                             group = CurrentlySmoking),
+               fun.y = mean,
+               size = 1) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.4,
+                                             dodge.width = 0.8,
+                                             jitter.height = 0.02),
+             alpha = 0.6) +
+  
+  theme_minimal(base_size = 15) +
+  #theme(legend.position = 'bottom') +
+  scale_colour_lancet(labels = c("No","Yes"),
+                      name = "Smoking") +
+  scale_fill_lancet(labels = c("No","Yes"),
+                    name = "Smoking") + 
+  #rotate_x_text() +
+  xlab("Age groups") + 
+  ylab("No. of clones\nappearing") + 
+  scale_y_continuous(trans = 'log10') +
+  theme(axis.text.x = element_text(size = 11.2)) + 
+  ggsave("figures/phenotype_associations/FigureCloneSmoking.pdf",height = 4,width = 7) + 
+  ggsave("figures/phenotype_associations/FigureCloneSmoking.svg",height = 4,width = 7)
+```
+
+```{r smoking_clone_age_boxplot}
+load_smoking_data() %>% 
+  mutate(status = ifelse(QuitSmoking == 'N' & CurrentSmoker == 'N',"Never smoked",
+                         ifelse(QuitSmoking == 'N' & CurrentSmoker == 'Y',"Smoker",
+                                "Previous smoker"))) %>% 
+  subset(!is.na(CurrentSmoker)) %>% 
+  group_by(SardID) %>%
+  filter(phase == max(phase)) %>%
+  ungroup() %>%
+  merge(clone_ages,by.x = "SardID",by.y = "individual") %>%
+  mutate(individual = SardID) %>%
+  merge(statistics_data,by = c("individual","site")) %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>% 
+  group_by(SardID) %>%
+  mutate(effect = (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj)/2) %>%
+  filter(age == max(age)) %>%
+  select(SardID,effect,site,CurrentSmoker, QuitYears,status,age) %>% 
+  subset(effect > 18 & effect < 100) %>% 
+  mutate(effect = age - effect) %>% 
+  mutate(QuitYears = ifelse(CurrentSmoker == 'Y',0,QuitYears)) %>% 
+  mutate(CurrentlySmoking = effect > QuitYears) %>%
+  mutate(CurrentlySmoking = ifelse(status == "Never smoked",FALSE,CurrentlySmoking)) %>%
+  ggplot(aes(x = 0,y = effect,colour = CurrentlySmoking)) + 
+  geom_boxplot() + 
+  theme_minimal()
+```
+
+## Is the U2AF1 prevalence in blood cells we observe in our cohort normal or explained by the old age?
+
+To assess this we need to get the prevalence of U2AF1 in blood cells, which we obtain by marginalising over AML, CML, MDS and CH
+
+```{r checking_U2AF1_prevalence}
+u2af1_CH_list <- list(
+  "Jaiswal 2014" = c(n_mutations = 0,total_individuals = 17182),
+  "Genovese 2014" = c(n_mutations = 0,total_individuals = 12380),
+  "McKerrell 2015" = c(n_mutations = NA,total_individuals = 4219),
+  "Zink 2017" = c(n_mutations = 0, total_individuals = 11262),
+  "Acuna-Hidalgo" = c(n_mutations = 1, total_individuals = 9350),
+  "Coombs 2017" = c(n_mutations = 1,total_individuals = 6898), # a few other U2AF1 mutations, but only in individuals which developed a malignant haematological condition
+  "Young 2016" = c(n_mutations = 0,total_individuals = 20),
+  "Young 2019" = c(n_mutations = 1,75), # 3 more U2AF1 mutations in AML
+  "Desai 2018" = c(n_mutations = 0,total_individuals = 181) # 6 U2AF1 mutations in MAL
+)
+p_u2af1_c_ch <- sum(sapply(u2af1_CH_list,function(x) x[1]),na.rm = T) / sum(sapply(u2af1_CH_list,function(x) x[2]))
+p_u2af1_c_mds <- 8.73/100
+p_u2af1_c_cml <- 6.67/100
+p_u2af1_c_aml <- 4.63/100
+p_ch <- c(0.9/100,20/100)
+p_mds <- 2 / 1e5
+p_cml <- 1.6 / 1e5
+p_aml <- 4.3 / 1e5
+
+# marginalise P(U2AF1)
+p_u2af1 <- p_u2af1_c_ch * p_ch + p_u2af1_c_mds * p_mds + p_u2af1_c_aml * p_aml + p_u2af1_c_cml * p_cml
+
+p_u2af1
+```
+
+## Survival analysis 
+
+```{r survival_analysis,fig.height=6.5,fig.width=12,dpi=300}
+library(survival)
+library(survminer)
+# quick_plot_survival <- function(s,) {
+#   s <- survfit(s)
+#   summary_s <- summary(s)
+#   data_plot <- data.frame(
+#     y = summary_s$surv,
+#     ymin = summary_s$lower,
+#     ymax = summary_s$upper,
+#     x = summary_s$time
+#   )
+# }
+
+comorbidity_data <- load_comorbidity_data()
+smoking_data <- load_smoking_data() %>% 
+  mutate(status = ifelse(QuitSmoking == 'N' & CurrentSmoker == 'N',"Never smoked",
+                         ifelse(QuitSmoking == 'N' & CurrentSmoker == 'Y',"Smoker",
+                                "Previous smoker"))) %>% 
+  subset(!is.na(CurrentSmoker)) %>% 
+  group_by(SardID) %>%
+  summarise(
+    status = ifelse(
+      sum(status == 'Smoker') > 0,'During',
+      ifelse(sum(status == 'Previous smoker') > 0, 'Before',
+             'Never')
+    )
+  ) %>% 
+  mutate(status = factor(status,levels = c("Never","Before","During"))) %>%
+  mutate(EverSmoked = ifelse(status == "Never","No","Yes"))
+
+blood_parameter_ltp <- load_blood_count_data() %>%
+  group_by(SardID) %>% 
+  filter(Phase == max(Phase))
+
+grouping_data_size <- load_data() %>% 
+  group_by(SardID) %>% 
+  filter(Phase == max(Phase)) %>% 
+  group_by(SardID) %>% 
+  summarise(
+    LargestCloneVAF = max(VAF),
+    NClones = length(unique(AAChange.refGene[!is.na(AAChange.refGene)])),
+    LastTimePoint = min(Age),
+    Gender = unique(Gender)) %>%
+  mutate(HasLargeClone=LargestCloneVAF>0.025) %>%
+  distinct()
+grouping_data_dynamics <- r_values %>% 
+  select(SardID=individual,site,b_clone,coefficient) %>%
+  group_by(SardID) %>% 
+  summarise(FastestClone=max(b_clone+coefficient),
+            FastestGene=max(coefficient)) %>% 
+  distinct() 
+ 
+survival_data <- load_survival_data() %>%
+  as_tibble() %>%
+  subset(DEAD != "U") %>%
+  subset(gtools::na.replace(as.character(AGE_of_death) != 'Unknown',T)) %>%
+  mutate(Age_General = as.numeric(gtools::na.replace(AGE_of_death,0))+as.numeric(gtools::na.replace(AGE_atStudyEnd,0))) %>%
+  mutate(DEAD = ifelse(DEAD=='Y',1,0))
+full_survival_data <- merge(grouping_data_size,survival_data,by = "SardID",all=T) %>%
+  merge(grouping_data_dynamics,by = "SardID",all=T) %>%
+  merge(smoking_data,by = "SardID") %>%
+  merge(comorbidity_data,by = "SardID") %>% 
+  mutate(Diabetes2Status = ifelse(DIABETES_2,"Yes","No"),
+         HadCancer = ifelse(CANCER,"Yes","No")) %>% 
+  mutate(DEAD=as.numeric(DEAD),
+         Age_General=as.numeric(Age_General),
+         FastestClone=ifelse(is.na(FastestClone),0,FastestClone),
+         FastestGene=ifelse(is.na(FastestGene),0,FastestGene),
+         HasLargeClone=ifelse(is.na(HasLargeClone),F,HasLargeClone),
+         NClones=ifelse(is.na(NClones),0,NClones),
+         LargestCloneVAF=ifelse(is.na(LargestCloneVAF),0,LargestCloneVAF)) %>% 
+  mutate(NClones_Factor = ifelse(
+    NClones >= 3,
+    "3+",
+    ifelse(NClones > 0,"1-2",NClones))) %>% 
+  mutate(NoClones=NClones_Factor=='0',
+         OneTwoClones=NClones_Factor=='1-2',
+         ThreeMoreClones=NClones_Factor=='3+') %>% 
+  mutate(FastClone = ifelse(FastestClone >= 0.1,">=0.1","<0.1")) %>%
+  filter(!is.na(Age_General)) %>%
+  mutate(Age_General = Age_General - LastTimePoint) %>% 
+  merge(blood_parameter_ltp,by = 'SardID') %>% 
+  subset(!(SardID %in% c(load_excluded_individuals(),load_excluded_individuals_lymph())))
+
+model.base <- coxph(
+  Surv(Age_General,DEAD) ~ LastTimePoint + Gender + FastestClone + NClones + LargestCloneVAF + Diabetes2Status + EverSmoked + HadCancer,
+  x=T,y=T,model=T,
+  data=full_survival_data) 
+
+forest_plot <- ggforest(model.base,
+                        full_survival_data,
+                        main = "",refLabel = "")
+
+plot_size <- ggsurvplot(
+  coxph(
+    Surv(Age_General,DEAD) ~ LastTimePoint + Gender + FastestClone + NClones + LargestCloneVAF + strata(HasLargeClone),
+    x=T,y=T,model=T,
+    data=full_survival_data) %>% survfit,
+  data = full_survival_data
+)$plot + 
+  scale_color_lancet(name="Clone size",labels=c("<2.5%",">=2.5%"))
+
+plot_number <- ggsurvplot(
+  coxph(
+    Surv(Age_General,DEAD) ~ LastTimePoint + Gender + FastestClone + NClones + LargestCloneVAF + strata(NClones_Factor),
+    x=T,y=T,model=T,
+    data=full_survival_data) %>% survfit,
+  data = full_survival_data
+)$plot + 
+  scale_color_uchicago(name="Number of clones")
+
+plot_dynamics <- ggsurvplot(
+  coxph(
+    Surv(Age_General,DEAD) ~ LastTimePoint + Gender + FastestClone + NClones + LargestCloneVAF + strata(FastClone),
+    x=T,y=T,model=T,
+    data=full_survival_data) %>% survfit,
+  data = full_survival_data
+)$plot + 
+  scale_color_d3(name = "Clone-specific growth coefficient")
+
+plot_grid(
+  plot_grid(plot_size,plot_number,plot_dynamics,nrow = 1),
+  plot_grid(ggplot()+theme_void(),forest_plot+theme_minimal(),ggplot()+theme_void(),
+            rel_widths = c(0.3,0.8,0.3),nrow = 1),
+  ncol = 1,
+  rel_heights = c(1,1.2)
+) + 
+  ggsave("figures/survival_analysis/general_figure.pdf",height = 5,width = 12)
+```
+
+# Session details
+
+```{r session_details}
+cat(system("git log -n1", intern=TRUE), sep="\n")
+```
+
+```{r session_objects}
+l <- ls()
+data.frame(variable=l, Reduce("rbind",lapply(l, function(x) data.frame(classes=paste(class(get(x)),collapse = ','), size=format(object.size(get(x)), units="auto")))))
+```
+
+```{r session_packages}
+sessionInfo()
+```

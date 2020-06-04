@@ -1,0 +1,3847 @@
+---
+title: "Modelling VAF dynamics in a longitudinal cohort with hierarchical Bayes"
+output: 
+  html_document:
+  toc: true
+  toc_float: true
+  toc_collapsed: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r import_functions, include=FALSE}
+source("scripts/vaf_dynamics_functions.R")
+set.seed(42)
+```
+
+## Problem setting 
+
+We have a cohort with $~400$ individuals from Sardinia. These individuals were target-sequenced at a high depth ($0.05%$), which enables us to detect clonal haematopoiesis with a high precision, and at different time points, which in theory enables the modelling of how VAF progress. Ultimately, this enables us to infer the future trajectory of VAF values and determine the effect size underlying this. To model VAF, hierarchical Bayes modelling is used and, in general terms, each VAF is modelled as a binomial distribution whose size is the coverage and probability best described as the linear combination of one or more effects and an offset per individual.
+
+```{r map sardinia,fig.height=8,fig.width=8,fig.align="center",results='hide',fig.keep='all',warning=FALSE,message=FALSE}
+m_s <- map_sardinia()
+m_s
+```
+
+## Data preparation
+
+Data preparation here is concerned mostly with the following aspects:
+
+* Selecting genes or domains based on their significance for our analysis 
+* Excluding individuals who have (had) haematological malignancies
+* Determining mutations which occur across more than 1 individual
+* Defining subsets within our data 
+
+```{r data_preparation}
+source("scripts/prepare_data.R")
+```
+
+## Data exploration
+
+An initial inspection of the trajectories does not allow us to make any ambitious claims on their dynamics considering age as the only determinant of dynamics. 
+
+Some conclusions can be drawn at this point:
+
+* No apparent single dynamics underlies most VAF trajectories when considering the age of individuals, but this becomes neater when using relative timepoints (relative time instead of absolute time) - this points towards the necessity of an individual-based offset. This also makes the likeliness of other factors (i.e. other mutations) affecting the dynamics of VAF higher
+* There is some apparently very similar dynamics for different VAFs within the same individual, which may be a good indicator of the existence of a slope offset on a *per* individual basis for all clones. This may also helps us to decipher any possible interaction there may exist between clones
+
+```{r plot_vaf_trajectories_per_individual, fig.width=14, fig.height=10}
+full_data %>% subset(single_occurring == F) %>% 
+  mutate(q005=qbeta(p=0.05,MUTcount_Xadj+1,TOTALcount+1-MUTcount_Xadj),
+         q095=qbeta(p=0.95,MUTcount_Xadj+1,TOTALcount+1-MUTcount_Xadj)) %>% 
+  select(TOTALcount,MUTcount_Xadj,SardID,Age,VAF,q005,q095,Phase,amino_acid_change) %>% 
+  
+  ggplot(aes(x = Age,y = MUTcount_Xadj/(TOTALcount),ymin = q005,ymax = q095,color = as.factor(SardID))) + 
+  geom_linerange(alpha = 0.7) + 
+  geom_line() + 
+  geom_point() + 
+  facet_wrap(~ amino_acid_change,scales = 'free') + 
+  theme_minimal() + 
+  scale_color_discrete(guide=FALSE) +
+  ylab("VAF")
+```
+
+```{r plot_vaf_trajectories_per_site, fig.width=28, fig.height=30}
+full_data %>% subset(single_occurring == F) %>% 
+  mutate(q005=qbeta(p=0.05,MUTcount_Xadj+1,TOTALcount+1-MUTcount_Xadj),
+         q095=qbeta(p=0.95,MUTcount_Xadj+1,TOTALcount+1-MUTcount_Xadj)) %>% 
+  select(TOTALcount,MUTcount_Xadj,SardID,Age,VAF,q005,q095,Phase,amino_acid_change) %>% 
+  
+  ggplot(aes(x = Age,y = MUTcount_Xadj/(TOTALcount),ymin = q005,ymax = q095,color = amino_acid_change)) + 
+  geom_linerange(alpha = 0.7) + 
+  geom_line() + 
+  geom_point() + 
+  facet_wrap(~ SardID,scales = 'free') + 
+  theme_minimal() + 
+  scale_color_discrete(guide=FALSE) +
+  ylab("VAF")
+```
+
+## Modelling 
+
+**General remarks**
+
+* Point and rectangle charts refer to the values for the correlation coefficients - I am a bit wary of using these as most of the times we are assessing a pearson correlation between 2 points, which yields fairly misleading values. The point values refer to R^2 values for sites, while the rectangles refer to the average R^2 per gene
+* Line and point charts are used to observer the values for the coefficients 
+
+```{r defining_site_domain_gene_lists}
+site_list <- formatted_data_train_1$unique_site_multiple
+domain_list <- formatted_data_train_1$unique_domain
+gene_list <- formatted_data_train_1$unique_gene
+recurrent_sites <- formatted_data_train_1$unique_site_multiple
+```
+
+```{r creating_result_lists}
+r_values_list <- list()
+statistics_lists <- list()
+```
+
+### Model A - modelling each mutant as an effect of the gene
+
+This is the simplest model conceivable, despite having a fairly limited scope in explainability. Here, gene has its own effect.
+
+$$
+\\
+Gene\ parameters: \mu_{gene} = 0, \sigma_{gene} = 1
+\\
+Offset\ parameters: u\ (no\ prior)
+\\
+Model_A: Counts_i \sim B(coverage,ilogit(age*N(\mu_{gene},\sigma_{gene}) + u))
+$$
+
+```{r, model_a_load_values}
+values_model_a <- readRDS("models/model_A_full.RDS")
+```
+
+
+``` {r, model_A_validation, fig.width=25, fig.height=10}
+val_subset <- full_formatted_data
+
+X_val <- val_subset$counts[values_model_a$gene_idxs,]
+gene_idxs <- values_model_a$gene_idxs
+
+interference_idxs <- values_model_a$interference_idxs
+u_idx <- values_model_a$u_idx
+ind_o <- sapply(c(1:nrow(interference_idxs)),function(x) {
+  M <- (u_idx$site == interference_idxs$site[x]) & (u_idx$ind == interference_idxs$ind[x])
+  M %>%
+    as.numeric %>%
+    return})
+
+b_values_val <- values_model_a$b_values[[1]]$values[values_model_a$b_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+u_values_val <- values_model_a$u_values[[1]]$values[values_model_a$u_values[[1]]$labels == 'mean'] %>%
+  matrix(ncol=1)
+
+ae_gene <- val_subset$gene_to_site_indicator[gene_idxs,] %*% b_values_val
+
+age_effect <- ae_gene[interference_idxs$site] * (val_subset$ages[interference_idxs$ind_age] - values_model_a$min_age)
+  
+offset_per_individual <- t(ind_o) %*% u_values_val
+r <- age_effect + offset_per_individual
+mu_val <- inv.logit(r) * 0.5
+
+r_values <- data.frame(
+  mu_val = mu_val,
+  true = val_subset$counts[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  age = val_subset$ages[interference_idxs$ind_age],
+  coverage = val_subset$coverage[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  individual = val_subset$unique_individual_true[interference_idxs$ind],
+  coefficient = b_values_val[interference_idxs$site],
+  site = val_subset$unique_site[gene_idxs][interference_idxs$site],
+  u_values = unlist(t(ind_o) %*% u_values_val)
+) %>%
+  as.data.frame() %>%
+  apply(1,FUN = function(x){
+    mu_val <- as.numeric(x[1])
+    cov <- as.numeric(x[4])
+    Q <- qbinom(c(0.05,0.50,0.95),size = cov,prob = mu_val)
+    names(Q) <- c("pred_005","pred","pred_095")
+    return(c(x,Q))
+  }) %>% 
+  t %>%
+  as.data.frame() %>% 
+  mutate(genes = sapply(as.character(site),function(x) unlist(strsplit(x,'-'))[[1]])) %>%
+  group_by(site) %>%
+  mutate(n = length(pred)) %>%
+  ungroup() %>%
+  mutate(
+    mu_val = as.numeric(as.character(mu_val)),
+    true = as.numeric(as.character(true)),
+    age = as.numeric(as.character(age)),
+    coverage = as.numeric(as.character(coverage)),
+    individual = as.numeric(as.character(individual)),
+    coefficient = as.numeric(as.character(coefficient)),
+    pred_005 = as.numeric(as.character(pred_005)),
+    pred = as.numeric(as.character(pred)),
+    pred_095 = as.numeric(as.character(pred_095)),
+    u_values = as.numeric(as.character(u_values))
+  )
+
+r_values_ <- r_values %>% 
+  mutate(VAFpred = pred / coverage,
+         VAFtrue = true / coverage) %>% 
+  subset(coverage > 0) %>%
+  group_by(individual,site) %>% 
+  mutate(normalizedVAFpred = (VAFpred + 1) / (VAFpred[which(age == min(age))] + 1),
+         normalizedVAFtrue = (VAFtrue + 1) / (VAFtrue[which(age == min(age))] + 1)) %>%
+  ungroup() %>%
+  mutate(individual = as.character(individual)) %>% 
+  gather(key = 'key',value = 'value',VAFpred,VAFtrue) %>%
+  mutate(
+    pred_005 = ifelse(key == 'VAFpred',
+                      pred_005 / coverage,
+                      NA),
+    pred_095 = ifelse(key == 'VAFpred',
+                      pred_095 / coverage,
+                      NA)
+  )
+
+r_values_list$model_a <- r_values
+```
+
+```{r model_a_summary_statistic, fig.height=5,fig.width=6}
+order_same_rank <- function(v) {
+  u <- unique(v)
+  o <- rep(0,length(v))
+  for (i in 1:length(u)) {
+    o[v == u[i]] <- i
+  }
+  return(o)
+}
+
+statistic_full <- r_values_ %>%
+  subset(key == 'VAFpred') %>%
+  mutate(tail_prob = pbinom(
+    q = true,
+    size = coverage,
+    prob = mu_val)) %>%
+  group_by(site,individual) %>% 
+  summarise(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)),
+            gene = genes[1]) %>%
+  mutate(split = 'full') %>%
+  select(split,site,sum_stat,gene,individual) %>%
+  ungroup() %>%
+  mutate(recurring = site %in% recurrent_sites)
+
+statistic_aggregated <- r_values_ %>%
+  subset(key == 'VAFpred') %>%
+  mutate(tail_prob = pbinom(
+    q = true,
+    size = coverage,
+    prob = mu_val)) %>%
+  group_by(site) %>% 
+  summarise(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)),
+            gene = genes[1],
+            MinimumAge = min(age),
+            MaximumAge = max(age),
+            MaxValue = max(c(pred_095,value,true/coverage),na.rm = T)) %>%
+  mutate(split = 'full') %>%
+  ungroup()
+
+p <- statistic_full %>%
+  ggplot(aes(x = gene,y = sum_stat)) +
+  geom_point(aes(color = recurring),
+             stat = 'identity',
+             position = position_jitter(width = 0.1),
+             alpha = 0.3,
+             size = 0.4) + 
+  rotate_x_text() +
+  theme_minimal() +
+  theme(legend.position = 'bottom') + 
+  xlab("") +
+  ylab("Summary statistic") + 
+  scale_y_continuous() + 
+  geom_hline(yintercept = 0.7,alpha = 0.5) +
+  scale_color_lancet() + 
+  rotate_x_text()
+
+p
+
+statistic_full %>% 
+  select(sum_stat) %>%
+  mutate(sum_stat = sum_stat < .7) %>%
+  table
+
+statistics_lists$model_a <- list(individual_site = statistic_aggregated,site = statistic_full)
+```
+
+```{r model_A_coefficients, fig.width=14, fig.height=10}
+values_b <- values_model_a$b_values[[2]][grepl("b_gene\\[",values_model_a$b_values[[1]]$variable),]
+values_b$site_name <- rep(gene_list,
+                          each = length(unique(values_model_a$b_values[[1]]$labels)))
+values_b %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = exp(`0.50`),x = substr(site_name,1,30))) +
+  geom_point() +
+  geom_linerange(aes(ymin = exp(HDPI_low),ymax = exp(HDPI_high))) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  scale_colour_discrete(name = NULL) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold")) + 
+  coord_cartesian(ylim = exp(c(min(values_b$values) * 0.98,max(values_b$values) * 1.02)))
+```
+
+In general, this model fails to explain most instances we have - it is then necessary to refine the model with a finer grained structure, considering the dynamics of individual sites and domains. As such, we model this problem as a hierarchical problem, where the effect for a single site is dependent on not only the gene but also the domain and site (given a few conditions described below).
+
+### Model C - Introducing hierarchy into the model (genes and single sites)
+
+The main difference here is how we attribute effect sizes to the age - instead of being impacted by the site alone, gene and domain effects will also be considered here. As such, the contribution towards any site will be modulated by both gene, domain and site. Here, the definition of site is that of Model B (recurring sites - those ocurring in at least two individuals) and in the case where there is a single mutation on a gene/domain, the effect for higher elements of the hierarchy (i.e. gene/domain) is set to 0. If a gene has a single domain, the same applies, with the gene effect being set to 0.
+
+$$
+Site\ effects: \mu_{site} = 0,\sigma_{site} = 0.1
+\\
+Domain\ effects: \mu_{domain} = 0,\sigma_{domain} = 0.1
+\\
+Gene\ effects: \mu_{gene}  = 0,\sigma_{gene} = 0.1
+\\
+Offset\ parameters: u\ (no\ prior)
+\\
+Model_C: counts_i \sim B(coverage,ilogit(age*(N(\mu_{site},\sigma_{site}) + N(\mu_{domain},\sigma_{domain}) + N(\mu_{gene},\mu_{gene})) + u))
+$$
+
+For this task an additional concern comes into play, which is that of variable identifiability. In cases where a single site is being modelled for the whole gene, there is no way of telling which effect (site or gene) contributes towards the effect provided that they are both included in the model. As such, we include only the site these cases.
+
+```{r, model_c_load_values}
+values_model_c <- readRDS("models/model_C_full.RDS")
+```
+
+``` {r, model_c_validation, fig.width = 20,fig.height = 7,warning = F}
+val_subset <- full_formatted_data
+
+X_val <- val_subset$counts[values_model_c$gene_idxs,]
+gene_idxs <- values_model_c$gene_idxs
+
+interference_idxs <- values_model_c$interference_idxs
+u_idx <- values_model_c$u_idx
+ind_o <- sapply(c(1:nrow(interference_idxs)),function(x) {
+  M <- (u_idx$site == interference_idxs$site[x]) & (u_idx$ind == interference_idxs$ind[x])
+  M %>%
+    as.numeric %>%
+    return})
+
+b_gene_values_val <- values_model_c$b_gene_values[[1]]$values[values_model_c$b_gene_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+b_domain_values_val <- values_model_c$b_domain_values[[1]]$values[values_model_c$b_domain_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+b_site_values_val <- values_model_c$b_site_values[[1]]$values[values_model_c$b_site_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+
+u_values_val <- values_model_c$u_values[[1]]$values[values_model_c$u_values[[1]]$labels == 'mean'] %>%
+  matrix(ncol=1)
+
+ae_gene <- val_subset$gene_to_site_indicator[values_model_c$gene_idxs,] %*% b_gene_values_val
+ae_domain <- val_subset$domain_to_site_indicator[values_model_c$gene_idxs,] %*% b_domain_values_val
+ae_site <- val_subset$site_multiple_to_site_indicator[values_model_c$gene_idxs,] %*% b_site_values_val
+
+age_effect_coef <- ae_gene +  ae_domain + ae_site
+age_effect <- age_effect_coef[interference_idxs$site] * (val_subset$ages[interference_idxs$ind_age] - values_model_c$min_age)
+offset_per_individual <- t(ind_o) %*% u_values_val
+r <- age_effect + offset_per_individual
+mu_val <- inv.logit(r) * 0.5
+
+r_values <- data.frame(
+  mu_val = mu_val,
+  true = val_subset$counts[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  age = val_subset$ages[interference_idxs$ind_age],
+  coverage = val_subset$coverage[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  individual = val_subset$unique_individual_true[interference_idxs$ind],
+  coefficient = age_effect_coef[interference_idxs$site],
+  site = val_subset$unique_site[gene_idxs][interference_idxs$site],
+  u_values = unlist(t(ind_o) %*% u_values_val)
+) %>%
+  as.data.frame() %>%
+  apply(1,FUN = function(x){
+    mu_val <- as.numeric(x[1])
+    cov <- as.numeric(x[4])
+    Q <- qbinom(c(0.05,0.50,0.95),size = cov,prob = mu_val)
+    names(Q) <- c("pred_005","pred","pred_095")
+    return(c(x,Q))
+  }) %>% 
+  t %>%
+  as.data.frame() %>% 
+  mutate(genes = sapply(as.character(site),function(x) unlist(strsplit(x,'-'))[[1]])) %>%
+  group_by(site) %>%
+  mutate(n = length(pred)) %>%
+  ungroup() %>%
+  mutate(
+    mu_val = as.numeric(as.character(mu_val)),
+    true = as.numeric(as.character(true)),
+    age = as.numeric(as.character(age)),
+    coverage = as.numeric(as.character(coverage)),
+    individual = as.numeric(as.character(individual)),
+    coefficient = as.numeric(as.character(coefficient)),
+    pred_005 = as.numeric(as.character(pred_005)),
+    pred = as.numeric(as.character(pred)),
+    pred_095 = as.numeric(as.character(pred_095)),
+    u_values = as.numeric(as.character(u_values))
+  )
+
+r_values_ <- r_values %>% 
+  mutate(VAFpred = pred / coverage,
+         VAFtrue = true / coverage) %>% 
+  subset(coverage > 0) %>%
+  group_by(individual,site) %>% 
+  mutate(normalizedVAFpred = (VAFpred + 1) / (VAFpred[which(age == min(age))] + 1),
+         normalizedVAFtrue = (VAFtrue + 1) / (VAFtrue[which(age == min(age))] + 1)) %>%
+  ungroup() %>%
+  mutate(individual = as.character(individual)) %>% 
+  gather(key = 'key',value = 'value',VAFpred,VAFtrue) %>%
+  mutate(
+    pred_005 = ifelse(key == 'VAFpred',
+                      pred_005 / coverage,
+                      NA),
+    pred_095 = ifelse(key == 'VAFpred',
+                      pred_095 / coverage,
+                      NA)
+) 
+
+r_values_list$model_c <- r_values
+```
+
+```{r model_c_summary_statistic, fig.height=5,fig.width=6}
+order_same_rank <- function(v) {
+  u <- unique(v)
+  o <- rep(0,length(v))
+  for (i in 1:length(u)) {
+    o[v == u[i]] <- i
+  }
+  return(o)
+}
+
+statistic_full <- r_values_ %>%
+  subset(key == 'VAFpred') %>%
+  mutate(tail_prob = pbinom(
+    q = true,
+    size = coverage,
+    prob = mu_val)) %>%
+  group_by(site,individual) %>% 
+  summarise(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)),
+            gene = genes[1]) %>%
+  mutate(split = 'full') %>%
+  select(split,site,sum_stat,gene,individual) %>%
+  ungroup() %>%
+  mutate(recurring = site %in% recurrent_sites)
+
+statistic_aggregated <- r_values_ %>%
+  subset(key == 'VAFpred') %>%
+  mutate(tail_prob = pbinom(
+    q = true,
+    size = coverage,
+    prob = mu_val)) %>%
+  group_by(site) %>% 
+  summarise(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)),
+            gene = genes[1],
+            MinimumAge = min(age),
+            MaximumAge = max(age),
+            MaxValue = max(c(pred_095,value,true/coverage),na.rm = T)) %>%
+  mutate(split = 'full') %>%
+  ungroup()
+
+p <- statistic_full %>%
+  ggplot(aes(x = gene,y = sum_stat)) +
+  geom_point(aes(color = recurring),
+             stat = 'identity',
+             position = position_jitter(width = 0.1),
+             alpha = 0.3,
+             size = 0.4) + 
+  rotate_x_text() +
+  theme_minimal() +
+  theme(legend.position = 'bottom') + 
+  xlab("") +
+  ylab("Summary statistic") + 
+  scale_y_continuous() + 
+  geom_hline(yintercept = 0.7,alpha = 0.5) +
+  scale_color_lancet() + 
+  rotate_x_text()
+
+p
+
+statistic_full %>% 
+  select(sum_stat) %>%
+  mutate(sum_stat = sum_stat < .7) %>%
+  table
+
+statistics_lists$model_c <- list(individual_site = statistic_aggregated,site = statistic_full)
+```
+
+
+``` {r, model_c_dynamic_visualization, fig.width = 30,fig.height = 30}
+r_values %>% 
+  mutate(VAFpred = pred / coverage,
+         VAFtrue = true / coverage) %>%
+  subset(coverage > 0) %>%
+  group_by(individual,site) %>%
+  mutate(normalizedVAFpred = (VAFpred + 1) / (VAFpred[which(age == min(age))] + 1),
+         normalizedVAFtrue = (VAFtrue + 1) / (VAFtrue[which(age == min(age))] + 1)) %>%
+  ungroup() %>%
+  mutate(individual = as.character(individual)) %>%
+  gather(key = 'key',value = 'value',VAFpred,VAFtrue) %>%
+  subset(site %in% val_subset$unique_site_multiple) %>%
+  ggplot(aes(x = age,y = value)) +
+  geom_hline(aes(yintercept = (1/2e5) * (10/coefficient))) +
+  geom_line(aes(group = as.factor(paste0(as.character(individual),key)))) +
+  geom_point(aes(color = key)) + 
+  facet_wrap(~ site,scales = "free") + 
+  scale_color_discrete(guide = FALSE) +
+  theme_minimal(base_size = 10) + 
+  theme(legend.position = 'bottom') +
+  scale_y_continuous(trans='log') +
+  ggsave("plot_C2.pdf",width = 30,height = 30)
+```
+
+```{r model_c_gene_coefficients, fig.width=14, fig.height=10}
+values_b_gene <- values_model_c$b_gene_values[[3]]
+values_b_gene$site_name <- rep(val_subset$unique_gene,
+                               each = length(unique(values_model_c$b_values[[1]]$labels)))
+values_b_gene %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = site_name,color = site_name)) +
+  geom_point() +
+  geom_linerange(aes(ymin = `0.05`,ymax = `0.95`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ site_name,scales = "free_x",space = "free_x") +
+  scale_colour_discrete(name = NULL) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold")) 
+```
+
+```{r model_c_domain_coefficients, fig.width=14, fig.height=10}
+values_b_domain <- values_model_c$b_domain_values[[3]]
+values_b_domain$site_name <- rep(val_subset$unique_domain,
+                                 each = length(unique(values_model_c$b_site[[1]]$labels)))
+values_b_domain$gene <-  sapply(values_b_domain$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+values_b_domain %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = `0.05`,ymax = `0.95`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_colour_discrete(name = NULL) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r model_c_site_coefficients, fig.width=14, fig.height=10}
+values_b_site <- values_model_c$b_site_values[[1]]
+values_b_site$site_name <- rep(val_subset$unique_site_multiple,
+                               each = length(unique(values_model_a$b_values[[1]]$labels)))
+values_b_site$gene <-  sapply(values_b_site$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+
+values_b_site %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = HDPI_low,ymax = HDPI_high)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_colour_discrete(name = NULL) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r model_c_full_effects, fig.width=14, fig.height=10}
+values_b <- values_model_c$b_values[[3]]
+values_b$site_name <- rep(val_subset$unique_site[values_model_c$gene_idxs],
+                          each = length(unique(values_model_a$b_values[[1]]$labels)))
+values_b$gene <- values_b$site_name %>% 
+  sapply(function(x) unlist(str_split(x,pattern = '-'))[1])
+
+gene_order <- values_b %>%
+  mutate(gene = str_match(gene,"[A-Z0-9]+")) %>%
+  subset(labels == "0.50") %>% 
+  subset(site_name %in% val_subset$unique_site_multiple) %>%
+  group_by(gene) %>%
+  summarise(average = mean(values)) %>%
+  arrange(average) %>%
+  select(gene) %>%
+  unlist
+
+values_b %>% 
+  mutate(Truncating = grepl("[A-Z0-9]+t",gene),
+         gene = str_match(gene,"[A-Z0-9]+")) %>%
+  spread(key = labels,value = values) %>%
+  subset(site_name %in% val_subset$unique_site_multiple) %>%
+  mutate(site_name = sapply(site_name,function(x) unlist(strsplit(x,'-'))[2])) %>%
+  mutate(site_name = sapply(site_name,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(site_name = sapply(site_name,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>%
+  mutate(gene = factor(as.character(gene),levels = gene_order,
+                       ordered = TRUE)) %>%
+  ggplot(aes(y = exp(`0.50`),
+             x = reorder(substr(site_name,1,30),`0.50` + Truncating),
+             color = gene)) +
+  geom_point(aes(shape = Truncating)) +
+  geom_linerange(aes(ymin = exp(`0.05`),ymax = exp(`0.95`))) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal(base_size = 15) +
+  rotate_x_text() + 
+  xlab("Site") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+  theme(legend.position = "bottom",
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank(),
+          strip.text = element_text(size = 10,face = "bold",angle = 90)) +
+  coord_cartesian(ylim = c(exp(min(values_b$values)) * 0.99,exp(max(values_b$values)) * 1.01)) + 
+  scale_shape_discrete(breaks = c(TRUE,FALSE),
+                       labels = c("Truncating","Non-truncating"),
+                       name = NULL) + 
+  ggsave(filename = 'Figure5_C.pdf',height = 7,width = 14)
+```
+
+```{r model_C_clone_sizes, fig.width=20,fig.height=10}
+clone_ages <- r_values %>%
+  mutate(CloneAgeHenryLower = t0(u_values,coefficient,50000),
+         CloneAgeHenryUpper = t0(u_values,coefficient,200000),
+         CloneAgeJamieLower = t0(u_values,coefficient,30000),
+         CloneAgeJamieUpper = t0(u_values,coefficient,600000),
+         CloneAgeHenryLower_adj = t0_adjusted(u_values,coefficient,6,50000) + values_model_c$min_age,
+         CloneAgeHenryUpper_adj = t0_adjusted(u_values,coefficient,6,200000) + values_model_c$min_age,
+         CloneAgeJamieLower_adj = t0_adjusted(u_values,coefficient,6,30000) + values_model_c$min_age,
+         CloneAgeJamieUpper_adj = t0_adjusted(u_values,coefficient,6,600000) + values_model_c$min_age
+         )
+  
+gene_order <- clone_ages %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",genes),
+         Gene = str_match(genes,"[A-Z0-9]+")) %>%
+
+  subset(abs(CloneAgeHenryUpper_adj) < 200 & CloneAgeHenryUpper_adj > -10) %>%
+  group_by(Gene) %>%
+  summarise(average = mean(CloneAgeHenryUpper_adj)) %>%
+  arrange(average) %>%
+  select(Gene) %>%
+  unlist() 
+
+clone_ages %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",genes),
+         Gene = str_match(genes,"[A-Z0-9]+"),
+         amino_acid_change = as.character(site)) %>%
+  subset(abs(CloneAgeHenryUpper_adj) < 200 & CloneAgeHenryUpper_adj > -10) %>%
+  subset(amino_acid_change %in% recurrent_sites) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) unlist(strsplit(x,'-'))[2])) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>%  mutate(Gene = factor(as.character(Gene),levels = gene_order)) %>%
+  ggplot(aes(group = individual)) +
+  geom_hline(yintercept = 0) +
+  geom_linerange(
+    size = 1,
+    alpha = 0.4,
+    aes(x = reorder(substr(amino_acid_change,1,30),
+                    (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2),
+        ymax = CloneAgeJamieLower_adj,
+        ymin = CloneAgeJamieUpper_adj,
+        color = Gene),
+    position = position_dodge(width=0.8)) +
+  geom_point(
+    size = 2,
+    alpha = 0.7,
+    position = position_dodge(width=0.8),
+    aes(x = reorder(substr(amino_acid_change,1,30),
+                    (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2),
+        shape = Truncating,
+        y = (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2,
+        color = Gene)) +
+  facet_grid(~ Gene,scales = "free",space = "free") + 
+  theme_minimal(base_size = 15) + 
+  theme(strip.text = element_text(size = 10,face = 'bold',angle = 90),
+        legend.position = 'bottom') + 
+  ylab("Age at beginning of clone growth") +
+  xlab("Site") +
+  rotate_x_text() + 
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+  scale_y_continuous(
+    expand = c(0,0),
+    limits = c(-10,100),
+    oob = scales::squish,
+    breaks = c(-500,-400,-300,-200,-100,0,10,20,30,40,50,60,70,80,90,100,1000,2000,3000,5000)
+    ) + 
+  scale_shape_discrete(breaks = c(TRUE,FALSE),
+                       labels = c("Truncating","Non-truncating"),
+                       name = NULL)
+```
+
+In model C the ability to explain most instances is still fairly small - indeed, there are even fewer cases of accurately explaining the dynamics of different individuals. We do, however, gain the ability to more accurately explain more instances in the cases where the site is recurrently mutated (below).
+
+```{r compare_statistics}
+statistics_lists$model_a$site %>%
+  subset(recurring == T) %>%
+  select(sum_stat) %>%
+  mutate(sum_stat = sum_stat < 0.7) %>%
+  table() %>%
+  c() %>%
+  paste(collapse = ',') %>%
+  sprintf(fmt="MODEL A - number of non-explained mutations vs. Number of explained mutations (recurrent): %s")
+
+statistics_lists$model_c$site %>%
+  subset(recurring == T) %>%
+  select(sum_stat) %>%
+  mutate(sum_stat = sum_stat < 0.7) %>%
+  table() %>%
+  c() %>%
+  paste(collapse = ',') %>%
+  sprintf(fmt="MODEL C - number of non-explained mutations vs. Number of explained mutations (recurrent): %s")
+```
+
+
+### Model C2 - investigating differences in coefficients with interfering genes
+
+In this subsection we see how the presence of a co-occurring clone affects the dynamics of different sites. To do so, we use an ablation experiment - are we capable of recapitulating the coefficients recapitulated in Model C? In principle, if co-occurring mutations do not affect anything, we can assume no effect exists that can be attributable to them. 
+
+```{r, model_c2_load_values}
+values_model_c2 <- readRDS("models/model_C2_full.RDS")
+```
+
+``` {r, model_c2_validation, fig.width = 20,fig.height = 7,warning = F}
+val_subset <- full_formatted_data
+
+X_val <- val_subset$counts[values_model_c2$gene_idxs,]
+gene_idxs <- values_model_c2$gene_idxs
+
+interference_idxs <- values_model_c2$interference_idxs
+u_idx <- values_model_c2$u_idx
+ind_o <- sapply(c(1:nrow(interference_idxs)),function(x) {
+  M <- (u_idx$site == interference_idxs$site[x]) & (u_idx$ind == interference_idxs$ind[x])
+  M %>%
+    as.numeric %>%
+    return})
+
+b_gene_values_val <- values_model_c2$b_gene_values[[1]]$values[values_model_c2$b_gene_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+b_domain_values_val <- values_model_c2$b_domain_values[[1]]$values[values_model_c2$b_domain_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+b_site_values_val <- values_model_c2$b_site_values[[1]]$values[values_model_c2$b_site_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+
+u_values_val <- values_model_c2$u_values[[1]]$values[values_model_c2$u_values[[1]]$labels == 'mean'] %>%
+  matrix(ncol=1)
+
+ae_gene <- val_subset$gene_to_site_indicator[values_model_c2$gene_idxs,] %*% b_gene_values_val
+ae_domain <- val_subset$domain_to_site_indicator[values_model_c2$gene_idxs,] %*% b_domain_values_val
+ae_site <- val_subset$site_multiple_to_site_indicator[values_model_c2$gene_idxs,] %*% b_site_values_val
+
+age_effect_coef <- ae_gene +  ae_domain + ae_site
+age_effect <- age_effect_coef[interference_idxs$site] * (val_subset$ages[interference_idxs$ind_age] - values_model_c2$min_age)
+offset_per_individual <- t(ind_o) %*% u_values_val
+r <- age_effect + offset_per_individual
+mu_val <- inv.logit(r) * 0.5
+
+r_values <- data.frame(
+  mu_val = mu_val,
+  true = val_subset$counts[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  age = val_subset$ages[interference_idxs$ind_age],
+  coverage = val_subset$coverage[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  individual = val_subset$unique_individual_true[interference_idxs$ind],
+  coefficient = age_effect_coef[interference_idxs$site],
+  site = val_subset$unique_site[gene_idxs][interference_idxs$site],
+  u_values = unlist(t(ind_o) %*% u_values_val)
+) %>%
+  as.data.frame() %>%
+  apply(1,FUN = function(x){
+    mu_val <- as.numeric(x[1])
+    cov <- as.numeric(x[4])
+    Q <- qbinom(c(0.05,0.50,0.95),size = cov,prob = mu_val)
+    names(Q) <- c("pred_005","pred","pred_095")
+    return(c(x,Q))
+  }) %>% 
+  t %>%
+  as.data.frame() %>% 
+  mutate(genes = sapply(as.character(site),function(x) unlist(strsplit(x,'-'))[[1]])) %>%
+  group_by(site) %>%
+  mutate(n = length(pred)) %>%
+  ungroup() %>%
+  mutate(
+    mu_val = as.numeric(as.character(mu_val)),
+    true = as.numeric(as.character(true)),
+    age = as.numeric(as.character(age)),
+    coverage = as.numeric(as.character(coverage)),
+    individual = as.numeric(as.character(individual)),
+    coefficient = as.numeric(as.character(coefficient)),
+    pred_005 = as.numeric(as.character(pred_005)),
+    pred = as.numeric(as.character(pred)),
+    pred_095 = as.numeric(as.character(pred_095)),
+    u_values = as.numeric(as.character(u_values))
+  )
+
+r_values_ <- r_values %>% 
+  mutate(VAFpred = pred / coverage,
+         VAFtrue = true / coverage) %>% 
+  subset(coverage > 0) %>%
+  group_by(individual,site) %>% 
+  mutate(normalizedVAFpred = (VAFpred + 1) / (VAFpred[which(age == min(age))] + 1),
+         normalizedVAFtrue = (VAFtrue + 1) / (VAFtrue[which(age == min(age))] + 1)) %>%
+  ungroup() %>%
+  mutate(individual = as.character(individual)) %>% 
+  gather(key = 'key',value = 'value',VAFpred,VAFtrue) %>%
+  mutate(
+    pred_005 = ifelse(key == 'VAFpred',
+                      pred_005 / coverage,
+                      NA),
+    pred_095 = ifelse(key == 'VAFpred',
+                      pred_095 / coverage,
+                      NA)
+) 
+
+r_values_list$model_c2 <- r_values
+```
+
+```{r, fig.width=14, fig.height=10}
+values_b_gene <- values_model_c2$b_gene_values[[3]]
+values_b_gene$site_name <- rep(val_subset$unique_gene,
+                               each = length(unique(values_model_c2$b_values[[1]]$labels)))
+values_b_gene %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = site_name,color = site_name)) +
+  geom_point() +
+  geom_linerange(aes(ymin = `0.05`,ymax = `0.95`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ site_name,scales = "free_x",space = "free_x") +
+  scale_colour_discrete(name = NULL) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold")) 
+```
+
+```{r, fig.width=14, fig.height=10}
+values_b_domain <- values_model_c2$b_domain_values[[3]]
+values_b_domain$site_name <- rep(val_subset$unique_domain,
+                                 each = length(unique(values_model_c2$b_values[[1]]$labels)))
+values_b_domain$gene <-  sapply(values_b_domain$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+values_b_domain %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = `0.05`,ymax = `0.95`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_colour_discrete(name = NULL) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r, fig.width=14, fig.height=10}
+values_b_site <- values_model_c2$b_site_values[[1]]
+values_b_site$site_name <- rep(val_subset$unique_site_multiple,
+                               each = length(unique(values_model_c2$b_values[[1]]$labels)))
+values_b_site$gene <-  sapply(values_b_site$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+
+values_b_site %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = HDPI_low,ymax = HDPI_high)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_colour_discrete(name = NULL) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r, fig.width=18, fig.height=12}
+values_b_c <- values_model_c$b_values[[3]]
+values_b_c$site_name <- rep(val_subset$unique_site[values_model_c2$gene_idxs],
+                            each = length(unique(values_model_c$b_values[[1]]$labels)))
+values_b_c$gene <- values_b_c$site_name %>% 
+  sapply(function(x) unlist(str_split(x,pattern = '-'))[1])
+values_b_c$ID <- "Full"
+
+values_b <- values_model_c2$b_values[[3]]
+values_b$site_name <- rep(val_subset$unique_site[values_model_c2$gene_idxs],
+                          each = length(unique(values_model_c2$b_values[[1]]$labels)))
+values_b$gene <- values_b$site_name %>% 
+  sapply(function(x) unlist(str_split(x,pattern = '-'))[1])
+values_b$ID <- "No interaction"
+
+rbind(values_b,values_b_c) %>% 
+  mutate(variable = str_match(variable,"[0-9]+,") %>% str_remove(',')) %>%
+  subset(variable %in% interference_idxs$site[is.na(interference_idxs$inter_site)]) %>%
+  subset(site_name %in% val_subset$unique_site_multiple) %>% 
+  mutate(site_name = as.factor(substr(site_name,1,30))) %>%
+  as.data.frame() %>%
+  spread(key = labels,value = values) %>%
+  ggplot(aes(y = exp(`0.50`),x = as.character(site_name),color = gene,shape = ID)) +
+  geom_point(size = 3,
+             position = position_dodge(width = 1.0)) +
+  geom_linerange(aes(ymin = exp(`0.05`),ymax = exp(`0.95`)),
+                 position = position_dodge(width = 1.0)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,space = "free",scale = "free_x") +
+  scale_colour_discrete(name = NULL) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 5.7,face = "bold")) 
+  #coord_cartesian(ylim = c(exp(min(values)) * 0.98,exp(max(values)) * 1.02)) 
+```
+
+Inspecting the coefficients of all sites where a model with no interacting clones is possible (we did not detect any other clones in the modelled individuals), it becomes quite clear how the coefficients we capture in both cases are quite similar. Indeed, we can only confidently state that the effect is different for DNMT3A-R882C, CBL-V430M, GBN1-K57E, SF3B1-K666N, TET2-H1380Y and TET2-I274fs, and only in the cases of DNMT3A-R882C and TET2 is this effect considerable. 
+
+```{r, inspecting_interactors, figure.width = 12,figure.height = 5}
+mutations <- c("DNMT3Ant-R882C","TET2nt-H1380Y","TET2t-I274fs")
+tmp <- mutations %>% 
+  lapply(function(x) fetch_examples(full_data = full_data,x)) %>%
+  do.call(what = rbind) %>%
+  group_by(SardID) %>%
+  mutate(HasInteraction = ifelse(length(unique(amino_acid_change)) > 1,TRUE,FALSE)) %>%
+  subset(amino_acid_change %in% mutations) %>%
+  ungroup()
+tmp %>%
+  ggplot() +
+  theme_minimal() +
+  geom_line(aes(x = Age,y = VAF,colour = HasInteraction,group = SardID)) + 
+  facet_grid(~ amino_acid_change,scales = "free")
+
+sard_ids <- tmp %>% 
+  subset(VAF > 0.04) %>%
+  subset(amino_acid_change %in% mutations & grepl("TET2",Gene)) %>%
+  select(SardID) %>%
+  unlist %>%
+  unique
+
+tmp_plot_list <- sard_ids %>%
+  lapply(function(x) {
+  plots <- full_data %>%
+    subset(SardID == x) %>%
+    ggplot() +
+    geom_line(aes(x = Age,y = VAF,colour = amino_acid_change)) + 
+    facet_grid(~ SardID,scales = "free") + 
+    theme_minimal() + 
+    theme(legend.position = "bottom") + 
+    scale_colour_lancet(name = NULL)
+}) 
+plot_grid(plotlist = tmp_plot_list,nrow = 1)
+```
+
+In the first case (DNMT3A-R882C) it is fairly complicated to draw a conclusion. For the following two, TET2-H1380Y and TET2-I274fs, we are probably overestimating the coefficient when modelling this mutation in individuals with other clones since it is only in these cases that one of the mutations grows. In SardID 1416 however, there is something quite interesting happening - indeed, apparently a clone that, when present in other individuals does not grow, when present in this individual, without any other major mutation driving it, drives the clonal growth in this individual. In SardID 5201 however, TET2-I274fs may very well be a passenger. 
+
+### Model E - including technical overdispersion in the model
+
+Technical replicate data shows some level of technical overdispersion. This can be modelled in our current model by changing our binomial modelling of the counts to a beta binomial, with a fixed $\beta$ parameter and an $\alpha$ parameter that depends on $\beta$ and on the probability that is inferred by modelling, particularly by using the formulation for the expected value of the beta distribution $E[X] = \frac{\alpha}{\alpha+\beta}$. 
+
+Considering the above, we can model the counts as $counts \sim BB(n =  coverage,alpha = \frac{\beta p}{1 - p},beta = \beta)$
+
+```{r visualising overdispersion,fig.height=14,fig.width=14}
+one_hot_encode <- function(factor_vector) {
+  factor_levels <- sort(as.character(unique(factor_vector)))
+  print(factor_levels)
+  output <- sapply(
+    factor_vector,
+    function(x) {
+      as.numeric(factor_levels == x)
+    }
+  )
+  return(t(output))
+}
+
+tru_q_data <- read.table('data/TruQ.txt',header = T)
+replicate_data <- read.table('data/Replicates_all.txt',header = T) %>%
+  mutate(VAF = ifelse(CHR == "X", VAF / 2,VAF),
+         MUTcount = ifelse(CHR == "X", MUTcount / 2,MUTcount))
+ages <- merge(full_data,replicate_data,by = c("SardID","Phase")) %>%
+  select(Age, SardID, Phase) %>%
+  unique
+replicated_data_multiple <- replicate_data %>%
+  group_by(SardID,variant) %>%
+  summarise(count = length(unique(Phase))) %>%
+  subset(count > 1)
+replicate_data <- merge(
+  replicate_data,
+  ages,
+  by = c("SardID","Phase"),
+  all = T
+) %>% 
+  subset(SardID %in% replicated_data_multiple$SardID & variant %in% replicated_data_multiple$variant)
+
+tru_q_data %>% 
+  ggplot(aes(x = VAF_expected,y = VAF_observed)) + 
+  geom_point(aes(colour = as.factor(Replicate))) + 
+  geom_errorbar(
+    aes(
+      ymin = qbeta(0.05,MUTcount + 1,TOTALcount - MUTcount + 1),
+      ymax = qbeta(0.95,MUTcount + 1,TOTALcount - MUTcount + 1)
+  )) + 
+  theme_minimal(base_size = 15) +
+  facet_wrap(~ Gene) + 
+  ggsci::scale_color_lancet(name = "Replicate") +
+  theme(legend.position = 'bottom') + 
+  xlab("VAF expected") +
+  ylab("VAF observed")
+
+replicate_data %>% 
+  ggplot(aes(x = as.factor(Phase),y = VAF)) + 
+  geom_point(aes(colour = as.factor(Replicate)),
+             size = 2) + 
+  geom_linerange(
+    aes(
+      ymin = qbeta(0.05,MUTcount + 1,TOTALcount - MUTcount + 1),
+      ymax = qbeta(0.95,MUTcount + 1,TOTALcount - MUTcount + 1)
+    )) + 
+  theme_minimal(base_size = 15) +
+  facet_wrap(~ paste(Gene,variant,SardID,sep = '-'),scale = 'free') + 
+  ggsci::scale_color_lancet(name = "Replicate") +
+  theme(legend.position = 'bottom') + 
+  xlab("Phase") +
+  ylab("VAF")
+```
+
+The invervals here are estimated using a beta distribution ($Beta(alpha = count+1,beta = coverage - count + 1)$).
+
+#### Part 1 - Estimating $\beta$ with technical replicates
+
+Using technical replicates for known DNA quantities ($truQ$) and for actual patient data ($SR$), we can posit the following model:
+
+$$
+p_{truQ} = observed\ VAF_{truQ} + 1/coverage_{truQ}
+\\
+\beta ~ \sim exponential(0.001)
+\\
+\alpha_{truQ} = \frac{\beta p_{truQ}}{1 - p_{truQ}}
+\\
+expected\ VAF_{truQ} + 1/coverage_{truQ} \sim Beta(alpha,beta)
+$$
+
+We need to adjust the expected and observed VAFs with the equivalent of having one count due to the fact that beta distributions only permit $\alpha>0$ and $\beta>0$.
+
+$$
+p_{SR} = growth\ coefficient = effect_{gene} + individual_{offset}
+\\
+\alpha_{SR} = \frac{\beta p_{SR}}{1 - p_{SR}}
+\\
+observed\ counts_{SR} \sim BB(coverage + 1,alpha,beta)
+$$
+
+$p_{SR}$ here is the $p$ for **Model A**. 
+
+#### Part 2 - Modelling the entire data as a beta binomial with a technical dispersion
+
+We can now use the above values to parametrise $\beta$ as a normally distributed variable - $\beta \sim N(\mu=208.63705,\sigma=7.376525)$. Please note these values may be slightly different due to the stochastic nature of MCMC.
+
+Considering what was discussed above, we can now state model E as a combination of Models C and E.1, for site $i$ in individual $j$:
+
+$$
+b_{gene_i} \sim N(0,0.1)
+\\
+b_{domain_i} \sim N(0,0.1)
+\\
+b_{site_i} \sim N(0,0.1)
+\\
+u_j \sim Uniform(-100,0)
+\\
+p_i = ilogit((\mu_{gene_i} + \mu_{domain_i} + \mu_{site_i}) * age + u_i)
+\\
+\beta \sim N(\mu=208.63705,\sigma=7.376525)
+\\
+\alpha_{SR} = \frac{\beta p}{1 - p}
+\\
+counts \sim BB(coverage + 1,alpha,beta)
+$$
+
+```{r, model_e_load_values}
+values_model_e <- readRDS("models/model_E1_full.RDS")
+```
+
+``` {r, model_e_dynamic_visualization_preparation, fig.width = 30,fig.height = 30}
+val_subset <- full_formatted_data
+
+X_val <- val_subset$counts[values_model_e$gene_idxs,]
+gene_idxs <- values_model_e$gene_idxs
+
+interference_idxs <- values_model_e$interference_idxs
+u_idx <- values_model_e$u_idx
+ind_o <- sapply(c(1:nrow(interference_idxs)),function(x) {
+  M <- (u_idx$site == interference_idxs$site[x]) & (u_idx$ind == interference_idxs$ind[x])
+  M %>%
+    as.numeric %>%
+    return})
+
+b_gene_values_val <- values_model_e$b_gene_values[[1]]$values[values_model_e$b_gene_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+b_domain_values_val <- values_model_e$b_domain_values[[1]]$values[values_model_e$b_domain_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+b_site_values_val <- values_model_e$b_site_values[[1]]$values[values_model_e$b_site_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+beta_val <- values_model_e$beta_values[[1]]$values[values_model_e$beta_values[[1]]$labels == 'mean']
+
+u_values_val <- values_model_e$u_values[[1]]$values[values_model_e$u_values[[1]]$labels == 'mean'] 
+
+ae_gene <- val_subset$gene_to_site_indicator[values_model_e$gene_idxs,] %*% b_gene_values_val
+ae_domain <- val_subset$domain_to_site_indicator[values_model_e$gene_idxs,] %*% b_domain_values_val
+ae_site <- val_subset$site_multiple_to_site_indicator[values_model_e$gene_idxs,] %*% b_site_values_val
+
+age_effect_coef <- ae_gene +  ae_domain + ae_site
+age_effect <- age_effect_coef[interference_idxs$site]
+age_effect <- age_effect * (val_subset$ages[interference_idxs$ind_age] - values_model_e$min_age)
+offset_per_individual <- t(ind_o) %*% u_values_val
+r <- age_effect + offset_per_individual
+mu_val <- inv.logit(r)
+alpha_val <- (beta_val * mu_val) / (1 - mu_val)
+
+r_values <- data.frame(
+  mu_val = mu_val,
+  true = val_subset$counts[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  age = val_subset$ages[interference_idxs$ind_age],
+  coverage = val_subset$coverage[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  individual = val_subset$unique_individual_true[interference_idxs$ind],
+  coefficient = age_effect_coef[interference_idxs$site],
+  site = val_subset$unique_site[gene_idxs][interference_idxs$site],
+  u_values = unlist(t(ind_o) %*% u_values_val)
+) %>%
+  as.data.frame() %>%
+  apply(1,FUN = function(x){
+    mu_val <- as.numeric(x[1])
+    cov <- as.numeric(x[4])
+    alpha_value <- (beta_val * mu_val) / (1 - mu_val)
+    Q <- extraDistr::rbbinom(n = 1000,
+                             size = cov,
+                             alpha = alpha_value,
+                             beta = beta_val) %>%
+      quantile(c(0.05,0.50,0.95))
+    names(Q) <- c("pred_005","pred","pred_095")
+    return(c(x,Q))
+  }) %>% 
+  t %>%
+  as.data.frame() %>% 
+  mutate(genes = sapply(as.character(site),function(x) unlist(strsplit(x,'-'))[[1]])) %>%
+  group_by(site) %>%
+  mutate(n = length(pred)) %>%
+  ungroup() %>%
+  mutate(
+    mu_val = as.numeric(as.character(mu_val)),
+    true = as.numeric(as.character(true)),
+    age = as.numeric(as.character(age)),
+    coverage = as.numeric(as.character(coverage)),
+    individual = as.numeric(as.character(individual)),
+    coefficient = as.numeric(as.character(coefficient)),
+    pred_005 = as.numeric(as.character(pred_005)),
+    pred = as.numeric(as.character(pred)),
+    pred_095 = as.numeric(as.character(pred_095)),
+    u_values = as.numeric(as.character(u_values))
+  )
+
+r_values_ <- r_values %>% 
+  mutate(VAFpred = pred / coverage,
+         VAFtrue = true / coverage) %>% 
+  subset(coverage > 0) %>%
+  group_by(individual,site) %>% 
+  mutate(normalizedVAFpred = (VAFpred + 1) / (VAFpred[which(age == min(age))] + 1),
+         normalizedVAFtrue = (VAFtrue + 1) / (VAFtrue[which(age == min(age))] + 1)) %>%
+  ungroup() %>%
+  mutate(individual = as.character(individual)) %>% 
+  gather(key = 'key',value = 'value',VAFpred,VAFtrue) %>%
+  mutate(
+    pred_005 = ifelse(key == 'VAFpred',
+                      pred_005 / coverage,
+                      NA),
+    pred_095 = ifelse(key == 'VAFpred',
+                      pred_095 / coverage,
+                      NA)
+  ) 
+r_values_list$model_e <- r_values
+```
+
+```{r model_e_summary_statistic, fig.height=7,fig.width=18}
+order_same_rank <- function(v) {
+  u <- unique(v)
+  o <- rep(0,length(v))
+  for (i in 1:length(u)) {
+    o[v == u[i]] <- i
+  }
+  return(o)
+}
+
+beta_value <- values_model_e$beta_values[[1]][1,1]
+
+statistic_full <- r_values_ %>%
+  subset(key == 'VAFpred') %>%
+  mutate(tail_prob = extraDistr::pbbinom(
+    q = true,
+    size = coverage,
+    alpha = (mu_val * beta_value)/(1 - mu_val),
+    beta = beta_value)) %>%
+  group_by(site,individual) %>% 
+  summarise(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)),
+            gene = genes[1]) %>%
+  mutate(split = 'full') %>%
+  select(split,site,sum_stat,gene,individual) %>%
+  ungroup()
+
+statistic_aggregated <- r_values_ %>%
+  subset(key == 'VAFpred') %>%
+  mutate(tail_prob = extraDistr::pbbinom(
+    q = true,
+    size = coverage,
+    alpha = (mu_val * beta_value)/(1 - mu_val),
+    beta = beta_value)) %>%
+  group_by(site) %>% 
+  summarise(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)),
+            gene = genes[1],
+            MinimumAge = min(age),
+            MaximumAge = max(age),
+            MaxValue = max(c(pred_095,value,true/coverage),na.rm = T)) %>%
+  mutate(split = 'full') %>%
+  ungroup()
+
+p <- statistic_full %>%
+  mutate(recurring = ifelse(site %in% recurrent_sites,T,F)) %>%
+  ggplot(aes(x = gene,y = sum_stat)) +
+  geom_point(aes(color = recurring),
+             stat = 'identity',
+             position = position_jitter(width = 0.1),
+             alpha = 0.3,
+             size = 0.4) + 
+  rotate_x_text() +
+  theme_minimal() +
+  theme(legend.position = 'bottom') + 
+  xlab("") +
+  ylab("Summary statistic") + 
+  scale_y_continuous() + 
+  geom_hline(yintercept = 0.7,alpha = 0.5) +
+  scale_color_lancet() + 
+  rotate_x_text()
+
+p
+
+statistic_full %>% 
+  select(sum_stat) %>%
+  mutate(sum_stat = sum_stat < .7) %>%
+  table
+
+statistics_lists$model_e <- list(
+  individual_site = statistic_full,
+  site = statistic_aggregated
+)
+```
+
+```{r, model_e_dynamic_visualization, fig.width = 30,fig.height = 14}
+r_values_merged <- merge(statistic_full,
+                         r_values_,
+                         all_y = F,
+                         all.x = F,
+                         by.x = c("site","individual"),
+                         by.y = c("site","individual"))
+
+average_statistic <- r_values_merged %>% 
+  group_by(site) %>%
+  summarise(AverageStatistic = mean(sum_stat),
+            MinimumAge = min(age),
+            MaximumAge = max(age),
+            MaxValue = max(c(pred_095,value),na.rm = T)) 
+
+r_values_merged %>% 
+  #subset(sum_stat < 0.7) %>%
+  ggplot(aes(x = age,y = value)) +
+  geom_ribbon(alpha = 0.1,
+              data = r_values_merged %>%
+                subset(key == 'VAFpred'),
+              aes(ymin = pred_005,
+                  ymax = pred_095,
+                  group = as.factor(paste0(as.character(individual),key))),
+              na.rm = T) +
+  geom_hline(aes(yintercept = (1/2e5) * (10/coefficient))) +
+  geom_line(aes(colour = key,group = as.factor(paste0(as.character(individual),key)))) +
+  #geom_point(aes(color = key)) + 
+  facet_wrap(~ site,scales = "free") + 
+  scale_color_discrete(guide = FALSE) +
+  theme_minimal(base_size = 10) + 
+  theme(legend.position = 'bottom') +
+  #scale_y_continuous(trans='log10') +
+  ggsave("plot_E.pdf",width = 30,height = 30)
+
+ss <- statistic_aggregated %>%
+  subset(sum_stat <= 0.05) %>%
+  select(site) %>%
+  unlist
+site_subset <- sort(val_subset$unique_site_multiple)[c(1,10,21,26,30,31,32,43,65,68)]
+#site_subset <- ss 
+
+r_values_merged %>% 
+  subset(site %in% site_subset) %>%
+  mutate(key = ifelse(key == "VAFpred",
+                      "Inferred",
+                      "Observed")) %>%
+  ggplot(aes(x = age,y = value)) +
+  geom_ribbon(data = r_values_merged %>%
+                subset(key == 'VAFpred') %>%
+                subset(site %in% site_subset),
+              alpha = 0.1,
+              aes(ymin = pred_005,
+                  ymax = pred_095,
+                  group = as.factor(paste0(as.character(individual),key))),
+              na.rm = T) +
+  geom_hline(aes(yintercept = (1/2e5) * (10/coefficient)),alpha = 0.2) +
+  geom_line(aes(colour = key,
+                group = as.factor(paste0(as.character(individual),key)),
+                alpha = 1-sum_stat),size = 1.5) +
+  geom_text(
+    data = statistic_aggregated %>%
+      subset(site %in% site_subset),
+    size = 8,
+    aes(group = site,
+        x = MinimumAge + (MaximumAge - MinimumAge) * 0.24,
+        y = MaxValue - MaxValue * 0.1,
+        label = paste('Goodness of\nfit =',round(1-sum_stat,digits = 4))),
+    fontface = "italic") +
+  #geom_point(aes(color = key)) + 
+  facet_wrap(~ site,scales = "free",ncol = 5) + 
+  scale_color_lancet(name = NULL) +
+  theme_minimal(base_size = 25) + 
+  theme(legend.position = 'bottom',
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(5,"line")) +
+  scale_y_continuous(limits = c(0, NA)) + 
+  xlab("Age") + 
+  ylab("VAF") +
+  scale_alpha(guide = F,range = c(0.4,1.0)) +
+  ggsave("Figure4_E.pdf",width = 30,height = 15)
+```
+
+```{r model_e_gene_coefficients, fig.width=14, fig.height=10}
+values_b_gene <- values_model_e$b_gene_values[[3]]
+values_b_gene$site_name <- rep(val_subset$unique_gene,
+                               each = length(unique(values_model_e$b_values[[1]]$labels)))
+values_b_gene %>% spread(key = labels,value = values) %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",site_name),
+         site_name = str_match(site_name,"[A-Z0-9]+")) %>%
+  ggplot(aes(y = `0.50`,x = Truncating,color = site_name,shape = Truncating)) +
+  geom_point(size = 5) +
+  geom_linerange(aes(ymin = `0.05`,ymax = `0.95`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal(base_size = 20) +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ site_name,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+  theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.text.x = element_blank(),
+        strip.text = element_text(size = 10,angle = 90,face = "bold")) 
+```
+
+```{r model_e_domain_coefficients, fig.width=14, fig.height=10}
+values_b_domain <- values_model_e$b_domain_values[[3]]
+values_b_domain$site_name <- rep(val_subset$unique_domain,
+                                 each = length(unique(values_model_e$b_values[[1]]$labels)))
+values_b_domain$gene <-  sapply(values_b_domain$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+values_b_domain %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = `0.05`,ymax = `0.95`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r model_e_site_coefficients, fig.width=14, fig.height=10}
+values_b_site <- values_model_e$b_site_values[[1]]
+values_b_site$site_name <- rep(val_subset$unique_site_multiple,
+                               each = length(unique(values_model_e$b_values[[1]]$labels)))
+values_b_site$gene <-  sapply(values_b_site$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+
+values_b_site %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = HDPI_low,ymax = HDPI_high)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r model_e_full_effects, fig.width=14, fig.height=9}
+values_b <- values_model_e$b_values[[3]]
+values_b$site_name <- rep(val_subset$unique_site[values_model_e$gene_idxs],
+                          each = length(unique(values_model_e$b_values[[1]]$labels)))
+values_b$gene <- values_b$site_name %>% 
+  sapply(function(x) unlist(str_split(x,pattern = '-'))[1])
+
+gene_order <- values_b %>%
+  mutate(gene = str_match(gene,"[A-Z0-9]+")) %>%
+  subset(labels == "0.50") %>% 
+  subset(site_name %in% val_subset$unique_site_multiple) %>%
+  group_by(gene) %>%
+  summarise(average = mean(values)) %>%
+  arrange(average) %>%
+  select(gene) %>%
+  unlist
+
+values_b %>% 
+  mutate(Truncating = grepl("[A-Z0-9]+t",gene),
+         gene = str_match(gene,"[A-Z0-9]+")) %>%
+  spread(key = labels,value = values) %>%
+  subset(site_name %in% val_subset$unique_site_multiple) %>%
+  mutate(site_name = sapply(site_name,function(x) unlist(strsplit(x,'-'))[2])) %>%
+  mutate(site_name = sapply(site_name,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(site_name = sapply(site_name,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>%
+  mutate(gene = factor(as.character(gene),levels = gene_order,
+                       ordered = TRUE)) %>%
+  ggplot(aes(y = exp(`0.50`),
+             x = reorder(substr(site_name,1,30),`0.50` + Truncating),
+             color = gene)) +
+  geom_point(aes(shape = Truncating)) +
+  geom_linerange(aes(ymin = exp(`0.05`),ymax = exp(`0.95`))) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal(base_size = 15) +
+  rotate_x_text() + 
+  xlab("Site") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+  theme(legend.position = "bottom",
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank(),
+          strip.text = element_text(size = 10,face = "bold",angle = 90)) +
+  coord_cartesian(ylim = c(exp(min(values_b$values)) * 0.99,exp(max(values_b$values)) * 1.01)) + 
+  scale_shape_discrete(breaks = c(TRUE,FALSE),
+                       labels = c("Truncating","Non-truncating"),
+                       name = NULL) +
+  ggsave("Figure5_E.pdf",width = 14,height = 10)
+```
+
+```{r model_e_clone_sizes, fig.width=20,fig.height=10}
+values_b_spread <- values_b %>%
+  subset(labels %in% c("0.025","0.50","0.975")) %>%
+  spread(key = 'labels',value = "values") %>%
+  mutate(amino_acid_change = site_name) %>%
+  select(-c(variable,site_name))
+clone_ages <- values_model_e$u_values[[1]] %>%
+  subset(labels == '0.50') %>%
+  mutate(x = str_match(variable,'[0-9]+(?=,)'),
+         y = str_match(variable,'(?<=,)[0-9]+')) %>%
+  cbind(values_model_e$u_idx) %>%
+  mutate(SardID = values_model_e$training_subset$unique_individual_true[ind],
+         amino_acid_change = values_model_e$training_subset$unique_site[values_model_e$gene_idxs][site]) %>%
+  mutate(Gene = c(str_match(amino_acid_change,'^[A-Z0-9a-z]+(?=-)'))) %>%
+  merge(values_b_spread,by = c("amino_acid_change")) %>%
+  select(-c(labels,variable,site,ind,inter_site)) %>%
+  mutate(CloneAgeHenryLower = t0(values,`0.50`,50000),
+         CloneAgeHenryUpper = t0(values,`0.50`,200000),
+         CloneAgeJamieLower = t0(values,`0.50`,30000),
+         CloneAgeJamieUpper = t0(values,`0.50`,600000),
+         CloneAgeHenryLower_adj = t0_adjusted(values,`0.50`,6,50000) + values_model_e$min_age,
+         CloneAgeHenryUpper_adj = t0_adjusted(values,`0.50`,6,200000) + values_model_e$min_age,
+         CloneAgeJamieLower_adj = t0_adjusted(values,`0.50`,6,30000) + values_model_e$min_age,
+         CloneAgeJamieUpper_adj = t0_adjusted(values,`0.50`,6,600000) + values_model_e$min_age
+         )
+  
+gene_order <- clone_ages %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",Gene),
+         Gene = str_match(Gene,"[A-Z0-9]+")) %>%
+
+  subset(abs(CloneAgeHenryUpper_adj) < 200 & CloneAgeHenryUpper_adj > -10) %>%
+  group_by(Gene) %>%
+  summarise(average = mean(CloneAgeHenryUpper_adj)) %>%
+  arrange(average) %>%
+  select(Gene) %>%
+  unlist() 
+
+clone_ages %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",Gene),
+         Gene = str_match(Gene,"[A-Z0-9]+")) %>%
+  subset(abs(CloneAgeHenryUpper_adj) < 200 & CloneAgeHenryUpper_adj > -10) %>%
+  subset(amino_acid_change %in% values_model_e$training_subset$unique_site_multiple) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) unlist(strsplit(x,'-'))[2])) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>%  mutate(Gene = factor(as.character(Gene),levels = gene_order)) %>%
+  ggplot(aes(group = SardID)) +
+  geom_hline(yintercept = 0) +
+  # geom_text(
+  #   aes(x = substr(amino_acid_change,1,30),
+  #       y = CloneAgeHenryUpper_adj,
+  #       label = round(`0.50`,4))) +
+  # geom_point(
+  #   size = 1,
+  #   alpha = 0.5,
+  #   aes(x = substr(amino_acid_change,1,30),
+  #       y = CloneAgeJamieUpper_adj),
+  #   color = 'blue4') +
+  geom_linerange(
+    size = 1,
+    alpha = 0.4,
+    aes(x = reorder(substr(amino_acid_change,1,30),
+                    (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2),
+        ymax = CloneAgeJamieLower_adj,
+        ymin = CloneAgeJamieUpper_adj,
+        color = Gene),
+    position = position_dodge(width=0.8)) +
+  geom_point(
+    size = 2,
+    alpha = 0.7,
+    position = position_dodge(width=0.8),
+    aes(x = reorder(substr(amino_acid_change,1,30),
+                    (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2),
+        shape = Truncating,
+        y = (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2,
+        color = Gene)) +
+  # geom_boxplot(
+  #   size = 0.5,
+  #   alpha = 0.5,
+  #   aes(x = substr(amino_acid_change,1,30),
+  #       y = CloneAgeHenryLower_adj),
+  #   color = 'red4') +
+  facet_grid(~ Gene,scales = "free",space = "free") + 
+  theme_minimal(base_size = 15) + 
+  theme(strip.text = element_text(size = 10,face = 'bold',angle = 90),
+        legend.position = 'bottom') + 
+  ylab("Age at beginning of clone growth") +
+  xlab("Site") +
+  rotate_x_text() + 
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+  scale_y_continuous(
+    limits = c(-10,100),
+    oob = scales::squish,
+    breaks = c(-500,-400,-300,-200,-100,0,10,20,30,40,50,60,70,80,90,100,1000,2000,3000,5000)
+    ) + 
+  scale_shape_discrete(breaks = c(TRUE,FALSE),
+                       labels = c("Truncating","Non-truncating"),
+                       name = NULL) +
+  ggsave("Figure6_E.pdf",width = 14,height = 10)
+```
+
+### Model F - on the presence of an effect that affects specific individuals/clones 
+
+Here we build on the model in E and append to it a growth coefficient that works at the individual level or at the clone level - this allows us to disentangle the effects that are particular to an individual and that affect the growth of their clones/specific clones. The immediate criticism of this, at least at a clone level, is that the effect can very easily be unidentifiable - we investigate this within this cohort.
+
+#### Model F1 - an individual has an additional growth effect that affects all clones equally
+
+$$
+b_{gene_i} \sim N(0,0.1)
+\\
+b_{domain_i} \sim N(0,0.1)
+\\
+b_{site_i} \sim N(0,0.1)
+\\
+u_{ji} \sim Uniform(-100,0)
+\\
+b_{individual_j} ~ N(0,0.01)
+\\
+p_i = ilogit((b_{gene_i} + b_{domain_i} + b_{site_i} + b_{individual_j}) * age + u_{ji})
+\\
+\beta \sim N(\mu=208.63705,\sigma=7.376525)
+\\
+\alpha_{SR} = \frac{\beta p}{1 - p}
+\\
+counts \sim BB(coverage + 1,alpha,beta)
+$$
+
+```{r, model_f1_load_values}
+values_model_f1 <- readRDS("models/model_F1_full.RDS")
+```
+
+``` {r, model_f1_dynamic_visualization_preparation, fig.width = 30,fig.height = 30}
+val_subset <- full_formatted_data
+
+X_val <- val_subset$counts[values_model_f1$gene_idxs,]
+gene_idxs <- values_model_f1$gene_idxs
+  
+interference_idxs <- values_model_f1$interference_idxs %>%
+  mutate(ind_site = as.numeric(factor(paste(ind,site,sep = '-'))))
+
+u_idx <- values_model_f1$u_idx
+ind_o <- sapply(c(1:nrow(interference_idxs)),function(x) {
+  M <- (u_idx$site == interference_idxs$site[x]) & (u_idx$ind == interference_idxs$ind[x])
+  M %>%
+    as.numeric %>%
+    return})
+
+b_gene_values_val <- values_model_f1$b_gene_values[[1]]$values[values_model_f1$b_gene_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1) 
+b_domain_values_val <- values_model_f1$b_domain_values[[1]]$values[values_model_f1$b_domain_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1) 
+b_site_values_val <- values_model_f1$b_site_values[[1]]$values[values_model_f1$b_site_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1) 
+beta_val <- values_model_f1$beta_values[[1]]$values[values_model_f1$beta_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1) 
+b_individual_values_val <- values_model_f1$b_individual[[1]]$values[values_model_f1$b_individual[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+
+u_values_val <- values_model_f1$u_values[[1]]$values[values_model_f1$u_values[[1]]$labels == 'mean'] %>%
+  matrix(nrow=1) 
+
+ae_gene <- val_subset$gene_to_site_indicator[values_model_f1$gene_idxs,] %*% b_gene_values_val
+ae_domain <- val_subset$domain_to_site_indicator[values_model_f1$gene_idxs,] %*% b_domain_values_val
+ae_site <- val_subset$site_multiple_to_site_indicator[values_model_f1$gene_idxs,] %*% b_site_values_val
+
+age_effect_coef <- ae_gene + ae_domain + ae_site
+age_effect <- (age_effect_coef[interference_idxs$site] + b_individual_values_val[interference_idxs$ind_nonredundant]) 
+age_effect <- age_effect * (val_subset$ages[interference_idxs$ind_age] - values_model_f1$min_age)
+
+offset_per_individual <- t(ind_o) %*% t(u_values_val)
+r <- age_effect + offset_per_individual
+mu_val <- inv.logit(r)
+
+r_values <- data.frame(
+  mu_val = mu_val,
+  true = val_subset$counts[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  age = val_subset$ages[interference_idxs$ind_age],
+  coverage = val_subset$coverage[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  individual = val_subset$unique_individual_true[interference_idxs$ind],
+  coefficient = values_model_f1$b_values[[1]]$values[values_model_f1$b_values[[1]]$labels == 'mean'][interference_idxs$site],
+  site = val_subset$unique_site[values_model_f1$gene_idxs][interference_idxs$site],
+  b_individual = b_individual_values_val[interference_idxs$ind_site],
+  u_values = unlist(t(ind_o) %*% t(u_values_val))
+) %>%
+  as.data.frame() %>%
+  apply(1,FUN = function(x){
+    mu_val <- as.numeric(x[1])
+    cov <- as.numeric(x[4])
+    alpha_value <- (beta_val * mu_val) / (1 - mu_val)
+    Q <- extraDistr::rbbinom(n = 1000,
+                             size = cov,
+                             alpha = alpha_value,
+                             beta = beta_val) %>%
+      quantile(c(0.05,0.50,0.95))
+    names(Q) <- c("pred_005","pred","pred_095")
+    return(c(x,Q))
+  }) %>% 
+  t %>%
+  as.data.frame() %>% 
+  mutate(genes = sapply(as.character(site),function(x) unlist(strsplit(x,'-'))[[1]])) %>%
+  group_by(site) %>%
+  mutate(n = length(pred)) %>%
+  ungroup() %>%
+  mutate(
+    mu_val = as.numeric(as.character(mu_val)),
+    true = as.numeric(as.character(true)),
+    age = as.numeric(as.character(age)),
+    coverage = as.numeric(as.character(coverage)),
+    individual = as.numeric(as.character(individual)),
+    coefficient = as.numeric(as.character(coefficient)),
+    pred_005 = as.numeric(as.character(pred_005)),
+    pred = as.numeric(as.character(pred)),
+    pred_095 = as.numeric(as.character(pred_095)),
+    b_individual = as.numeric(as.character(b_individual)),
+    u_values = as.numeric(as.character(u_values))
+  )
+
+r_values_ <- r_values %>% 
+  mutate(VAFpred = pred / coverage,
+         VAFtrue = true / coverage) %>% 
+  subset(coverage > 0) %>%
+  group_by(individual,site) %>% 
+  mutate(normalizedVAFpred = (VAFpred + 1) / (VAFpred[which(age == min(age))] + 1),
+         normalizedVAFtrue = (VAFtrue + 1) / (VAFtrue[which(age == min(age))] + 1)) %>%
+  ungroup() %>%
+  mutate(individual = as.character(individual)) %>% 
+  gather(key = 'key',value = 'value',VAFpred,VAFtrue) %>%
+  mutate(
+    pred_005 = ifelse(key == 'VAFpred',
+                      pred_005 / coverage,
+                      NA),
+    pred_095 = ifelse(key == 'VAFpred',
+                      pred_095 / coverage,
+                      NA)
+  )
+r_values_list$model_f1 <- r_values
+```
+
+```{r model_f1_summary_statistic, fig.height=5,fig.width=6}
+order_same_rank <- function(v) {
+  u <- unique(v)
+  o <- rep(0,length(v))
+  for (i in 1:length(u)) {
+    o[v == u[i]] <- i
+  }
+  return(o)
+}
+
+beta_value <- values_model_f1$beta_values[[1]][1,1]
+
+statistic_full <- r_values_ %>%
+  subset(key == 'VAFpred') %>%
+  mutate(tail_prob = extraDistr::pbbinom(
+    q = true,
+    size = coverage,
+    alpha = (mu_val * beta_value)/(1 - mu_val),
+    beta = beta_value)) %>%
+  group_by(site,individual) %>% 
+  summarise(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)),
+            gene = genes[1]) %>%
+  mutate(split = 'full') %>%
+  select(split,site,sum_stat,gene,individual) %>%
+  ungroup() %>%
+  mutate(recurring = site %in% values_model_f1$training_subset$unique_site_multiple)
+
+statistic_aggregated <- r_values_ %>%
+  subset(key == 'VAFpred') %>%
+  mutate(tail_prob = extraDistr::pbbinom(
+    q = true,
+    size = coverage,
+    alpha = (mu_val * beta_value)/(1 - mu_val),
+    beta = beta_value)) %>%
+  group_by(site) %>% 
+  summarise(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)),
+            gene = genes[1],
+            MinimumAge = min(age),
+            MaximumAge = max(age),
+            MaxValue = max(c(pred_095,value,true/coverage),na.rm = T)) %>%
+  mutate(split = 'full') %>%
+  ungroup()
+
+p <- statistic_full %>%
+  ggplot(aes(x = gene,y = sum_stat)) +
+  geom_point(aes(color = recurring),
+             stat = 'identity',
+             position = position_jitter(width = 0.1),
+             alpha = 0.3,
+             size = 0.4) + 
+  rotate_x_text() +
+  theme_minimal() +
+  theme(legend.position = 'bottom') + 
+  xlab("") +
+  ylab("Summary statistic") + 
+  scale_y_continuous() + 
+  geom_hline(yintercept = 0.7,alpha = 0.5) +
+  scale_color_lancet() + 
+  rotate_x_text()
+
+p
+
+statistic_full %>% 
+  select(sum_stat) %>%
+  mutate(sum_stat = sum_stat < .7) %>%
+  table
+
+statistics_lists$model_f1 <- list(
+  individual_site = statistic_full,
+  site = statistic_aggregated
+)
+```
+
+```{r, model_f1_dynamic_visualization, fig.width = 30,fig.height = 14}
+r_values_merged <- merge(statistic_full,
+                         r_values_,
+                         all_y = F,
+                         all.x = F,
+                         by.x = c("site","individual"),
+                         by.y = c("site","individual"))
+
+average_statistic <- r_values_merged %>% 
+  group_by(site) %>%
+  summarise(AverageStatistic = mean(sum_stat),
+            MinimumAge = min(age),
+            MaximumAge = max(age),
+            MaxValue = max(c(pred_095,value),na.rm = T)) 
+
+r_values_merged %>% 
+  subset(site %in% recurrent_sites) %>%
+  #subset(sum_stat < 0.7) %>%
+  ggplot(aes(x = age,y = value)) +
+  geom_ribbon(alpha = 0.1,
+              data = r_values_merged %>%
+                subset(key == 'VAFpred'),
+              aes(ymin = pred_005,
+                  ymax = pred_095,
+                  group = as.factor(paste0(as.character(individual),key))),
+              na.rm = T) +
+  geom_hline(aes(yintercept = (1/2e5) * (10/coefficient))) +
+  geom_line(aes(colour = key,group = as.factor(paste0(as.character(individual),key)))) +
+  #geom_point(aes(color = key)) + 
+  facet_wrap(~ site,scales = "free") + 
+  scale_color_discrete(guide = FALSE) +
+  theme_minimal(base_size = 10) + 
+  theme(legend.position = 'bottom') +
+  #scale_y_continuous(trans='log10') +
+  ggsave("plot_f1.pdf",width = 30,height = 30)
+
+ss <- statistic_aggregated %>%
+  subset(sum_stat <= 0.05) %>%
+  select(site) %>%
+  unlist
+site_subset <- sort(val_subset$unique_site_multiple)[c(1,10,21,26,30,31,32,43,65,68)]
+#site_subset <- ss 
+
+r_values_merged %>% 
+  subset(site %in% site_subset) %>%
+  mutate(key = ifelse(key == "VAFpred",
+                      "Inferred",
+                      "Observed")) %>%
+  ggplot(aes(x = age,y = value)) +
+  geom_ribbon(data = r_values_merged %>%
+                subset(key == 'VAFpred') %>%
+                subset(site %in% site_subset),
+              alpha = 0.1,
+              aes(ymin = pred_005,
+                  ymax = pred_095,
+                  group = as.factor(paste0(as.character(individual),key))),
+              na.rm = T) +
+  geom_hline(aes(yintercept = (1/2e5) * (10/coefficient)),alpha = 0.2) +
+  geom_line(aes(colour = key,
+                group = as.factor(paste0(as.character(individual),key)),
+                alpha = 1-sum_stat),size = 1.5) +
+  geom_text(
+    data = statistic_aggregated %>%
+      subset(site %in% site_subset),
+    size = 8,
+    aes(group = site,
+        x = MinimumAge + (MaximumAge - MinimumAge) * 0.24,
+        y = MaxValue - MaxValue * 0.1,
+        label = paste('Goodness of\nfit =',format(1-sum_stat,digits = 1,scientific = F))),
+    fontface = "italic") +
+  #geom_point(aes(color = key)) + 
+  facet_wrap(~ site,scales = "free",ncol = 5) + 
+  scale_color_lancet(name = NULL) +
+  theme_minimal(base_size = 25) + 
+  theme(legend.position = 'bottom',
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(5,"line")) +
+  scale_y_continuous(limits = c(0, NA)) + 
+  xlab("Age") + 
+  ylab("VAF") +
+  scale_alpha(guide = F,range = c(0.4,1.0)) +
+  ggsave("Figure4_F1.pdf",width = 30,height = 15)
+```
+
+```{r model_f1_gene_coefficients, fig.width=14, fig.height=10}
+values_b_gene <- values_model_f1$b_gene_values[[3]]
+values_b_gene$site_name <- rep(val_subset$unique_gene,
+                               each = length(unique(values_model_f1$b_values[[1]]$labels)))
+values_b_gene %>% spread(key = labels,value = values) %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",site_name),
+         site_name = str_match(site_name,"[A-Z0-9]+")) %>%
+  ggplot(aes(y = `0.50`,x = Truncating,color = site_name,shape = Truncating)) +
+  geom_point(size = 5) +
+  geom_linerange(aes(ymin = `0.05`,ymax = `0.95`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal(base_size = 20) +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ site_name,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+  theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.text.x = element_blank(),
+        strip.text = element_text(size = 10,angle = 90,face = "bold")) 
+```
+
+```{r model_f1_domain_coefficients, fig.width=14, fig.height=10}
+values_b_domain <- values_model_f1$b_domain_values[[3]]
+values_b_domain$site_name <- rep(val_subset$unique_domain,
+                                 each = length(unique(values_model_f1$b_values[[1]]$labels)))
+values_b_domain$gene <-  sapply(values_b_domain$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+values_b_domain %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = `0.05`,ymax = `0.95`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r model_f1_site_coefficients, fig.width=14, fig.height=10}
+values_b_site <- values_model_f1$b_site_values[[1]]
+values_b_site$site_name <- rep(val_subset$unique_site_multiple,
+                               each = length(unique(values_model_f1$b_values[[1]]$labels)))
+values_b_site$gene <-  sapply(values_b_site$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+
+values_b_site %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = HDPI_low,ymax = HDPI_high)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r model_f1_full_effects, fig.width=14, fig.height=9}
+values_b <- values_model_f1$b_values[[3]]
+values_b$site_name <- rep(val_subset$unique_site[values_model_f1$gene_idxs],
+                          each = length(unique(values_model_f1$b_values[[1]]$labels)))
+values_b$gene <- values_b$site_name %>% 
+  sapply(function(x) unlist(str_split(x,pattern = '-'))[1])
+
+gene_order <- values_b %>%
+  mutate(gene = str_match(gene,"[A-Z0-9]+")) %>%
+  subset(labels == "0.50") %>% 
+  subset(site_name %in% val_subset$unique_site_multiple) %>%
+  group_by(gene) %>%
+  summarise(average = mean(values)) %>%
+  arrange(average) %>%
+  select(gene) %>%
+  unlist
+
+values_b %>% 
+  mutate(Truncating = grepl("[A-Z0-9]+t",gene),
+         gene = str_match(gene,"[A-Z0-9]+")) %>%
+  spread(key = labels,value = values) %>%
+  subset(site_name %in% val_subset$unique_site_multiple) %>%
+  mutate(site_name = sapply(site_name,function(x) unlist(strsplit(x,'-'))[2])) %>%
+  mutate(site_name = sapply(site_name,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(site_name = sapply(site_name,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>%
+  mutate(gene = factor(as.character(gene),levels = gene_order,
+                       ordered = TRUE)) %>%
+  ggplot(aes(y = exp(`0.50`),
+             x = reorder(substr(site_name,1,30),`0.50` + Truncating),
+             color = gene)) +
+  geom_point(aes(shape = Truncating)) +
+  geom_linerange(aes(ymin = exp(`0.05`),ymax = exp(`0.95`))) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal(base_size = 15) +
+  rotate_x_text() + 
+  xlab("Site") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+  theme(legend.position = "bottom",
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank(),
+          strip.text = element_text(size = 10,face = "bold",angle = 90)) +
+  coord_cartesian(ylim = c(exp(min(values_b$values)) * 0.99,exp(max(values_b$values)) * 1.01)) + 
+  scale_shape_discrete(breaks = c(TRUE,FALSE),
+                       labels = c("Truncating","Non-truncating"),
+                       name = NULL) +
+  ggsave("Figure5_F1.pdf",width = 14,height = 10)
+```
+
+```{r model_f1_age_at_clone_growth, fig.width=20,fig.height=10}
+clone_ages <- r_values %>%
+  mutate(CloneAgeHenryLower = t0(u_values,coefficient + b_individual,50000),
+         CloneAgeHenryUpper = t0(u_values,coefficient + b_individual,200000),
+         CloneAgeJamieLower = t0(u_values,coefficient + b_individual,30000),
+         CloneAgeJamieUpper = t0(u_values,coefficient + b_individual,600000),
+         CloneAgeHenryLower_adj = t0_adjusted(u_values,coefficient + b_individual,6,50000) + values_model_f1$min_age,
+         CloneAgeHenryUpper_adj = t0_adjusted(u_values,coefficient + b_individual,6,200000) + values_model_f1$min_age,
+         CloneAgeJamieLower_adj = t0_adjusted(u_values,coefficient + b_individual,6,30000) + values_model_f1$min_age,
+         CloneAgeJamieUpper_adj = t0_adjusted(u_values,coefficient + b_individual,6,600000) + values_model_f1$min_age
+         )
+
+gene_order <- clone_ages %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",genes),
+         Gene = str_match(genes,"[A-Z0-9]+")) %>%
+  subset(abs(CloneAgeHenryLower_adj) < 200 & CloneAgeHenryUpper_adj > 0) %>%
+  subset(site %in% values_model_f1$training_subset$unique_site_multiple) %>%
+  group_by(Gene) %>%
+  summarise(average = mean((CloneAgeHenryUpper_adj + CloneAgeHenryLower_adj)/2)) %>%
+  arrange(average) %>%
+  select(Gene) %>%
+  unlist() %>%
+  as.character
+
+clone_ages %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",genes),
+         Gene = str_match(genes,"[A-Z0-9]+"),
+         amino_acid_change = as.character(site)) %>%
+  subset(abs(CloneAgeHenryLower_adj) < 200 & CloneAgeHenryUpper_adj > -10) %>%
+  subset(amino_acid_change %in% values_model_f1$training_subset$unique_site_multiple) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) unlist(strsplit(x,'-'))[2])) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>% 
+  mutate(Gene = factor(as.character(Gene),levels = gene_order)) %>%
+  ggplot(aes(group = individual)) +
+  geom_hline(yintercept = 0) +
+  geom_linerange(
+    size = 0.5,
+    alpha = 0.4,
+    aes(x = reorder(substr(amino_acid_change,1,30),
+                    (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2),
+        ymax = CloneAgeJamieLower_adj,
+        ymin = CloneAgeJamieUpper_adj,
+        color = Gene),
+    position = position_dodge(width=0.8)) +
+  geom_point(
+    size = 2,
+    alpha = 0.7,
+    position = position_dodge(width=0.8),
+    aes(x = reorder(substr(amino_acid_change,1,30),
+                    (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2),
+        shape = Truncating,
+        y = (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2,
+        color = Gene)) +
+  facet_grid(~ Gene,scales = "free",space = "free") + 
+  theme_minimal(base_size = 15) + 
+  theme(strip.text = element_text(size = 10,face = 'bold',angle = 90),
+        legend.position = 'bottom') + 
+  ylab("Age at beginning of clone growth") +
+  xlab("Site") +
+  rotate_x_text() + 
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+  scale_y_continuous(
+    limits = c(-10,100),
+    oob = scales::squish,
+    breaks = c(-500,-400,-300,-200,-100,0,10,20,30,40,50,60,70,80,90,100,1000,2000,3000,5000)
+    ) + 
+  scale_shape_discrete(breaks = c(TRUE,FALSE),
+                       labels = c("Truncating","Non-truncating"),
+                       name = NULL)
+```
+
+While this model does better at explaining a higher number of instances than model E, it is quite remarkable how much more diverse it makes the results, making it harder to properly conclude relevant aspects regarding most aspects of CH dynamics, but most noticeably those associated with the age at beginning of clone growth - indeed, using a single factor per individual is quite risky because this would imply a biological process that would alter the growth of all clones equally. As such, we proceed with the analysis with an additional effect at a clone level rather than at an individual level - a more realistic scenario.
+
+#### Model F2 - an individual has additional different growth effects for different clones
+
+The main problem with this model is how hard it is to disentangle both effects - an effect at the clone level and an effect at the genetic level - since either can explain the other. Nonetheless, it is unlikely that the genetic effect will disappear completely in favour of a clone effect - indeed, the most likely outcome is that part of the genetic effect will be absorbed by the cloen effect.  
+
+$$
+b_{gene_i} \sim N(0,0.1)
+\\
+b_{domain_i} \sim N(0,0.1)
+\\
+b_{site_i} \sim N(0,0.1)
+\\
+u_{ji} \sim Uniform(-100,0)
+\\
+b_{clone_{ji}} \sim N(0,0.05)
+\\
+p_i = ilogit((b_{gene_i} + b_{domain_i} + b_{site_i} + b_{clone_{ji}}) * age + u_{ji})
+\\
+\beta \sim N(\mu=208.63705,\sigma=7.376525)
+\\
+\alpha_{SR} = \frac{\beta p}{1 - p}
+\\
+counts \sim BB(coverage,alpha,beta)
+$$
+
+```{r model_f2_load_values}
+values_model_f2 <- readRDS("models/model_F2_full.RDS")
+```
+
+``` {r model_f2_dynamic_visualization_preparation, fig.width = 30,fig.height = 30}
+val_subset <- full_formatted_data
+
+X_val <- val_subset$counts[values_model_f2$gene_idxs,]
+gene_idxs <- values_model_f2$gene_idxs
+
+interference_idxs <- values_model_f2$interference_idxs
+u_idx <- values_model_f2$u_idx
+ind_o <- sapply(c(1:nrow(interference_idxs)),function(x) {
+  M <- (u_idx$site == interference_idxs$site[x]) & (u_idx$ind == interference_idxs$ind[x])
+  M %>%
+    as.numeric %>%
+    return})
+
+b_gene_values_val <- values_model_f2$b_gene_values[[1]]$values[values_model_f2$b_gene_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1) 
+b_domain_values_val <- values_model_f2$b_domain_values[[1]]$values[values_model_f2$b_domain_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1) 
+b_site_values_val <- values_model_f2$b_site_values[[1]]$values[values_model_f2$b_site_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1) 
+beta_val <- values_model_f2$beta_values[[1]]$values[values_model_f2$beta_values[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1) 
+b_clone_values_val <- values_model_f2$b_clone[[1]]$values[values_model_f2$b_clone[[1]]$labels == 'mean'] %>% 
+  matrix(ncol=1)
+
+u_values_val <- values_model_f2$u_values[[1]]$values[values_model_f2$u_values[[1]]$labels == 'mean'] %>%
+  matrix(nrow=1) 
+
+ae_gene <- val_subset$gene_to_site_indicator[values_model_f2$gene_idxs,] %*% b_gene_values_val
+ae_domain <- val_subset$domain_to_site_indicator[values_model_f2$gene_idxs,] %*% b_domain_values_val
+ae_site <- val_subset$site_multiple_to_site_indicator[values_model_f2$gene_idxs,] %*% b_site_values_val
+
+age_effect_coef <- ae_gene + ae_domain + ae_site
+age_effect <- (age_effect_coef[interference_idxs$site] + b_clone_values_val[interference_idxs$ind_site]) 
+age_effect <- age_effect * (val_subset$ages[interference_idxs$ind_age] - values_model_f2$min_age)
+
+offset_per_individual <- t(ind_o) %*% t(u_values_val)
+r <- age_effect + offset_per_individual
+mu_val <- inv.logit(r)
+
+r_values <- data.frame(
+  mu_val = mu_val,
+  true = val_subset$counts[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  age = val_subset$ages[interference_idxs$ind_age],
+  coverage = val_subset$coverage[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
+  individual = val_subset$unique_individual_true[interference_idxs$ind],
+  coefficient = values_model_f2$b_values[[1]]$values[values_model_f2$b_values[[1]]$labels == 'mean'][interference_idxs$site],
+  site = val_subset$unique_site[values_model_f2$gene_idxs][interference_idxs$site],
+  b_clone = b_clone_values_val[interference_idxs$ind_site],
+  u_values = unlist(t(ind_o) %*% t(u_values_val))
+) %>%
+  as.data.frame() %>%
+  apply(1,FUN = function(x){
+    mu_val <- as.numeric(x[1])
+    cov <- as.numeric(x[4])
+    alpha_value <- (beta_val * mu_val) / (1 - mu_val)
+    Q <- extraDistr::rbbinom(n = 1000,
+                             size = cov,
+                             alpha = alpha_value,
+                             beta = beta_val) %>%
+      quantile(c(0.05,0.50,0.95))
+    names(Q) <- c("pred_005","pred","pred_095")
+    return(c(x,Q))
+  }) %>% 
+  t %>%
+  as.data.frame() %>% 
+  mutate(genes = sapply(as.character(site),function(x) unlist(strsplit(x,'-'))[[1]])) %>%
+  group_by(site) %>%
+  mutate(n = length(pred)) %>%
+  ungroup() %>%
+  mutate(
+    mu_val = as.numeric(as.character(mu_val)),
+    true = as.numeric(as.character(true)),
+    age = as.numeric(as.character(age)),
+    coverage = as.numeric(as.character(coverage)),
+    individual = as.numeric(as.character(individual)),
+    coefficient = as.numeric(as.character(coefficient)),
+    pred_005 = as.numeric(as.character(pred_005)),
+    pred = as.numeric(as.character(pred)),
+    pred_095 = as.numeric(as.character(pred_095)),
+    b_clone = as.numeric(as.character(b_clone)),
+    u_values = as.numeric(as.character(u_values))
+  )
+
+r_values_ <- r_values %>% 
+  mutate(VAFpred = pred / coverage,
+         VAFtrue = true / coverage) %>% 
+  subset(coverage > 0) %>%
+  group_by(individual,site) %>% 
+  mutate(normalizedVAFpred = (VAFpred + 1) / (VAFpred[which(age == min(age))] + 1),
+         normalizedVAFtrue = (VAFtrue + 1) / (VAFtrue[which(age == min(age))] + 1)) %>%
+  ungroup() %>%
+  mutate(individual = as.character(individual)) %>% 
+  gather(key = 'key',value = 'value',VAFpred,VAFtrue) %>%
+  mutate(
+    pred_005 = ifelse(key == 'VAFpred',
+                      pred_005 / coverage,
+                      NA),
+    pred_095 = ifelse(key == 'VAFpred',
+                      pred_095 / coverage,
+                      NA)
+  ) 
+
+r_values_list$model_f2 <- r_values
+```
+
+```{r model_f2_summary_statistic, fig.height=5,fig.width=6}
+order_same_rank <- function(v) {
+  u <- unique(v)
+  o <- rep(0,length(v))
+  for (i in 1:length(u)) {
+    o[v == u[i]] <- i
+  }
+  return(o)
+}
+
+beta_value <- values_model_f2$beta_values[[1]][1,1]
+
+statistic_full <- r_values_ %>%
+  subset(key == 'VAFpred') %>%
+  mutate(tail_prob = extraDistr::pbbinom(
+    q = true,
+    size = coverage,
+    alpha = (mu_val * beta_value)/(1 - mu_val),
+    beta = beta_value)) %>%
+  group_by(site,individual) %>% 
+  summarise(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)),
+            gene = genes[1]) %>%
+  mutate(split = 'full') %>%
+  select(split,site,sum_stat,gene,individual) %>%
+  ungroup() %>%
+  mutate(recurring = site %in% values_model_f2$training_subset$unique_site_multiple)
+
+statistic_aggregated <- r_values_ %>%
+  subset(key == 'VAFpred') %>%
+  mutate(tail_prob = extraDistr::pbbinom(
+    q = true,
+    size = coverage,
+    alpha = (mu_val * beta_value)/(1 - mu_val),
+    beta = beta_value)) %>%
+  group_by(site) %>% 
+  summarise(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)),
+            gene = genes[1],
+            MinimumAge = min(age),
+            MaximumAge = max(age),
+            MaxValue = max(c(pred_095,value,true/coverage),na.rm = T)) %>%
+  mutate(split = 'full') %>%
+  ungroup()
+
+p <- statistic_full %>%
+  ggplot(aes(x = gene,y = sum_stat)) +
+  geom_point(aes(color = recurring),
+             stat = 'identity',
+             position = position_jitter(width = 0.1),
+             alpha = 0.3,
+             size = 0.4) + 
+  rotate_x_text() +
+  theme_minimal() +
+  theme(legend.position = 'bottom') + 
+  xlab("") +
+  ylab("Summary statistic") + 
+  scale_y_continuous() + 
+  geom_hline(yintercept = 0.7,alpha = 0.5) +
+  scale_color_lancet() + 
+  rotate_x_text()
+
+p
+
+statistic_full %>% 
+  select(sum_stat) %>%
+  mutate(sum_stat = sum_stat < .7) %>%
+  table
+
+statistics_lists$model_f2 <- list(
+  individual_site = statistic_full,
+  site = statistic_aggregated
+)
+```
+
+```{r model_f2_dynamic_visualization, fig.width = 30,fig.height = 14}
+r_values_merged <- merge(statistic_full,
+                         r_values_,
+                         all_y = F,
+                         all.x = F,
+                         by.x = c("site","individual"),
+                         by.y = c("site","individual"))
+
+average_statistic <- r_values_merged %>% 
+  group_by(site) %>%
+  summarise(AverageStatistic = mean(sum_stat),
+            MinimumAge = min(age),
+            MaximumAge = max(age),
+            MaxValue = max(c(pred_095,value),na.rm = T)) 
+
+r_values_merged %>% 
+  #subset(sum_stat < 0.7) %>%
+  ggplot(aes(x = age,y = value)) +
+  geom_ribbon(alpha = 0.1,
+              data = r_values_merged %>%
+                subset(key == 'VAFpred'),
+              aes(ymin = pred_005,
+                  ymax = pred_095,
+                  group = as.factor(paste0(as.character(individual),key))),
+              na.rm = T) +
+  geom_hline(aes(yintercept = (1/2e5) * (10/coefficient))) +
+  geom_line(aes(colour = key,group = as.factor(paste0(as.character(individual),key)))) +
+  #geom_point(aes(color = key)) + 
+  facet_wrap(~ site,scales = "free") + 
+  scale_color_discrete(guide = FALSE) +
+  theme_minimal(base_size = 10) + 
+  theme(legend.position = 'bottom') +
+  #scale_y_continuous(trans='log10') +
+  ggsave("plot_F2.pdf",width = 30,height = 30)
+
+ss <- statistic_aggregated %>%
+  subset(sum_stat <= 0.05) %>%
+  select(site) %>%
+  unlist
+site_subset <- sort(val_subset$unique_site_multiple)[c(1,10,21,26,30,31,32,43,65,68)]
+#site_subset <- ss 
+
+r_values_merged %>% 
+  subset(site %in% site_subset) %>%
+  mutate(key = ifelse(key == "VAFpred",
+                      "Inferred",
+                      "Observed")) %>%
+  ggplot(aes(x = age,y = value)) +
+  geom_ribbon(data = r_values_merged %>%
+                subset(key == 'VAFpred') %>%
+                subset(site %in% site_subset),
+              alpha = 0.1,
+              aes(ymin = pred_005,
+                  ymax = pred_095,
+                  group = as.factor(paste0(as.character(individual),key))),
+              na.rm = T) +
+  geom_hline(aes(yintercept = (1/2e5) * (10/coefficient)),alpha = 0.2) +
+  geom_line(aes(colour = key,
+                group = as.factor(paste0(as.character(individual),key)),
+                alpha = 1-sum_stat),size = 1.5) +
+  geom_text(
+    data = statistic_aggregated %>%
+      subset(site %in% site_subset),
+    size = 8,
+    aes(group = site,
+        x = MinimumAge + (MaximumAge - MinimumAge) * 0.28,
+        y = MaxValue - MaxValue * 0.1,
+        label = paste('Residual\neffect =',format(sum_stat,digits = 2))),
+    fontface = "italic") +
+  #geom_point(aes(color = key)) + 
+  facet_wrap(~ site,scales = "free",ncol = 5) + 
+  scale_color_lancet(name = NULL) +
+  theme_minimal(base_size = 25) + 
+  theme(legend.position = 'bottom',
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(5,"line")) +
+  scale_y_continuous(limits = c(0, NA)) + 
+  xlab("Age") + 
+  ylab("VAF") +
+  scale_alpha(guide = F,range = c(0.4,1.0)) +
+  ggsave("Figure4_F2.pdf",width = 30,height = 15)
+
+r_values_merged %>% 
+  subset(site %in% site_subset[c(1,3,5,8,10)]) %>%
+  mutate(key = ifelse(key == "VAFpred",
+                      "Inferred",
+                      "Observed")) %>%
+  ggplot(aes(x = age,y = value)) +
+  geom_ribbon(data = r_values_merged %>%
+                subset(key == 'VAFpred') %>%
+                subset(site %in% site_subset[c(1,3,5,8,10)]),
+              alpha = 0.1,
+              aes(ymin = pred_005,
+                  ymax = pred_095,
+                  group = as.factor(paste0(as.character(individual),key))),
+              na.rm = T) +
+  geom_hline(aes(yintercept = (1/2e5) * (10/coefficient)),alpha = 0.2) +
+  geom_line(aes(colour = key,
+                group = as.factor(paste0(as.character(individual),key)),
+                alpha = 1-sum_stat),
+            size = 0.7,hjust = 0) +
+  geom_label(
+    label.r = unit(0,"cm"),
+    label.size = unit(0,"cm"),
+    label.padding = unit(0,"cm"),
+    alpha = 0.7,
+    data = statistic_aggregated %>%
+      subset(site %in% site_subset[c(1,3,5,8,10)]),
+    size = 3,
+    aes(group = site,
+        x = MinimumAge + (MaximumAge - MinimumAge) * 0.3,
+        y = MaxValue - MaxValue * 0.05,
+        label = paste('RE =',format(sum_stat,digits = 2))),
+    fontface = "italic") +
+  #geom_point(aes(color = key)) + 
+  facet_wrap(~ site,scales = "free",ncol = 5) + 
+  scale_color_lancet(name = NULL) +
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = 'bottom',
+        strip.text = element_text(size = 9),
+        legend.margin = unit(0,"cm"),
+        legend.key.height = unit(0,"cm")) +
+  scale_y_continuous(limits = c(0, NA)) + 
+  xlab("Age") + 
+  ylab("VAF") +
+  scale_alpha(guide = F,range = c(0.4,1.0)) +
+  ggsave("Figure4_smaller_F2.pdf",width = 8,height = 3) + 
+  ggsave("Figure4_smaller_F2.svg",width = 8,height = 3)
+```
+
+```{r model_f2_gene_coefficients, fig.width=14, fig.height=10}
+values_b_gene <- values_model_f2$b_gene_values[[3]]
+values_b_gene$site_name <- rep(val_subset$unique_gene,
+                               each = length(unique(values_model_f2$b_values[[1]]$labels)))
+values_b_gene %>% spread(key = labels,value = values) %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",site_name),
+         site_name = str_match(site_name,"[A-Z0-9]+")) %>%
+  ggplot(aes(y = `0.50`,x = site_name,color = site_name,shape = Truncating)) +
+  geom_point(size = 2,
+             position = position_dodge(width = 1.0)) +
+  geom_linerange(aes(ymin = HDPI_low,ymax = HDPI_high),
+                 position = position_dodge(width = 1.0)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal(base_size = 15) +
+  rotate_x_text() + 
+  xlab("Gene") + 
+  ylab("Effect size") + 
+  facet_grid(~ site_name,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 10),
+        axis.title = element_text(size = 15),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        #axis.text.x = element_blank(),
+        strip.text = element_blank(),
+        legend.key.height = unit(0,"cm"),
+        legend.margin = unit(0,"cm")
+        #strip.text = element_text(size = 10,angle = 90,face = "bold")
+        ) + 
+  scale_shape_discrete(breaks = c(TRUE,FALSE),
+                       labels = c("Truncating","Non-truncating"),
+                       name = NULL) +
+  ggsave("FigureGene_F2.pdf",height = 3.5,width = 8)
+```
+
+```{r model_f2_domain_coefficients, fig.width=14, fig.height=10}
+values_b_domain <- values_model_f2$b_domain_values[[3]]
+values_b_domain$site_name <- rep(val_subset$unique_domain,
+                                 each = length(unique(values_model_f2$b_values[[1]]$labels)))
+values_b_domain$gene <-  sapply(values_b_domain$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+values_b_domain %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = `0.05`,ymax = `0.95`)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r model_f2_site_coefficients, fig.width=14, fig.height=10}
+values_b_site <- values_model_f2$b_site_values[[1]]
+values_b_site$site_name <- rep(val_subset$unique_site_multiple,
+                               each = length(unique(values_model_f2$b_values[[1]]$labels)))
+values_b_site$gene <-  sapply(values_b_site$site_name,function(x) (strsplit(x,'-') %>% unlist)[1])
+
+values_b_site %>% spread(key = labels,value = values) %>%
+  ggplot(aes(y = `0.50`,x = substr(site_name,1,30),color = gene)) +
+  geom_point() +
+  geom_linerange(aes(ymin = HDPI_low,ymax = HDPI_high)) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal() +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("Effect size") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+    theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 5.7,face = "bold"))
+```
+
+```{r model_f2_full_effects, fig.width=14, fig.height=9,warning=F}
+values_b <- values_model_f2$b_values[[3]]
+values_b$site_name <- rep(val_subset$unique_site[values_model_f2$gene_idxs],
+                          each = length(unique(values_model_f2$b_values[[1]]$labels)))
+values_b$gene <- values_b$site_name %>% 
+  sapply(function(x) unlist(str_split(x,pattern = '-'))[1])
+
+gene_order <- values_b %>%
+  mutate(gene = str_match(gene,"[A-Z0-9]+")) %>%
+  subset(labels == "0.50") %>% 
+  subset(site_name %in% val_subset$unique_site_multiple) %>%
+  group_by(gene) %>%
+  summarise(average = mean(values)) %>%
+  arrange(average) %>%
+  select(gene) %>%
+  unlist
+
+Number_Of_Mutations <- r_values %>%
+  select(individual,site) %>%
+  distinct() %>%
+  group_by(site) %>%
+  summarise(n = length(site)) %>%
+  ungroup() %>%
+  mutate(site_name = site) %>%
+  select(-site)
+
+values_b %>% 
+  merge(Number_Of_Mutations,by = 'site_name') %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",gene),
+         gene = str_match(gene,"[A-Z0-9]+")) %>%
+  spread(key = labels,value = values) %>%
+  subset(site_name %in% val_subset$unique_site_multiple) %>%
+  group_by(gene) %>%
+  mutate(gene_average = mean(`0.50`)) %>%
+  mutate(gene_average =  ifelse(`0.50` == max(`0.50`),gene_average,NA)) %>% # avoid having more than one geom_hline per gene
+  ungroup() %>%
+  mutate(site_name = sapply(site_name,function(x) unlist(strsplit(x,'-'))[2])) %>%
+  mutate(site_name = sapply(site_name,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(site_name = sapply(site_name,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>%
+  mutate(gene = factor(as.character(gene),levels = gene_order,
+                       ordered = TRUE)) %>%
+  ggplot(aes(y = exp(`0.50`),
+             x = reorder(substr(site_name,1,30),`0.50` + Truncating),
+             color = gene)) +
+  geom_hline(aes(colour = gene,yintercept = exp(gene_average)),
+             size = 2,alpha = 0.5) +
+  geom_point(aes(shape = Truncating,
+                 size = n)) +
+  geom_linerange(aes(ymin = exp(HDPI_low),ymax = exp(HDPI_high))) + 
+  geom_hline(yintercept = 0,alpha = 0.2) +
+  theme_minimal(base_size = 15) +
+  rotate_x_text() + 
+  xlab("Site") + 
+  ylab("Growth per year") + 
+  facet_grid(~ gene,scales = "free_x",space = "free_x") +
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+  theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text = element_text(size = 10,face = "bold",angle = 90),
+        legend.margin = unit(0,"cm"),
+        legend.key.height = unit(0,"cm")) +
+  coord_cartesian(ylim = c(exp(min(values_b$values)) * 0.99,exp(max(values_b$values)) * 1.01)) + 
+  scale_shape_discrete(breaks = c(TRUE,FALSE),
+                       labels = c("Truncating","Non-truncating"),
+                       name = NULL) +
+  scale_size(range = c(2,6),
+             breaks = c(2,5,10,25,50)) +
+  ggsave("Figure5_F2.pdf",width = 14,height = 6.5) + 
+  ggsave("Figure5_F2.svg",width = 14,height = 6.5)
+```
+
+```{r model_f2_age_at_clone_growth, fig.width=20,fig.height=10}
+clone_ages <- r_values %>%
+  mutate(CloneAgeHenryLower = t0(u_values,coefficient,50000),
+         CloneAgeHenryUpper = t0(u_values,coefficient,200000),
+         CloneAgeJamieLower = t0(u_values,coefficient,30000),
+         CloneAgeJamieUpper = t0(u_values,coefficient,600000),
+         CloneAgeHenryLower_adj = t0_adjusted(u_values,coefficient + b_clone,6,50000) + values_model_f2$min_age,
+         CloneAgeHenryUpper_adj = t0_adjusted(u_values,coefficient + b_clone,6,200000) + values_model_f2$min_age,
+         CloneAgeJamieLower_adj = t0_adjusted(u_values,coefficient + b_clone,6,30000) + values_model_f2$min_age,
+         CloneAgeJamieUpper_adj = t0_adjusted(u_values,coefficient + b_clone,6,600000) + values_model_f2$min_age
+         )
+  
+gene_order <- clone_ages %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",genes),
+         Gene = str_match(genes,"[A-Z0-9]+")) %>%
+
+  subset(abs(CloneAgeHenryUpper_adj) < 200 & CloneAgeHenryUpper_adj > -10) %>%
+  group_by(Gene) %>%
+  summarise(average = mean(CloneAgeHenryUpper_adj)) %>%
+  arrange(average) %>%
+  select(Gene) %>%
+  unlist() 
+
+data_plot_clone_ages <- clone_ages %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",genes),
+         Gene = str_match(genes,"[A-Z0-9]+"),
+         amino_acid_change = as.character(site)) %>%
+  subset(abs(CloneAgeHenryUpper_adj) < 150 & CloneAgeHenryUpper_adj > -10) %>%
+  subset(amino_acid_change %in% values_model_f2$training_subset$unique_site_multiple) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) unlist(strsplit(x,'-'))[2])) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>%  mutate(Gene = factor(as.character(Gene),levels = gene_order)) %>%
+  mutate(Truncating_numeric = as.numeric(Truncating)) %>% 
+  select(individual,CloneAgeHenryLower_adj,CloneAgeHenryUpper_adj,Gene,amino_acid_change,Truncating,Truncating_numeric) %>%
+  distinct() %>%
+  mutate(dummy_individual = reorder(1:length(individual), CloneAgeHenryLower_adj)) 
+
+data_plot_clone_ages_summary <- data_plot_clone_ages %>%
+  group_by(amino_acid_change,Gene) %>%
+  summarise(max_age = max(CloneAgeHenryLower_adj),
+            min_age = min(CloneAgeHenryUpper_adj),
+            n = length(CloneAgeHenryUpper_adj)) %>%
+  ungroup() %>%
+  mutate(width = n / max(n) * 1)
+
+data_plot_clone_ages %>%
+  ggplot(aes(group = dummy_individual)) +
+  geom_hline(yintercept = 0) +
+  geom_tile(
+    data = data_plot_clone_ages_summary,
+    inherit.aes = F,
+    alpha = 0.2,
+    aes(
+      height = max_age - min_age,
+      y = (max_age + min_age)/2,
+      x = amino_acid_change,
+      width = 0.85,
+      fill = Gene
+    )
+  ) + 
+  geom_linerange(
+    size = 0.3,
+    alpha = 0.8,
+    aes(x = reorder(amino_acid_change,
+                    (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2 + Truncating_numeric * 1000),
+        ymax = CloneAgeHenryLower_adj,
+        ymin = CloneAgeHenryUpper_adj,
+        color = Gene),
+    position = position_dodge(width=1.0)) +
+  geom_point(
+    size = 1.2,
+    alpha = 0.9,
+    position = position_dodge(width=1.0),
+    aes(x = reorder(amino_acid_change,
+                    (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2 + Truncating_numeric * 1000),
+        shape = Truncating,
+        y = (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj) / 2,
+        color = Gene)) +
+  facet_grid(~ Gene,scales = "free",space = "free") + 
+  theme_minimal(base_size = 15) + 
+  theme(strip.text = element_text(size = 10,face = 'bold',angle = 90),
+        legend.position = 'bottom',
+        legend.margin = unit(0,"cm"),
+        legend.key.height = unit(0,"cm")) + 
+  ylab("Age at beginning of clone growth") +
+  xlab("Site") +
+  rotate_x_text() + 
+  scale_color_manual(values = gene_colours,
+                     guide = F) +
+  scale_fill_manual(values = gene_colours,
+                    guide = F) +
+  scale_y_continuous(
+    expand = c(0,0),
+    limits = c(-10,100),
+    oob = scales::squish,
+    breaks = c(-500,-400,-300,-200,-100,0,10,20,30,40,50,60,70,80,90,100,1000,2000,3000,5000)
+    ) + 
+  scale_shape_discrete(breaks = c(TRUE,FALSE),
+                       labels = c("Truncating","Non-truncating"),
+                       name = NULL) +
+  ggsave("Figure6_F2.pdf",width = 14,height = 5.5) + 
+  ggsave("Figure6_F2.svg",width = 14,height = 5.5)
+```
+
+```{r ages density,fig.height=5,fig.width=14}
+data_plot_clone_ages %>%
+  mutate(AgeMidPoint = CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj/2) %>%
+  subset(AgeMidPoint < 100) %>% 
+  group_by(Gene) %>%
+  mutate(MoreThanOne = length(Gene) > 2) %>%
+  ungroup() %>%
+  subset(MoreThanOne) %>%
+  ggplot(aes(y = AgeMidPoint,fill = Gene,x = Gene, color = Truncating)) +
+  geom_violin(alpha = 0.5,color = NA) +
+  theme_minimal(base_size = 15) + 
+  theme(strip.text = element_text(size = 8,face = 'bold'),
+        legend.position = 'bottom',
+        legend.margin = unit(0,"cm"),
+        legend.key.height = unit(0,"cm")) + 
+  rotate_x_text() + 
+  scale_fill_manual(values = gene_colours,
+                    guide = F) +
+  scale_shape_discrete(breaks = c(TRUE,FALSE),
+                       labels = c("Truncating","Non-truncating"),
+                       name = NULL) +
+  ggsave("Figure6_F2_Density.pdf",width = 6,height = 15)
+```
+
+```{r time_until_mutation}
+clone_ages %>%
+  ungroup() %>%
+  mutate(Truncating = grepl("[A-Z0-9]+t",genes),
+         Gene = str_match(genes,"[A-Z0-9]+"),
+         amino_acid_change = as.character(site)) %>%
+  subset(abs(CloneAgeHenryUpper_adj) < 150 & CloneAgeHenryUpper_adj > -10) %>%
+  subset(amino_acid_change %in% values_model_f2$training_subset$unique_site_multiple) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) unlist(strsplit(x,'-'))[2])) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(amino_acid_change = sapply(amino_acid_change,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>%  mutate(Gene = factor(as.character(Gene),levels = gene_order)) %>%
+  mutate(MiddleAge = (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj)/2) %>%
+  mutate(min_age = 0,max_age = (max(age))) %>% 
+  subset(MiddleAge <= max_age) %>%
+  select(individual,site,genes,coefficient,MiddleAge,max_age) %>%
+  distinct() %>%
+  group_by(genes) %>%
+  summarise(p.value = ks.test(MiddleAge,function(x) punif(x,0,max_age))$p.value) %>%
+  mutate(p.value.adjusted = p.adjust(p.value,method = "BH")) %>%
+  mutate(significant = p.value.adjusted < 0.05)
+```
+
+### Comparative assessment 
+
+```{r comparing_statistics,fig.height=5,fig.width=18}
+statistics_data <- rbind(
+  statistics_lists$model_a$site %>% select(site,sum_stat,gene,individual) %>% mutate(model = "A - Binomial with gene effects"),
+  statistics_lists$model_c$site %>% select(site,sum_stat,gene,individual) %>% mutate(model = "B - Binomial with hierarchical effects"),
+  statistics_lists$model_e$individual_site %>% select(site,sum_stat,gene,individual) %>% mutate(model = "C - Beta binomial with hierarchical effects"),
+  statistics_lists$model_f1$individual_site %>% select(site,sum_stat,gene,individual) %>% mutate(model = "D1 - C + individual growth effects"),
+  statistics_lists$model_f2$individual_site %>% select(site,sum_stat,gene,individual) %>% mutate(model = "D2 - C + clone growth effects")
+) %>% 
+  mutate(recurrent = ifelse(site %in% recurrent_sites,TRUE,FALSE)) %>%
+  group_by(model) %>%
+  mutate(gene = str_match(gene,"[A-Z0-9]+"),
+         truncating = str_match(gene,"[nt]+")) %>%
+  mutate(model_label = sprintf("%s\np(s-value < 0.7) = %s",model,round(sum(sum_stat < 0.7)/length(sum_stat),3))) %>%
+  mutate(gene_numeric = as.numeric(factor(gene,levels = rev(unique(gene)))))
+
+gene_numeric_correspondence <- statistics_data %>%
+  ungroup() %>%
+  select(gene,gene_numeric) %>%
+  distinct()
+
+individuals_with_no_interactions <- interference_idxs %>% 
+  select(ind,inter_site) %>%
+  distinct() %>%
+  transmute(individual = val_subset$unique_individual_true[ind],
+            has_interaction = !is.na(inter_site))
+
+statistics_data %>%
+  subset(model == "D2 - C + clone growth effects") %>%
+  merge(individuals_with_no_interactions,by = "individual",
+        all.x = T) %>%
+  group_by(has_interaction) %>% 
+  summarise(significant = sum(sum_stat < 0.7),
+            total = length(sum_stat)) %>%
+  mutate(proportion = significant / total)
+
+statistics_data %>%
+  ungroup() %>%
+  ggplot(aes(x = gene_numeric,y = sum_stat,colour = recurrent)) + 
+  geom_hline(yintercept = 0.7,alpha = 0.5) + 
+  geom_density2d(size = 0.5,
+                 alpha = 0.2) +
+  geom_point(position = position_jitter(width = 0.3),
+             size = 1,
+             alpha = 0.4) + 
+  theme_minimal(base_size = 11) +
+  facet_grid(~ model_label) + 
+  rotate_x_text() + 
+  stat_summary(
+    aes(x = gene_numeric),
+    geom = 'label',
+    color = 'black',
+    label.r = unit(0, "lines"),
+    label.size = 0,
+    size = 4,
+    alpha = 0.85,
+    label.padding = unit(0.05,'cm'),
+    hjust = 1,
+    fun.data = function(x) {
+      return(data.frame(y = 0.699,label = sprintf("%s",round(sum(x < 0.7)/length(x),2))))
+    }) +
+  scale_x_continuous(
+    breaks = gene_numeric_correspondence$gene_numeric,
+    labels = gene_numeric_correspondence$gene,
+    sec.axis = dup_axis(name = NULL),
+    expand = c(0.02,0.02)) +
+  scale_y_continuous(
+    breaks = c(0.00,0.25,0.5,0.7,0.75,1.00),
+    expand = c(0.01,0.01)
+  ) +
+  scale_color_lancet(name = "Present in more\nthan 1 individiual") +
+  theme(legend.position = "bottom",
+        panel.background = element_rect(fill = NULL,colour = 'black'),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_line(colour = 'grey',size = 0.2)) + 
+  coord_flip() + 
+  xlab("Gene") + 
+  ylab("s-value")
+```
+
+```{r statistics_model_d,fig.height=7,fig.width=7}
+statistics_data %>%
+  ungroup() %>%
+  subset(model == "D2 - C + clone growth effects") %>% 
+  ggplot(aes(x = gene_numeric,y = sum_stat,colour = recurrent)) + 
+  geom_hline(yintercept = 0.7,alpha = 0.5) + 
+  geom_density2d(size = 0.5,
+                 alpha = 0.2) +
+  geom_point(position = position_jitter(width = 0.3),
+             size = 1,
+             alpha = 0.4) + 
+  theme_minimal(base_size = 15) +
+  facet_grid(~ model_label) + 
+  rotate_x_text() + 
+  stat_summary(
+    aes(x = gene_numeric),
+    geom = 'label',
+    color = 'black',
+    label.r = unit(0, "lines"),
+    label.size = 0,
+    size = 4,
+    alpha = 0.85,
+    label.padding = unit(0.05,'cm'),
+    hjust = 1,
+    fun.data = function(x) {
+      return(data.frame(y = 0.699,label = sprintf("%s",round(sum(x < 0.7)/length(x),2))))
+    }) +
+  scale_x_continuous(
+    breaks = gene_numeric_correspondence$gene_numeric,
+    labels = gene_numeric_correspondence$gene,
+    sec.axis = dup_axis(name = NULL),
+    expand = c(0.02,0.02)) +
+  scale_y_continuous(
+    breaks = c(0.00,0.25,0.5,0.7,0.75,1.00),
+    expand = c(0.01,0.01)
+  ) +
+  scale_color_lancet(name = "Present in more\nthan 1 individiual") +
+  theme(legend.position = "bottom",
+        panel.background = element_rect(fill = NULL,colour = 'black'),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_line(colour = 'grey',size = 0.2)) + 
+  coord_flip() + 
+  xlab("Gene") + 
+  ylab("s-value") + 
+  ggsave("StatisticD2.pdf",height = 6.5,width = 6)
+
+statistics_data %>%
+  ungroup() %>%
+  subset(model == "D2 - C + clone growth effects") %>% 
+  mutate(model_label = paste("Proportion of explained trajectories =",round(sum(sum_stat < 0.7)/length(sum_stat),3))) %>% 
+  mutate(good = sum_stat < 0.7) %>% 
+  mutate(recurrent = as.factor(ifelse(recurrent,"Yes","No"))) %>%
+  ggplot(aes(x = gene_numeric,
+             y = sum_stat)) + 
+  geom_boxplot(aes(color = recurrent,group = paste(gene,recurrent)),
+               position = position_dodge(0.8),
+               alpha=0.8) +
+  geom_hline(yintercept = 0.7,alpha = 0.5,linetype=2) + 
+  theme_minimal(base_size = 15) +
+  facet_grid(~ model_label) + 
+  rotate_x_text() + 
+  stat_summary(
+    aes(x = gene_numeric),
+    geom = 'label',
+    color = 'black',
+    label.r = unit(0, "lines"),
+    label.size = 0,
+    size = 4,
+    alpha = 0.85,
+    label.padding = unit(0.05,'cm'),
+    hjust = 1,
+    fun.data = function(x) {
+      return(data.frame(y = 0.699,label = sprintf("%s",round(sum(x < 0.7)/length(x),2))))
+    }) +
+  scale_x_continuous(
+    breaks = gene_numeric_correspondence$gene_numeric,
+    labels = gene_numeric_correspondence$gene,
+    sec.axis = dup_axis(name = NULL),
+    expand = c(0.02,0.02)) +
+  scale_y_continuous(
+    breaks = c(0.00,0.25,0.5,0.7,0.75,1.00),
+    expand = c(0.01,0.01)
+  ) +
+  scale_color_manual(
+    values = c("#00468BFF","#ED0000FF"),
+    label = c("Yes","No"),
+    name = "Present in more\nthan 1 individiual") +
+  theme(legend.position = "bottom",
+        panel.background = element_rect(fill = NULL,colour = 'black'),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_line(colour = 'grey',size = 0.2)) + 
+  coord_flip() + 
+  xlab("Gene") + 
+  ylab("Residual effect") + 
+  ggsave("StatisticD2Boxplot.svg",height = 6.5,width = 6) +
+  ggsave("StatisticD2Boxplot.pdf",height = 6.5,width = 6) 
+```
+
+### Testing
+
+Open questions:
+
+* Does clonal growth explain the recurrence/prevalence in age
+* See how blood counts can affect VAF (incorporate in the model)
+
+### What if - recreating mutation prevalence
+
+An interesting scenario is to use our growth coefficients and defined dynamics to see how this would affect mutation prevalence through different age brackets. First, it would be interesting to look at a few patterns that appear to be present in our data that corroborate a few of our findings so far - U2AF1 and PPM1D mutations appear late in life, and most mutations show a fairly constant rate of growth. 
+
+```{r observing incidence, fig.width=4,fig.height=7}
+INTERVAL <- 5
+incidence <- r_values_list$model_f2 %>%
+  subset(coverage > 0) %>%
+  mutate(AgeGroup = floor(age/INTERVAL) * INTERVAL) %>%
+  mutate(AgeGroupLabel = paste(AgeGroup,AgeGroup+INTERVAL,sep = '-')) %>%
+  #mutate(AgeGroup = ifelse(AgeGroup == '100-110','100+',AgeGroup)) %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  group_by(AgeGroup,AgeGroupLabel) %>%
+  mutate(TotalIndividuals = length(unique(individual))) %>%
+  ungroup() %>%
+  group_by(AgeGroup,AgeGroupLabel,genes,individual) %>%
+  summarise(MutPresence = any(true / coverage > 0.005),
+            TotalIndividuals = TotalIndividuals[1]) %>%
+  group_by(AgeGroup,AgeGroupLabel,genes) %>%
+  summarise(MutCount = sum(MutPresence),
+            TotalIndividuals = TotalIndividuals[1]) %>%
+  mutate(y = (MutCount) / (TotalIndividuals),
+         ymax = qbeta(0.99,MutCount,TotalIndividuals - MutCount + 1),
+         ymin = qbeta(0.01,MutCount,TotalIndividuals - MutCount + 1))
+
+incidence %>%
+    subset(AgeGroup <= 90 & AgeGroup > 50) %>% 
+    ggplot(aes(x = AgeGroupLabel,
+               fill = genes,label = genes,
+               y = y)) +
+  theme_minimal(base_size = 12) +
+  scale_fill_manual(values = gene_colours,
+                    name = NULL) + 
+  geom_bar(stat = "identity",color = 'black') +
+  scale_x_discrete() + 
+  rotate_x_text() +
+  xlab("Age ranges") + 
+  ylab("Cummulative frequency") + 
+  ggsave("Prevalence.pdf",height = 7,width = 4)
+```
+
+```{r modelling incidence,warning=F,fig.width=4,fig.height=7}
+n_points <- load_data() %>%
+  select(SardID,Phase) %>%
+  distinct() %>%
+  group_by(SardID) %>%
+  summarise(n = length(SardID)) %>% 
+  group_by(n) %>%
+  summarise(N = length(n)) %>%
+  mutate(N = N / sum(N))
+coverage <- r_values_list$model_f2$coverage
+coverage <- coverage[coverage != 0]
+coverage_distribution <- fitdistrplus::fitdist(coverage,"gamma",method = "mme")
+min_coverage <- min(coverage)
+age_distribution <- r_values_list$model_f2 %>%
+  select(individual,age) %>%
+  distinct() %>%
+  group_by(individual) %>%
+  summarise(age = min(age)) %>%
+  select(age) %>%
+  mutate(age = age - values_model_f2$min_age + 0.1) %>%
+  unlist() %>%
+  fitdistrplus::fitdist("gamma",method = "mle")
+BETA <- values_model_f2$beta_values[[3]][1,1]
+
+# sample from age distribution and not unfiorm 
+
+unique_combinations <- r_values_list$model_f2 %>%
+  group_by(individual) %>%
+  mutate(min_age = min(age),n_timepoints = length(unique(age)),
+         max_age = max(age)) %>%
+  ungroup() %>%
+  select(individual,site,coefficient,b_clone,u_values,genes,min_age,n_timepoints,max_age) %>% 
+  distinct
+
+unique_individuals <- r_values_list$model_f2 %>%
+  select(individual) %>%
+  unlist %>%
+  unique
+
+samples_through_time <- list()
+
+for (ind in unique_individuals) {
+  tmp <- unique_combinations %>%
+    subset(individual == ind)
+  #n_timepoints <- sample(c(2:5),size = 1,prob = n_points$N)
+  n_timepoints <- tmp$n_timepoints[1]
+  # ages <- rgamma(n = 1,
+  #                age_distribution$estimate[1],
+  #                age_distribution$estimate[2]) + runif(n_timepoints,0,n_timepoints * 3)
+  
+  ages <- tmp$min_age[1] + seq(0,(n_timepoints - 1) * 3.7926,by = 3.7926) - values_model_f2$min_age
+  inferred_counts <- ages %>%
+    sapply(
+      function(x) {
+        tmp %>%
+          mutate(p = inv.logit((coefficient + b_clone) * x + u_values),
+                 age = x,
+                 coverage = round(rgamma(length(coefficient),
+                                         shape = coverage_distribution$estimate[1],
+                                         rate = coverage_distribution$estimate[2]))) %>%
+          mutate(coverage = ifelse(coverage < min_coverage,
+                                   min_coverage,
+                                   coverage)) %>%
+          mutate(counts = rbbinom(1,coverage,(BETA * p)/(1 - p)),BETA)
+      },
+      simplify = F
+    ) %>%
+    do.call(what = rbind) %>%
+    mutate(sample = counts / coverage) %>%
+    select(individual,site,sample,age,genes)
+  samples_through_time[[as.character(ind)]] <- inferred_counts
+}
+
+incidence_interpolation <- samples_through_time %>%
+  do.call(what = rbind) %>%
+  mutate(age = age + values_model_f2$min_age) %>%
+  mutate(AgeGroup = floor(age/INTERVAL) * INTERVAL) %>%
+  mutate(AgeGroupTrue = AgeGroup) %>%
+  mutate(AgeGroup = factor(paste(AgeGroup,AgeGroup+INTERVAL,sep = '-'),
+                           levels = paste(sort(unique(AgeGroup)),sort(unique(AgeGroup)) + INTERVAL,sep = '-'))) %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  group_by(AgeGroup,AgeGroupTrue) %>%
+  mutate(TotalIndividuals = length(unique(individual))) %>%
+  group_by(AgeGroup,AgeGroupTrue,genes,individual) %>%
+  summarise(MutPresence = any(sample > 0.005),
+            TotalIndividuals = TotalIndividuals[1]) %>%
+  group_by(AgeGroup,AgeGroupTrue,genes) %>%
+  summarise(MutCount = sum(MutPresence),
+            TotalIndividuals = TotalIndividuals[1]) %>%  mutate(y = (MutCount) / (TotalIndividuals),
+         ymax = qbeta(0.99,MutCount,TotalIndividuals - MutCount + 1),
+         ymin = qbeta(0.01,MutCount,TotalIndividuals - MutCount + 1))
+
+incidence_interpolation %>%
+    subset(AgeGroupTrue <= 90 & AgeGroupTrue > 50) %>% 
+    ggplot(aes(x = AgeGroup,
+               fill = genes,label = genes,
+               y = y)) +
+  theme_minimal(base_size = 12) +
+  scale_fill_manual(values = gene_colours,
+                    name = NULL) + 
+  geom_bar(stat = "identity",color = 'black') +
+  scale_x_discrete() + 
+  rotate_x_text() + 
+  xlab("Age ranges") + 
+  ylab("Cummulative frequency") + 
+  ggsave("PrevalenceSimulated.pdf",height = 7,width = 4)
+```
+
+### dN/dS associations
+
+```{r dnds_comparison, fig.height=5,fig.width=10}
+dnds_data <- load_dnds()
+dnds_site <- dnds_data$site %>%
+  mutate(site_merge = paste(gene,aachange,sep = '-'))
+coefficients_dnds <- values_b %>%
+  spread(key = "labels",value = "values") %>%
+  mutate(genes_corrected = str_match(gene,"[A-Z0-9]+")) %>%
+  mutate(site_merge = paste(genes_corrected,str_match(site_name,'[a-zA-Z0-9:>;\\.\\+]+$'),sep = '-')) %>% 
+  merge(dnds_site,by = "site_merge") %>%
+  subset(sig == T) %>%
+  select(HDPI_low,`0.05`,`0.50`,`0.95`,HDPI_high,
+         "dnds","genes_corrected","site_merge","aachange") %>%
+  distinct()
+dnds_cor_test <- cor.test(coefficients_dnds$`0.50`,coefficients_dnds$dnds)
+coefficients_dnds %>%
+  ggplot(aes(x = dnds,y = `0.50`,ymax = HDPI_high,ymin = HDPI_low)) +
+  geom_smooth(method = 'lm',linetype = 2,color = 'black',
+              alpha = 0.05) + 
+  geom_point(aes(color = genes_corrected)) + 
+  geom_linerange(aes(color = genes_corrected)) + 
+  theme_minimal(base_size = 13) + 
+  annotate(geom = 'text',x = 6000,y = 0.4,
+           label = sprintf("Rsquared = %s\np-value = %s",
+                           round(dnds_cor_test$estimate^2,2),
+                           round(dnds_cor_test$p.value,2))) +
+  scale_color_manual(values = gene_colours,name = NULL) + 
+  theme(legend.position = "bottom") +
+  xlab('dN/dS') + 
+  ylab("Growth coefficients") + 
+  ggsave(filename = "dnds.pdf",height = 5,width = 10)
+```
+
+### Associations between VAF and blood counts and blood biochemistry
+
+Here we calculate if/how changes in VAF are affected by changes in blood count and blood chemistry data.
+
+```{r load data and merge}
+blood_count_data <- load_blood_count_data()
+fuller_data <- merge(full_data,blood_count_data,by = c("SardID","Phase")) %>%
+  subset(!(SardID %in% c(load_excluded_individuals(),load_excluded_individuals_lymph())))
+```
+
+```{r data preprocessing}
+complete_blood_counts <- fuller_data %>%
+  select(SardID,VAF,Age,amino_acid_change,relative_timepoint,single_occurring,RBC,HB,MCV,MCH,WBC,NEUT_PERC,LYMPH_PERC,MONO_PERC,EOS_PERC,BASO_PERC,PLT,Glucose,SerumInsulin,BLoodUreaNitrogen,Creatinine,ALT = ALT.y,AST,GGT,Fibrinogen,TotalCholesterol,HDLcholesterol,Triglycerides,Iron,Transferrin,UricAcid,ESR,Phase,Age) %>%
+  group_by(SardID) %>%
+  mutate(complete = sum(is.na(RBC)) == 0) %>%
+  ungroup() %>%
+  subset(complete == T) %>%
+  mutate(
+    NEUT = WBC * NEUT_PERC/100,
+    MONO = WBC * MONO_PERC/100,
+    LYMPH = WBC * LYMPH_PERC/100,
+    BASO = WBC * BASO_PERC/100,
+    EOS = WBC * EOS_PERC/100
+  )
+
+parameters <- c(
+  # blood counts
+  "RBC", "HB", "MCV", "MCH", "WBC", "PLT",
+  "NEUT","LYMPH","MONO", 
+  #"EOS_PERC", "BASO_PERC", 
+  # blood chemistry
+  "Glucose", 
+  "BLoodUreaNitrogen", 
+  "Creatinine", 
+  "ALT", 
+  "AST", 
+  "GGT",
+  "TotalCholesterol", 
+  "HDLcholesterol",
+  "Triglycerides", 
+  "Iron", 
+  "Transferrin", 
+  "UricAcid", 
+  "ESR"
+  )
+
+complete_blood_counts %>%
+  select(parameters) %>%
+  na.omit() %>%
+  cor %>% 
+  as.tibble %>%
+  mutate(key2 = c(parameters)) %>%
+  gather(key = "key",value = "value",-key2) %>%
+  mutate(value = value ^ 2) %>%
+  mutate(HighlyCorrelated = ifelse(abs(value) >= 0.6,"HC","")) %>%
+  ggplot(aes(x = key,y = key2,fill = value,label = HighlyCorrelated)) +
+  geom_tile() + 
+  geom_text() +
+  scale_fill_material(name = NULL) +
+  rotate_x_text() + 
+  xlab("") + 
+  ylab("") 
+```
+
+Inspecting the correlation heatmap above reveals quite a structured set of high correlations ($R^2 > 0.5$) - namely those between MHC and MCV (red blood cell parameters), between ALT and AST (both pertaining to liver function), and between WBC and NEUT (white blood cells and neutrophyls, the most abundant white blood cell). As such, we remove a few of these in a way that we believe keeps a good portion of clinical relevance and technical rigour - AST, MCV and WBC.
+
+```{r using linear mixed models}
+parameters <- parameters[!(parameters %in% c("AST","MCV","WBC"))]
+
+fold_change_df <- complete_blood_counts %>%
+  select(c(parameters,"Age","SardID","amino_acid_change")) %>%
+  gather(key = 'key',value = 'value',-SardID,-amino_acid_change,-Age) %>%
+  group_by(SardID,amino_acid_change,key) %>%
+  mutate(
+    value = log((value) / (value[which.min(Age)] + 1))
+  ) %>%
+  ungroup() %>%
+  mutate(key = paste(key,'FC',sep = '_')) %>%
+  na.omit() %>%
+  spread(key = key,value = value) %>%
+  select(-Age)
+
+absolute_change_df <- complete_blood_counts %>%
+  select(c(parameters)) %>% 
+  mutate_all(.funs = function(x) {(x - mean(x,na.rm=T))/(sd(x,na.rm=T))}) 
+
+relative_change_df <- complete_blood_counts %>%
+  select(VAF,SardID,amino_acid_change,Age) %>%
+  cbind(absolute_change_df) %>%
+  group_by(SardID, Age) %>% 
+  mutate(MaxVAF = VAF == max(VAF)) %>%
+  #subset(MaxVAF == T) %>% 
+  subset(VAF > 0) %>%
+  merge(fold_change_df,by = c("SardID","amino_acid_change"),all = F) %>% 
+  mutate(VAF = log((VAF) / (VAF[which.min(Age)]))) %>% 
+  na.omit() %>%
+  mutate(VAF = VAF - mean(VAF))
+
+formula_multivariate <- formula(
+  paste0(
+    'VAF ~ ',
+    paste(grep('VAF|SardID|amino_acid_change',colnames(relative_change_df),invert = T,value = T),collapse = ' + ') %>%
+      paste('(1 | amino_acid_change/SardID)',sep = '+')
+  )
+)
+univariate_linear_model <- lmer("VAF ~ Age + (1 | amino_acid_change/SardID)",
+                                data = relative_change_df,
+                                REML = F)
+multivariate_linear_model <- lmer(formula_multivariate,
+                                  data = relative_change_df,
+                                  REML = F)
+
+step_multivariate_linear_model <- get_model(step(multivariate_linear_model,reduce.fixed = F)) %>%
+  step(reduce.random = F,alpha.fixed = 0.05 / (nrow(summary(multivariate_linear_model)$coefficients) - 2)) %>%
+  get_model
+
+summary(step_multivariate_linear_model)
+
+coef_model <- summary(step_multivariate_linear_model)$coefficients %>%
+  as_tibble() %>%
+  mutate(signif = `Pr(>|t|)` < (0.05 / (nrow(step_multivariate_linear_model@vcov_beta) - 1))) %>%
+  mutate(var = rownames(step_multivariate_linear_model@vcov_beta))
+
+anova(univariate_linear_model,step_multivariate_linear_model)
+
+fixed_effect_variance <- as.data.frame(summary(step_multivariate_linear_model)$varcor)$vcov[3]/sum(as.data.frame(summary(step_multivariate_linear_model)$varcor)$vcov)
+
+qqplot(predict(step_multivariate_linear_model),step_multivariate_linear_model@resp$y)
+qqline(predict(step_multivariate_linear_model),step_multivariate_linear_model@resp$y)
+```
+
+Using linear mixed models is marginally useful - we are able to understand which aspects of blood counts correlate the best with VAF. However, it is quite evident that this correlation is not particularly strong. Additionally, the fit itself is not particularly good - analysing the quantile-quantile plot reveals some severe deviation from the ideal case scenario. This approach has the additional complication of involving the transformation of VAF values.
+
+We as such consider a different hypothesis - determining what level of association is present between the blood count fold changes and the coefficients determined previously. Particularly, we are interested not in the coefficients determined for each site, domain or gene, but in those determined for clone i in individual j - $b_{clone_{ji}}$ - and the offset per individual - $u_{ji}$ - since these are the coefficients determined specifically for each individual/clone.
+
+```{r , fig.width=14,fig.height=10,warning = F}
+growth_coefficients <- r_values_list$model_f2 %>%
+  transmute(
+    SardID = individual,
+    site = site,
+    b_value = coefficient,
+    b_clone = b_clone,
+    u_value = u_values
+  ) %>%
+  distinct
+
+fold_changes <- complete_blood_counts %>% 
+  select(-c(EOS_PERC,BASO_PERC,LYMPH_PERC,NEUT_PERC,MONO_PERC,amino_acid_change)) %>%
+  distinct() %>%
+  gather("key","value",-SardID,-VAF,-Age,-relative_timepoint,-single_occurring,-complete,-Phase) %>% 
+  group_by(SardID) %>% 
+  arrange(SardID,key,Age) %>% 
+  group_by(SardID,key) %>% 
+  subset(!is.na(value)) %>%
+  mutate(size_check = length(value) > 1) %>%
+  mutate(slope = (sum(value * Age) - sum(value) * sum(Age)) / (sum(Age ^ 2) - sum(Age) ^ 2)) %>%
+  mutate(intercept = (sum(value) - slope * sum(Age))/length(value)) %>%
+  mutate(fold_change = ifelse(size_check,
+                              (value + 1) / (c(NA,value[1:(length(value) - 1)]) + 1),
+                              rep(NA,length(value)))) %>% 
+  subset(!is.na(value)) %>% 
+  summarise(average_fold_change = mean(log(value)),
+            slope = slope[1],
+            intercept = intercept[1])
+
+filter_iqr <- function(x) {
+  qs <- quantile(x,c(0.25,0.75),na.rm = T)
+  iqr <- qs[2] - qs[1]
+  return((x > (qs[1] - iqr)) & (x < (qs[2] + iqr)))
+}
+
+fold_changes_effects <- fold_changes %>% 
+  merge(growth_coefficients,by = c("SardID")) %>%
+  group_by(SardID) %>%
+  mutate(VALUE = slope,
+         VALUE_CLONE = exp(b_clone)) %>%
+  filter(VALUE_CLONE == max(VALUE_CLONE)) %>%
+  subset(!is.na(VALUE)) %>%
+  subset(!is.na(VALUE_CLONE))
+
+fold_changes_effects_summary <- fold_changes_effects %>%
+  group_by(key) %>%
+  filter(filter_iqr(VALUE)) %>%
+  summarise(
+    cor.r = cor.test(VALUE,VALUE_CLONE,method = "kendall")$estimate,
+    cor.p.value = cor.test(VALUE,VALUE_CLONE,method = "kendall")$p.value,
+    VALUE = min(VALUE,na.rm=T),
+    VALUE_CLONE = max(VALUE_CLONE,na.rm=T)
+  )
+
+fold_changes_effects %>%
+  group_by(key) %>%
+  filter(filter_iqr(VALUE)) %>%
+  #subset(grepl('JAK2',site)) %>% 
+  ggplot(aes(x = VALUE,y = VALUE_CLONE)) + 
+  geom_point(size = 1,alpha = 0.5) + 
+  facet_wrap(~ key,scales = "free") + 
+  theme_minimal() + 
+  geom_label(data = fold_changes_effects_summary,
+             inherit.aes = F,
+             aes(
+               x = VALUE,
+               y = VALUE_CLONE,
+               label = sprintf("Kendall's tau = %s\np-value = %s",round(cor.r,4),round(cor.p.value,4))
+               ),
+             hjust = 0,
+             vjust = 1,
+             size = 3,
+             label.r = unit(0,"lines"),
+             label.size = unit(0,"lines"),
+             alpha = 0.8
+             ) +
+  theme() + 
+  ylab("Growth effect") + 
+  xlab("Parameter slope") + 
+  rotate_x_text()
+```
+
+This also does not work very well. While some blood count parameters are statistically significant, the interpretation of the correlation values is somewhat complicated and abstract - saying that there is a monotonic relationship betwen both dynamics is not particularly intuitive. This is the main reason why we turn to latent class mixture models. These models allow us to cluster these trajectories through time, providing a way of stratifying trajectories through time. This was inspired by [this work](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6819541/pdf/12889_2019_Article_7752.pdf).
+
+```{r prepare_lcmm}
+library(lcmm)
+complete_blood_counts_lcmm <- complete_blood_counts %>% 
+  subset(!(SardID %in% c(load_excluded_individuals(),load_excluded_individuals_lymph()))) %>%
+  merge(distinct(select(full_data,SardID,Gender)),by = "SardID",all = F) %>%
+  group_by(SardID) %>%
+  mutate(MinAge = min(Age),
+         Age = Age - min(Age),
+         subject = as.numeric(SardID),
+         Gender = as.numeric(Gender) - 1)
+
+LINK <- "linear"
+MIXTURE_FORMULA <- formula(" ~ Age +  Age * factor(Gender)")
+```
+
+```{r lcmm_esr, fig.height=10,fig.width=5}
+lcmm_fit <- lcmm(
+  fixed = ESR ~ Age +  Age * factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  mixture = MIXTURE_FORMULA,
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  ng = 2)
+
+tmp <- summary(lcmm_fit)[,1]
+tmp <- tmp[grepl("Age class",names(tmp))]
+tmp <- which.max(abs(tmp))
+
+lcmm_fit$pprob$class <- ifelse(
+  lcmm_fit$pprob$class == tmp,
+  '1',
+  '2'
+)
+
+A <- complete_blood_counts_lcmm %>%
+  merge(lcmm_fit$pprob,by = "subject") %>%
+  ggplot(aes(x = Age,y = ESR)) + 
+  geom_line(aes(group = SardID),alpha = 0.3) +
+  facet_wrap( ~ class) +
+  geom_smooth(method = 'loess',formula = y ~ x,
+              linetype = 4,
+              colour = 'red') + 
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = 'bottom') + 
+  xlab("Years since study entry")
+
+B <- r_values_list$model_f2 %>%
+  select(individual,coefficient,b_clone) %>%
+  group_by(individual) %>%
+  filter((b_clone) == max(b_clone)) %>%
+  distinct() %>%
+  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject") %>%
+  merge(distinct(select(full_data,SardID,Gender)),by.x = 'individual',by.y = "SardID") %>%
+  ggplot(aes(x = as.factor(class),y = b_clone)) + 
+  geom_boxplot(alpha = 0.8) + 
+  geom_signif(comparisons = list(c("1","2")),
+              map_signif_level = function(x) return(paste("p-value =",round(x,4))),
+              test = wilcox.test) + 
+  stat_summary(geom = 'text',
+               fontface = 'italic',
+               fun.data = function(x) return(list(y = 0.18,label = sprintf('n = %s',length(x))))) +
+  xlab("Trajectory type") + 
+  ylab("Growth effect") + 
+  theme_minimal(base_size = 15)
+```
+
+```{r lcmm_rbc, fig.height=10,fig.width=5}
+lcmm_fit <- lcmm(
+  fixed = RBC ~ Age +  Age * factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  mixture = MIXTURE_FORMULA,
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  ng = 2)
+
+tmp <- summary(lcmm_fit)[,1]
+tmp <- tmp[grepl("Age class",names(tmp))]
+tmp <- which.max(abs(tmp))
+
+lcmm_fit$pprob$class <- ifelse(
+  lcmm_fit$pprob$class == tmp,
+  '1',
+  '2'
+)
+
+C <- complete_blood_counts_lcmm %>%
+  merge(lcmm_fit$pprob,by = "subject") %>%
+  ggplot(aes(x = Age,y = RBC)) + 
+  geom_line(aes(group = SardID),alpha = 0.3) +
+  facet_wrap( ~ class) +
+  geom_smooth(method = 'loess',formula = y ~ x,
+              linetype = 4,
+              colour = 'red') + 
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = 'bottom') + 
+  xlab("Years since study entry") 
+
+D <- r_values_list$model_f2 %>%
+  select(individual,coefficient,b_clone) %>%
+  group_by(individual) %>%
+  filter((b_clone) == max(b_clone)) %>%
+  distinct() %>%
+  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject") %>%
+  merge(distinct(select(full_data,SardID,Gender)),by.x = 'individual',by.y = "SardID") %>%
+  ggplot(aes(x = as.factor(class),y = b_clone)) + 
+  geom_boxplot(alpha = 0.8) + 
+  geom_signif(comparisons = list(c("1","2")),
+              map_signif_level = function(x) return(paste("p-value =",round(x,4))),
+              test = wilcox.test) + 
+  stat_summary(geom = 'text',
+               fontface = 'italic',
+               fun.data = function(x) return(list(y = 0.18,label = sprintf('n = %s',length(x))))) +
+  xlab("Trajectory type") + 
+  ylab("Growth effect") + 
+  theme_minimal(base_size = 15)
+```
+
+```{r lcmm_wbc, fig.height=10,fig.width=5}
+lcmm_fit <- lcmm(
+  fixed = WBC ~ Age + Age * factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  mixture = MIXTURE_FORMULA,
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  ng = 2)
+
+tmp <- summary(lcmm_fit)[,1]
+tmp <- tmp[grepl("Age class",names(tmp))]
+tmp <- which.max(abs(tmp))
+
+lcmm_fit$pprob$class <- ifelse(
+  lcmm_fit$pprob$class == tmp,
+  '1',
+  '2'
+)
+
+E <- complete_blood_counts_lcmm %>%
+  merge(lcmm_fit$pprob,by = "subject") %>%
+  ggplot(aes(x = Age,y = WBC)) + 
+  geom_line(aes(group = SardID),alpha = 0.3) +
+  facet_wrap( ~ class) +
+  geom_smooth(method = 'loess',formula = y ~ x,
+              linetype = 4,
+              colour = 'red') + 
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = 'bottom') + 
+  xlab("Years since study entry") 
+
+FF <- r_values_list$model_f2 %>%
+  select(individual,coefficient,b_clone) %>%
+  group_by(individual) %>%
+  filter((b_clone) == max(b_clone)) %>%
+  distinct() %>%
+  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject") %>%
+  merge(distinct(select(full_data,SardID,Gender)),by.x = 'individual',by.y = "SardID") %>%
+  ggplot(aes(x = as.factor(class),y = b_clone)) + 
+  geom_boxplot(alpha = 0.8) + 
+  geom_signif(comparisons = list(c("1","2")),
+              map_signif_level = function(x) return(paste("p-value =",round(x,4))),
+              test = wilcox.test) + 
+  stat_summary(geom = 'text',
+               fontface = 'italic',
+               fun.data = function(x) return(list(y = 0.18,label = sprintf('n = %s',length(x))))) +
+  xlab("Trajectory type") + 
+  ylab("Growth effect") + 
+  theme_minimal(base_size = 15)
+```
+
+```{r lcmm_hb, fig.height=10,fig.width=5}
+lcmm_fit <- lcmm(
+  fixed = HB ~ Age +  Age * factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  mixture = MIXTURE_FORMULA,
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  ng = 2)
+
+tmp <- summary(lcmm_fit)[,1]
+tmp <- tmp[grepl("Age class",names(tmp))]
+tmp <- which.max(abs(tmp))
+
+lcmm_fit$pprob$class <- ifelse(
+  lcmm_fit$pprob$class == tmp,
+  '1',
+  '2'
+)
+
+G <- complete_blood_counts_lcmm %>%
+  merge(lcmm_fit$pprob,by = "subject") %>%
+  ggplot(aes(x = Age,y = HB)) + 
+  geom_line(aes(group = SardID),alpha = 0.3) +
+  facet_wrap( ~ class) +
+  geom_smooth(method = 'loess',formula = y ~ x,
+              linetype = 4,
+              colour = 'red') + 
+  theme_minimal(base_size = 15) +
+  theme(legend.position = 'bottom') + 
+  xlab("Years since study entry")
+
+H <- r_values_list$model_f2 %>%
+  select(individual,coefficient,b_clone) %>%
+  group_by(individual) %>%
+  filter((b_clone) == max(b_clone)) %>%
+  distinct() %>%
+  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject") %>%
+  merge(distinct(select(full_data,SardID,Gender)),by.x = 'individual',by.y = "SardID") %>%
+  ggplot(aes(x = as.factor(class),y = b_clone)) + 
+  geom_boxplot(alpha = 0.8) + 
+  geom_signif(comparisons = list(c("1","2")),
+              map_signif_level = function(x) return(paste("p-value =",round(x,4))),
+              test = wilcox.test) + 
+  stat_summary(geom = 'text',
+               fontface = 'italic',
+               fun.data = function(x) return(list(y = 0.18,label = sprintf('n = %s',length(x))))) +
+  xlab("Trajectory type") + 
+  ylab("Growth effect") + 
+  theme_minimal(base_size = 15)
+```
+
+```{r lcmm_hb, fig.height=10,fig.width=5}
+lcmm_fit <- lcmm(
+  fixed = PLT ~ Age +  Age * factor(Gender),
+  random = ~ 1,
+  subject = "subject",
+  mixture = MIXTURE_FORMULA,
+  data = as.data.frame(complete_blood_counts_lcmm),
+  link = LINK,
+  ng = 2)
+
+tmp <- summary(lcmm_fit)[,1]
+tmp <- tmp[grepl("Age class",names(tmp))]
+tmp <- which.max(abs(tmp))
+
+lcmm_fit$pprob$class <- ifelse(
+  lcmm_fit$pprob$class == tmp,
+  '1',
+  '2'
+)
+
+I <- complete_blood_counts_lcmm %>%
+  merge(lcmm_fit$pprob,by = "subject") %>%
+  ggplot(aes(x = Age,y = PLT)) + 
+  geom_line(aes(group = SardID),alpha = 0.3) +
+  facet_wrap( ~ class) +
+  geom_smooth(method = 'loess',formula = y ~ x,
+              linetype = 4,
+              colour = 'red')  + 
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = 'bottom') + 
+  xlab("Years since study entry")
+
+J <- r_values_list$model_f2 %>%
+  select(individual,coefficient,b_clone,genes) %>%
+  group_by(individual) %>%
+  filter((b_clone) == max(b_clone)) %>%
+  distinct() %>%
+  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject") %>%
+  merge(distinct(select(full_data,SardID,Gender)),by.x = 'individual',by.y = "SardID") %>%
+  ggplot(aes(x = as.factor(class),y = b_clone)) + 
+  geom_boxplot(alpha = 0.8) + 
+  geom_signif(comparisons = list(c("1","2")),
+              map_signif_level = function(x) return(paste("p-value =",round(x,4))),
+              test = wilcox.test) + 
+  stat_summary(geom = 'text',
+               fontface = 'italic',
+               fun.data = function(x) return(list(y = 0.18,label = sprintf('n = %s',length(x))))) +
+  xlab("Trajectory type") + 
+  ylab("Growth effect") + 
+  theme_minimal(base_size = 15)
+```
+
+```{r visualise_all_lcmm,fig.height = 8,fig.width = 16}
+plot_grid(
+  plot_grid(C + 
+              ggtitle("RBC count") + 
+              theme(plot.title = element_text(hjust = 0.5)) + 
+              xlab("") + 
+              ylab("Value"),
+            D + 
+              xlab("") + 
+              ylab("Clone growth effect") +
+              theme(panel.grid.major.x = element_blank()),
+            ncol = 1,
+            rel_heights = c(0.65,0.8)),
+  plot_grid(E + 
+              ggtitle("WBC count") + 
+              theme(plot.title = element_text(hjust = 0.5)) + 
+              xlab("") + 
+              ylab(""),
+            FF + 
+              xlab("") + 
+              ylab("") + 
+              theme(panel.grid.major.x = element_blank()),
+            ncol = 1,
+            rel_heights = c(0.65,0.8)),
+  plot_grid(G + 
+              ggtitle("Hb concentration") + 
+              theme(plot.title = element_text(hjust = 0.5)) + 
+              ylab(""),
+            H + 
+              ylab("") + 
+              theme(panel.grid.major.x = element_blank()),
+            ncol = 1,
+            rel_heights = c(0.65,0.8)),
+  plot_grid(I + ggtitle("Platelet count") + 
+              theme(plot.title = element_text(hjust = 0.5)) + 
+              xlab("") +
+              ylab(""),
+            J + 
+              xlab("") + 
+              ylab("") + 
+              theme(panel.grid.major.x = element_blank()),
+            ncol = 1,
+            rel_heights = c(0.65,0.8)),
+  plot_grid(A + ggtitle("ESR") + 
+              theme(plot.title = element_text(hjust = 0.5)) + 
+              xlab("") + 
+              ylab(""),
+            B + 
+              xlab("") + 
+              ylab("") + 
+              theme(panel.grid.major.x = element_blank()),
+            ncol = 1,
+            rel_heights = c(0.65,0.8)),
+  nrow = 1
+) + 
+  ggsave(filename = "FigureBloodCounts.pdf",height = 5.5,width = 16) +
+  ggsave(filename = "FigureBloodCounts.svg",height = 5.5,width = 14)
+```
+
+### Sex, smoking and other factors
+
+```{r differences_sex, fig.width=15,fig.height=5}
+effect_distribution_gender <- complete_blood_counts_lcmm %>%
+  select(individual = SardID,Gender) %>% 
+  distinct %>%
+  merge(r_values_list$model_f2 %>% select(individual,site,coefficient,b_clone,genes),by = c('individual')) %>%
+  group_by(individual) %>%
+  mutate(effect = coefficient) %>% 
+  distinct() %>% 
+  filter(effect == max(effect)) %>%
+  mutate(Gender = ifelse(Gender == 0,'Female','Male')) %>%
+  mutate(Truncating = !grepl("nt",genes)) %>%
+  mutate(Truncating = ifelse(is.na(Truncating),F,T)) %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  ggplot(aes(x = as.factor(Gender),y = effect)) + 
+  geom_boxplot() + 
+  theme_minimal(base_size = 15) + 
+  geom_signif(comparisons = list(c("Male","Female")),
+              map_signif_level = function(x) return(paste("p-value =",format(x,scientifier = T,digits = 4))),
+              test = wilcox.test) + 
+  ylab("Site growth effect") + 
+  xlab("Sex") 
+
+gene_mutation_distribution_gender <- complete_blood_counts_lcmm %>%
+  select(individual = SardID,Gender) %>% 
+  distinct %>%
+  merge(r_values_list$model_f2 %>% select(individual,site,coefficient,b_clone,genes),by = c('individual')) %>%
+  mutate(full_effect = coefficient + b_clone) %>% 
+  group_by(individual) %>%
+  filter(coefficient == max(coefficient)) %>%
+  mutate(Gender = ifelse(Gender == 0,'Female','Male')) %>%
+  mutate(Truncating = !grepl("nt",genes)) %>%
+  mutate(Truncating = ifelse(is.na(Truncating),F,T)) %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  ggplot(aes(x = genes,fill = Gender)) + 
+  geom_bar(stat = "count",position = 'dodge') + 
+  theme_minimal(base_size = 15) +
+  scale_fill_lancet(name = NULL) + 
+  rotate_x_text() + 
+  theme(legend.position = "bottom") + 
+  ylab("Count") + 
+  xlab("Gene")
+
+age_distribution_gender <- complete_blood_counts_lcmm %>%
+  select(individual = SardID,Gender) %>% 
+  distinct %>%
+  merge(r_values_list$model_f2 %>% select(age,individual,site,coefficient,b_clone,genes),by = c('individual')) %>%
+  mutate(full_effect = coefficient + b_clone) %>% 
+  group_by(individual) %>%
+  filter(coefficient == max(coefficient)) %>%
+  mutate(Gender = ifelse(Gender == 0,'Female','Male')) %>%
+  mutate(Truncating = !grepl("nt",genes)) %>%
+  mutate(Truncating = ifelse(is.na(Truncating),F,T)) %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  ggplot(aes(x = Gender,y = age,fill = Gender)) + 
+  geom_boxplot() + 
+  theme_minimal(base_size = 15) +
+  scale_fill_lancet(name = NULL) + 
+  rotate_x_text() + 
+  theme(legend.position = "bottom") + 
+  ylab("Count") + 
+  xlab("Gene")
+
+plot_grid(gene_mutation_distribution_gender,effect_distribution_gender,nrow = 1,rel_widths = c(1,0.3))
+```
+
+```{r gene_composition}
+load_smoking_data() %>% 
+  mutate(status = ifelse(QuitSmoking == 'N' & CurrentSmoker == 'N',"Never smoked",
+                         ifelse(QuitSmoking == 'N' & CurrentSmoker == 'Y',"Smoker",
+                                "Previous smoker"))) %>% 
+  subset(!is.na(CurrentSmoker)) %>% 
+  group_by(SardID) %>%
+  summarise(
+    status = ifelse(
+      sum(status == 'Smoker') > 0,'Smoked during study',
+      ifelse(sum(status == 'Previous smoker') > 0, 'Smoked before study',
+             'Never smoked')
+    )
+  ) %>% 
+  merge(clone_ages,by.x = "SardID",by.y = "individual") %>% 
+  select(genes,SardID,status) %>%
+  distinct() %>%
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  group_by(status) %>%
+  mutate(total = length(unique(SardID))) %>%
+  ungroup() %>% 
+  mutate(total_individuals = length(unique(SardID))) %>% 
+  group_by(status) %>%
+  mutate(smoker_proportion = total / total_individuals) %>%
+  group_by(genes,status) %>%
+  summarise(proportion = length(unique(SardID))/total[1],
+            total = total[1],
+            smoker_proportion = smoker_proportion[1]) %>%
+  ggplot(aes(x = genes,y = proportion,fill = status)) +
+  geom_bar(stat = 'identity',position = 'dodge') + 
+  #geom_text(aes(label = total)) +
+  theme_minimal() + 
+  theme(legend.position = 'bottom') + 
+  rotate_x_text() + 
+  xlab("Gene") + 
+  ylab("Enrichment") +
+  scale_fill_lancet(name = NULL)
+```
+
+```{r differences_smoking_coefficient, fig.height=7,fig.width=6}
+load_smoking_data() %>% 
+  mutate(status = ifelse(QuitSmoking == 'N' & CurrentSmoker == 'N',"Never smoked",
+                         ifelse(QuitSmoking == 'N' & CurrentSmoker == 'Y',"Smoker",
+                                "Previous smoker"))) %>% 
+  subset(!is.na(CurrentSmoker)) %>% 
+  group_by(SardID) %>%
+  summarise(
+    status = ifelse(
+      sum(status == 'Smoker') > 0,'Smoked during\nstudy',
+      ifelse(sum(status == 'Previous smoker') > 0, 'Smoked before\nstudy',
+             'Never smoked')
+    )
+  ) %>% 
+  merge(r_values_list$model_f2,by.x = "SardID",by.y = "individual") %>%
+  mutate(individual = SardID) %>%
+  merge(statistics_data,by = c("individual","site")) %>%
+  subset(model = 'D2 - C + clone growth effects') %>% 
+  subset(sum_stat < 0.7) %>% 
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  group_by(SardID) %>%
+  mutate(effect = coefficient) %>%
+  select(SardID,effect,status) %>%
+  ggplot(aes(x = status,y = effect)) + 
+  #geom_point(alpha = 0.8) +
+  geom_boxplot() +
+  theme_minimal(base_size = 15) +
+  geom_signif(comparisons = list(c("Never smoked","Smoked before\nstudy"),
+                                 c("Never smoked","Smoked during\nstudy"),
+                                 c("Smoked before\nstudy","Smoked during\nstudy")),
+              test = wilcox.test) + 
+  theme(legend.position = 'bottom') + 
+  scale_color_manual(values = gene_colours,name = NULL) + 
+  xlab("") + 
+  ylab("Genetic effect")
+```
+
+```{r smoking_clone_age, fig.width=8, fig.height=3}
+INTERVAL <- 5
+load_smoking_data() %>% 
+  mutate(status = ifelse(QuitSmoking == 'N' & CurrentSmoker == 'N',"Never smoked",
+                         ifelse(QuitSmoking == 'N' & CurrentSmoker == 'Y',"Smoker",
+                                "Previous smoker"))) %>% 
+  subset(!is.na(CurrentSmoker)) %>% 
+  group_by(SardID) %>%
+  filter(phase == max(phase)) %>%
+  ungroup() %>%
+  merge(clone_ages,by.x = "SardID",by.y = "individual") %>%
+  mutate(individual = SardID) %>%
+  merge(statistics_data,by = c("individual","site")) %>%
+  subset(model == 'D2 - C + clone growth effects') %>% 
+  subset(sum_stat < 0.7) %>% 
+  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  group_by(SardID) %>%
+  mutate(effect = (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj)/2) %>%
+  filter(age == max(age)) %>%
+  select(SardID,effect,site,CurrentSmoker, QuitYears,status,age) %>% 
+  subset(effect > 18 & effect < 100) %>% 
+  mutate(effect = age - effect) %>% 
+  mutate(QuitYears = ifelse(CurrentSmoker == 'Y',0,QuitYears)) %>% 
+  mutate(CurrentlySmoking = effect > QuitYears) %>%
+  mutate(CurrentlySmoking = ifelse(status == "Never smoked",FALSE,CurrentlySmoking)) %>%
+  mutate(AgeGroups = round((age - effect) / INTERVAL) * INTERVAL) %>%
+  mutate(AgeGroups = paste(AgeGroups,AgeGroups + INTERVAL,sep='-')) %>% 
+  mutate(AgeGroups = ifelse(AgeGroups == '10-20','18-20',AgeGroups)) %>%
+  group_by(SardID,AgeGroups) %>% 
+  summarise(NClones = length(site),
+            CurrentlySmoking = CurrentlySmoking[1]) %>%
+  ggplot(aes(x = AgeGroups,y = NClones,
+             fill = CurrentlySmoking,
+             colour = CurrentlySmoking,
+             group = paste(AgeGroups,CurrentlySmoking))) +
+  stat_summary(geom = 'line',
+               inherit.aes = F,
+               alpha = 0.4,
+               mapping = aes(x = AgeGroups,
+                             y = NClones,
+                             colour = CurrentlySmoking,
+                             group = CurrentlySmoking),
+               fun.y = mean,
+               size = 1,
+               position = position_dodge(0.8)) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.4,
+                                             dodge.width = 0.8,
+                                             jitter.height = 0.02),
+             alpha = 0.6) +
+  #geom_violin() +
+  theme_minimal(base_size = 15) +
+  theme(legend.position = 'bottom') +
+  scale_colour_lancet(labels = c("No","Yes"),
+                      name = "Smoking when the clone\nstarted growing") +
+  scale_fill_lancet(labels = c("No","Yes"),
+                    name = "Smoking when the clone\nstarted growing") + 
+  rotate_x_text() +
+  xlab("Age groups") + 
+  ylab("No. of clones\nappearing") + 
+  scale_y_continuous(trans = 'log10')
+```

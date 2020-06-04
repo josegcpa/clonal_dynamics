@@ -9,9 +9,6 @@ b_site_sd <- lognormal(meanlog = 0,sdlog = 1,
 b <- normal(mean = b_site_mean, 
             sd = b_site_sd,dim = c(1,length(site_list)))
 
-train_subset <- filter_individuals_sites(formatted_data_train_1,
-                                         site_list)
-
 n_individuals <- length(train_subset$unique_individual)
 n_individuals_true <- length(train_subset$unique_individual_true)
 n_sites <- length(train_subset$unique_site)

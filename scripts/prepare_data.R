@@ -3,6 +3,7 @@ domain_data <- load_domain_data()
 
 # Excluding individuals with a history of haematological malignancy
 full_data <- full_data[!(full_data$SardID %in% load_excluded_individuals()),]
+full_data <- full_data[!(full_data$SardID %in% load_excluded_individuals_lymph()),]
 
 # Merging the full data with the domain data 
 full_data <- merge(
@@ -13,6 +14,31 @@ full_data <- merge(
 
 # Excluding genes with non-significant dN/dS
 full_data <- full_data[full_data$Gene %in% load_included_genes(),] 
+
+# Defining truncating mutations
+full_data$truncating <- full_data$Type %in% c("frameshift_deletion","frameshift_insertion", "splice_site", "stopgain", "stoploss")
+
+# Excluding truncating mutations from analysis (except for ASXL1)
+full_data$Domain <- ifelse(
+  full_data$truncating & !(full_data$Gene %in% c('ASXL1','PPM1D')), # Include PPM1D (not in the model right now)
+  NA,
+  full_data$Domain
+)
+full_data$Domain <- paste(
+  full_data$Gene,
+  full_data$Domain,
+  sep = '-'
+)
+
+# This allows us to have a coefficient for truncating and non-truncating mutations
+# for both the genes which have very distinct T and NT distributions
+for (gene in c("ASXL1","BRCC3","CBL","DNMT3A","PPM1D","TET2","TP53")) {
+  full_data$Gene <- ifelse(
+    as.character(full_data$Gene) == gene,
+    ifelse(full_data$truncating == TRUE,paste0(gene,'t'),paste0(gene,'nt')),
+    as.character(full_data$Gene)
+  ) 
+}
 
 # Create unique identifiers for AA changes and use reference genome names when AA changes are unavailable
 amino_acid_change <- full_data$AAChange.refGene %>% 
@@ -44,27 +70,13 @@ full_data$amino_acid_change <- paste(
   sep = '-'
 )
 
-# Defining truncating mutations
-full_data$truncating <- full_data$Type %in% c("frameshift_deletion","frameshift_insertion", "splice_site", "stopgain", "stoploss")
-
-# Excluding truncating mutations from analysis (except for ASXL1)
-full_data$Domain <- ifelse(
-  full_data$truncating & !(full_data$Gene == 'ASXL1'),
-  NA,
-  full_data$Domain
-)
-full_data$Domain <- paste(
-  full_data$Gene,
-  full_data$Domain,
-  sep = '-'
-)
-
 # Creating relative timepoints (i.e. after the initial filtering steps we check
 # which phase for each individual has at least one mutation)
 full_data <- full_data %>%
   group_by(SardID) %>%
   mutate(relative_timepoint = Phase - min(Phase) + 1) %>%
-  ungroup
+  ungroup %>%
+  arrange(SardID,amino_acid_change,Phase)
 
 # Counting which mutations occur on more than one individual
 gene_count <- full_data %>% 
@@ -81,10 +93,7 @@ full_formatted_data <- format_data(full_data) # Returns a list with all the nece
 
 set.seed(round(runif(1,max=1000)))
 splits <- full_formatted_data %>% 
-  four_way_subsampling(size = round(length(unique(full_formatted_data$full_data$SardID))*0.98),
-                       timepoint = c(1,2,3,4))
+  subsample_formatted_data_timepoints(timepoint = c(1,2,3,4,5))
 
-formatted_data_train_1 <- splits$train_1
-formatted_data_train_2 <- splits$train_2
-formatted_data_validation_1 <- splits$validation_1
-formatted_data_validation_2 <- splits$validation_2
+formatted_data_train_1 <- splits$train
+formatted_data_validation_1 <- splits$validation

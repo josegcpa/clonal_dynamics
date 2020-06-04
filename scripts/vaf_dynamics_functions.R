@@ -3,9 +3,9 @@ library(reticulate)
 use_python('/homes/josegcpa/r-crap/bin/python3',required = T)
 Sys.setenv(LD_LIBRARY_PATH = paste(Sys.getenv('LD_LIBRARY_PATH'), "/homes/josegcpa/r-crap/lib", sep = ":"))
 Sys.setenv(PYTHONPATH="/homes/josegcpa/r-crap/lib/python3.6/site-packages")
+library(greta)
 library(ggplot2)
 library(ggpubr)
-library(greta)
 library(ggmap)
 library(magrittr)
 library(tidyverse)
@@ -13,7 +13,29 @@ library(bayesplot)
 library(openxlsx)
 library(gtools)
 library(cowplot)
+library(ggsci)
+library(ggrepel)
+library(extraDistr)
+library(lme4)
+library(lmerTest)
+library(lcmm)
+library(glmnet)
+library(fda.usc)
+select <- dplyr::select
 tf <- import("tensorflow")
+
+gene_colours <- as.character(pals::kelly(n = 20)[3:20])
+names(gene_colours) <- c(
+  "ASXL1","BRCC3","CBL","CTCF","DNMT3A","GNB1",
+  "IDH1","IDH2","JAK2","KRAS","MYD88","PPM1D",
+  "SF3B1","SRSF2","STAT3","TET2","TP53","U2AF1"
+)
+gene_colours[c("DNMT3Ant","DNMT3At")] <- gene_colours["DNMT3A"]
+gene_colours[c("CBLnt","CBLt")] <- gene_colours["CBL"]
+gene_colours[c("PPM1Dnt","PPM1Dt")] <- gene_colours["PPM1D"]
+gene_colours[c("TET2nt","TET2t")] <- gene_colours["TET2"]
+gene_colours[c("TP53nt","TP53t")] <- gene_colours["TP53"]
+gene_colours[c("ASXL1t","ASXL1nt")] <- gene_colours["ASXL1"]
 
 map_sardinia <- function() {
   coords <- c(40.1209,9.0129)
@@ -25,7 +47,6 @@ map_sardinia <- function() {
     ggmap() + theme_minimal() + ylab("") + xlab("") + 
     theme(axis.text = element_blank()) %>%
     return
-  
 }
 
 logit_transform <- function(x) {
@@ -193,7 +214,7 @@ load_domain_data <- function() {
   domain_data$Domain[domain_data$Gene == 'SF3B1'] <- NA
   
   # PPM1D - domains become irrelevant after removing truncating effects
-  domain_data$Domain[domain_data$Gene == 'PPM1D'] <- NA
+  #domain_data$Domain[domain_data$Gene == 'PPM1D'] <- NA
   
   # MYD88
   domain_data$Domain[domain_data$Gene == 'MYD88'] <- NA
@@ -224,6 +245,52 @@ load_included_genes <- function() {
 load_excluded_individuals <- function() {
   read.table("data/excluded_individuals")[,1] %>%
     return
+}
+load_excluded_individuals_lymph <- function() {
+  read.table("data/excluded_individuals_lymphocyte")[,1] %>%
+    return
+}
+
+load_dnds <- function() {
+  list(
+    genes = read.table("data/dnds_genes.txt",header = T) %>%
+      mutate(sig = qglobal_cv <= 0.01),
+    domains = read.table("data/dnds_domains.txt",header = T) %>%
+      mutate(sig = qglobal_cv <= 0.01),
+    site = read.table("data/dnds_site.txt",header = T) %>%
+      mutate(sig = qval <= 0.01)
+    # global = read.table("data/dnds_global.txt",header = T) %>%
+    #   mutate(sig = qglobal_cv >= 0.01)
+  ) %>%
+    return
+}
+
+load_blood_count_data <- function() {
+  read.table("data/FBC_biochem.txt",header = T,sep = '\t') %>%
+    mutate(Phase = phase) %>%
+    select(-phase) %>%
+    return
+}
+
+load_smoking_data <- function() {
+  read.table("data/smoke.txt",header = T,sep = '\t') 
+}
+
+load_survival_data <- function() {
+  read.xlsx("data/AliveDead_final_forJose.xlsx")
+}
+
+load_comorbidity_data <- function() {
+  tmp <- read_tsv("data/comorbidities.tsv")
+  tmp_cn <- colnames(tmp)
+  tmp[,2:ncol(tmp)] <- apply(tmp[,2:ncol(tmp)],2,function(x) x=='Y') %>% 
+    as.data.frame()
+  tmp <- as_tibble(tmp)
+  colnames(tmp) <- tmp_cn
+  tmp <- tmp[,-ncol(tmp)] %>% 
+    mutate(SardID=INDIVIDUAL) %>% 
+    select(-INDIVIDUAL)
+  return(tmp)
 }
 
 format_data <- function(full_data) {
@@ -548,13 +615,17 @@ variable_summaries <- function(df) {
   out <- df %>% 
     apply(2, function(x) {
       data.frame(
-        values = c(mean(x),var(x),quantile(x,c(0.025,0.05,0.5,0.95,0.975))),
-        labels = c("mean","var","0.025","0.05","0.50","0.95","0.975")
+        values = c(mean(x),var(x),
+                   quantile(x,c(0.025,0.05,0.5,0.95,0.975)),
+                   HPDI(x,prob=0.95)),
+        labels = c("mean","var",
+                   "0.025","0.05","0.50","0.95","0.975",
+                   "HDPI_low","HDPI_high")
       )
     }) %>%
     do.call(what = rbind)
   rownames(out) <- NULL
-  out$variable <- rep(c_names,each = 7)
+  out$variable <- rep(c_names,each = 9)
   return(out)
 }
 
@@ -622,4 +693,56 @@ submit_commands <- function(...,n_cores = 32,mem = 32000) {
   command <- sprintf(template,mem,n_cores,commands) 
   cat(paste(command,'\n'))
   system(command)
+}
+
+t0 <- function(alpha,beta,n) {
+  return((log(1/n) - alpha) / beta)
+}
+
+t0_adjusted <- function(alpha, beta, g, n) {
+  return(t0(alpha,beta,n) + log(g / beta)/beta - 1/beta)
+}
+
+rho <- function(x,N,s) {
+  # probability of population with N individuals reaching frequency x with selective advantage s
+  return((1-exp(-N*s*x))/(1-exp(-N*s)))
+}
+
+fetch_examples <- function(full_data,mutation) {
+  sard_ids <- full_data %>%
+    subset(amino_acid_change == mutation) %>%
+    select(SardID) %>%
+    unlist() %>%
+    unique
+  full_data %>%
+    subset(SardID %in% sard_ids) %>%
+    return
+}
+
+fold_change <- function(points,data) {
+  df <- cbind(
+    points = points,
+    data = data
+  ) %>%
+    as.data.frame()
+  df <- df[order(df$points),]
+  rates <- matrix(0,nrow = nrow(df),ncol = 2)
+  for (r in 2:nrow(df)) {
+    rates[r,] <- c(df$data[r]/df$data[r-1],
+                   (df$points[r-1] + df$points[r])/2)
+  }
+  return(rates)
+}
+
+HPDI <- function(samples,prob = 0.5) {
+  samples <- sort(samples)
+  n_samples <- length(samples)
+  n_samples_interval <- round(n_samples * prob)
+  max_idx <- n_samples - n_samples_interval
+  interval_edge <- which.max(
+    sapply(c(1:max_idx),
+           function(x) samples[x] - samples[(x+n_samples_interval)]))
+  output <- c(samples[interval_edge],samples[interval_edge + n_samples_interval])
+  
+  return(output)
 }

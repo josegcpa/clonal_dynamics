@@ -1,21 +1,4 @@
-# Here we model interactions terms as a term that will affect the \mu term in the binomial distribution.
-# More concretely, interactions are the normal gene/domain/site effects weighted by an individual-site-specific term.
-# \mu will be modelled as the linear combination of self and weighted interaction effects
-
 # Global parameters
-
-## Age-dependent effects
-# b_site_mean_sd <- cauchy(location = 0,scale = 0.1,
-#                          truncation = c(0,Inf),dim = 1)
-# b_site_mean <- normal(mean = 0,sd = b_site_mean_sd,dim = 1)
-# b_site_sd <- lognormal(meanlog = 0,sdlog = 1,
-#                        truncation = c(0,Inf),dim = 1)
-# 
-# b_domain_mean_sd <- cauchy(location = 0,scale = 0.1,
-#                            truncation = c(0,Inf),dim = 1)
-# b_domain_mean <- normal(mean = 0,sd = b_domain_mean_sd,dim = 1)
-# b_domain_sd <- lognormal(meanlog = 0,sdlog = 1,
-#                          truncation = c(0,Inf),dim = 1)
 
 b_site_mean <- 0
 b_site_sd <- 0.1
@@ -30,7 +13,7 @@ gene_idxs <- lapply(
   train_subset$unique_site,
   function(x) unlist(str_split(x,'-'))[[1]]
 ) %>% unlist %in% gene_list
-gene_idxs <- (gene_idxs * (train_subset$site_to_individual_indicator %>% rowSums() >= 2)) %>%
+gene_idxs <- (gene_idxs * (train_subset$site_to_individual_indicator %>% rowSums() > 2)) %>%
   as.logical()
 sub_gene_mask <- train_subset$unique_gene %in% gene_list
 sub_domain_mask <- train_subset$unique_domain %in% domain_list
@@ -49,6 +32,7 @@ gene_domain_count <- domain_list %>%
   table %>%
   as.matrix()
 domain_site_count <- full_data %>% 
+  subset(amino_acid_change %in% train_subset$unique_site[gene_idxs]) %>%
   group_by(Domain) %>%
   summarise(n = length(unique(amino_acid_change)))
 
@@ -77,6 +61,7 @@ n_sites_multiple <- length(site_list)
 min_age <- train_subset$ages %>% min
 age <- (train_subset$ages - min_age)
 
+### Coefficients for the three levels of genetic resolution
 b_site <- normal(mean = b_site_mean,
                  sd = b_site_sd,
                  dim = c(1,length(site_list)))
@@ -87,11 +72,13 @@ b_gene <- normal(mean = b_gene_mean,
                  sd = b_gene_sd,
                  dim = c(1,length(gene_list))) * gene_mask * gene_domain_mask
 
+### Calculating the age dependent effects
 age_effect_site <- train_subset$site_multiple_to_site_indicator[gene_idxs,sub_site_mask] %*% t(b_site)
 age_effect_domain <-  train_subset$domain_to_site_indicator[gene_idxs,sub_domain_mask] %*% t(b_domain)
 age_effect_gene <- train_subset$gene_to_site_indicator[gene_idxs,sub_gene_mask] %*% t(b_gene)
 full_effects <- age_effect_site + age_effect_domain + age_effect_gene
 
+### Generic code to indexes for sparsity + previous timepoint indexes 
 vaf_sums <- ((train_subset$counts/(train_subset$coverage + 1))[gene_idxs,]  %>% apply(2,na.replace,replace = 0)) %*% t(train_subset$individual_indicator)
 vaf_means <- vaf_sums/(train_subset$site_to_individual_indicator[gene_idxs,] %*% t(train_subset$individual_indicator))
 interference_list <- list() 
@@ -124,7 +111,13 @@ for (x in c(1:ncol(vaf_means))) {
 }
 interference_idxs <- interference_list %>% 
   do.call(what = rbind) %>%
-  as.data.frame
+  as.data.frame %>%
+  mutate(index = seq(1,length(site))) %>%
+  group_by(ind,site) %>%
+  mutate(relative_timepoint = ind_age - min(ind_age) + 1) %>%
+  mutate(previous_timepoint_index = ifelse(relative_timepoint != 1,index - 1,0),
+         first_timepoint = as.numeric(relative_timepoint == 1)) %>%
+  ungroup() 
 
 interference_idxs_true <- interference_idxs %>%
   subset(!is.na(inter_site)) %>%
@@ -134,53 +127,42 @@ interference_idxs_true <- interference_idxs %>%
 u_idx <- interference_idxs_true <- interference_idxs %>%
   select(site,inter_site,ind) %>%
   unique
-u <- variable(dim = c(1,nrow(u_idx)))
-
-# Interference
-interference <- laplace(mu = 0,sigma = 0.1,
-                        dim = c(1,nrow(interference_idxs_true))) 
-interference <- (exp(2 * interference) - 1) / (exp(2 * interference) + 1)
+u <- uniform(min = -50,max = 0,dim = c(1,nrow(u_idx)))
 
 ### Sparse model
 
 X_sparse <- t(train_subset$counts[gene_idxs,])[cbind(interference_idxs$ind_age,interference_idxs$site)] %>%
-  as.matrix(ncol = 1) %>%
-  as_data
+  as.matrix(ncol = 1) 
 coverage_sparse <- t(train_subset$coverage[gene_idxs,])[cbind(interference_idxs$ind_age,interference_idxs$site)] %>%
-  as.matrix(ncol = 1) %>%
-  as_data
-
-inter_o <- sapply(c(1:nrow(interference_idxs)),function(x) {
-    M <- interference_idxs_true$site == interference_idxs$site[x] & interference_idxs_true$ind == interference_idxs$ind[x]
-    M %>%
-      as.numeric %>%
-      return})
-site_o <- interference_idxs$inter_site %>%
-  sapply(function(x) {
-    n <- rep(0,sum(gene_idxs))
-    n[x] <- 1
-    return(n)
-  }) %>% t
+  as.matrix(ncol = 1) 
 ind_o <- sapply(c(1:nrow(interference_idxs)),function(x) {
   M <- (u_idx$site == interference_idxs$site[x]) & (u_idx$ind == interference_idxs$ind[x])
   M %>%
     as.numeric %>%
     return})
 
-interference_term <- t(interference %*% inter_o) * (site_o %*% full_effects)
-self_term <- full_effects[interference_idxs$site] 
-offset_per_individual <- t(u %*% ind_o)
-r <- (self_term + interference_term) * age[interference_idxs$ind_age] + offset_per_individual
-mu <- ilogit(r)
-distribution(X_sparse) <- binomial(size = coverage_sparse,prob = mu)
+beta_values <- readRDS("models/overdispersion.RDS")
+beta <- normal(mean = beta_values[1,1],
+               sd = sqrt(beta_values[2,1]),
+               truncation = c(0,Inf))
 
+self_term <- full_effects[interference_idxs$site]
+offset_per_individual <- t(ind_o) %*% t(u)
+r <- self_term * (age[interference_idxs$ind_age]) + offset_per_individual
+mu <- ilogit(r)
+
+alpha_full <- (mu * beta) / (1 - mu)
+
+distribution(X_sparse) <- beta_binomial(size = coverage_sparse,
+                                        alpha = alpha_full,
+                                        beta = beta)
 ### 
 
 m <- model(
-  b_site,
-  b_domain,
-  b_gene,
-  interference,
+  # b_site_mean,b_site_sd,
+  #b_domain_mean,b_domain_sd,
+  beta,
+  b_gene,b_domain,b_site,
   u)
 
 u_initial <- data.frame(
@@ -200,4 +182,5 @@ u_initial <- u_idx %>%
 u_initial <- (u_initial + 1e-8) %>%
   gtools::logit() %>%
   matrix(nrow = 1)
+u_initial <- matrix(-5,ncol = ncol(u_initial),nrow = nrow(u_initial))
 init <- initials(u = u_initial)
