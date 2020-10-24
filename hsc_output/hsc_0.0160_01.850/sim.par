@@ -1,1 +1,0 @@
-./clonex -n 200000 -N 200000 -g 1300 -f /hps/nobackup/research/gerstung/josegcpa/projects/05VAF_DYNAMICS/hsc_output/hsc_0.0160_01.850 -t 0 -p 200 -d 20 -u 01.850e-9 -v 2e-6 -G 20 -s 0.0160 -R 3 
