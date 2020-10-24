@@ -1,1 +1,0 @@
-print(commandArgs(trailingOnly=T))
