@@ -1,0 +1,192 @@
+---
+title: "The Natural History and Fitness Landscape of Clonal Haematopoiesis - bad examples"
+runtime: shiny
+output: 
+  html_document:
+    theme: lumen
+    highlight: tango
+    code_folding: hide
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r import_functions, include=FALSE}
+source("scripts/vaf_dynamics_functions.R")
+set.seed(42)
+```
+
+```{r bad_example_setup}
+library(shiny)
+
+fit_explanations <- read.xlsx("data/Poor fits, where to find them and possible explanations.xlsx") %>%
+  mutate(SardID = as.character(SardID),
+         N = as.integer(N))
+colnames(fit_explanations) <- c(
+  "SardID","Site","Explanation","Error topology","Possible cause","Same clone (possible)","N"
+)
+
+load("vaf_modelling_coefficients_model_F5.Rdata")
+data_bad_statistics <- r_values %>%
+  merge(statistics_data,by = c("site","individual")) %>% 
+  group_by(individual) %>%
+  filter(any(sum_stat >= 0.7)) %>% 
+  mutate(bad = sum_stat >= 0.7) %>%
+  mutate(site_ = site) %>% 
+  mutate(site = as.character(site)) %>% 
+  mutate(site = sapply(site,function(x){
+    tmp <- unlist(strsplit(x,'-'))
+    paste(tmp[2:length(tmp)],collapse = '-')
+  })) %>%
+  mutate(site = sapply(site,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(site = sapply(site,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>%
+  mutate(site = paste(gene,site,sep='-'))
+
+data_bad_statistics_display <- data_bad_statistics %>% 
+  ungroup() %>% 
+  transmute(
+    SardID = as.character(individual),
+    TrueVAF = true / coverage,
+    Prediction005 = pred_005/coverage,
+    Prediction = pred/coverage,
+    Prediction095 = pred_095/coverage,
+    Fit = ifelse(bad,"Poor fit","Good fit"),
+    Site = site_
+  )
+
+plot_data <- function(D) {
+  nmutations <- length(unique(D$site))
+  
+  D %>% 
+    ggplot(aes(x = age,
+               y = pred / coverage,
+               ymax = pred_095 / coverage,
+               ymin = pred_005 / coverage,
+               group = site,
+               color = site)) + 
+    geom_line(aes(linetype = bad),
+              position = position_dodge(width = 0.5)) + 
+    geom_line(aes(y = true/coverage),linetype = 3,
+              position = position_dodge(width = 0.5),
+              alpha = 0.8) + 
+    geom_point(aes(y = true/coverage),
+               position = position_dodge(width = 0.5),
+               alpha = 0.8,size=3) + 
+    geom_linerange(position = position_dodge(width = 0.5)) + 
+    theme_gerstung(base_size = 25) + 
+    scale_color_lancet(name=NULL) + 
+    theme(legend.position = "bottom") + 
+    scale_linetype_manual(values = c(5,1),
+                          name=NULL,
+                          breaks = c(T,F),
+                          drop=F,
+                          labels=c("Poor fit","Good fit")) + 
+    xlab("Age") +
+    ylab("VAF") + 
+    guides(linetype=guide_legend(nrow=2,byrow=T,order=1),
+           colour=guide_legend(nrow=nmutations,byrow=T)) +
+    scale_y_continuous(trans = 'log10',breaks = c(0.001,0.005,0.01,0.1,0.5)) %>% 
+    return() 
+}
+```
+
+```{r fit_explanation_selection}
+possible_causes <- c("All",unique(fit_explanations$`Possible cause`))
+error_topoliges <- c("All",unique(fit_explanations$`Error topology`))
+
+inputPanel(
+  selectInput(
+    "possible_cause",
+    "Possible cause",
+    multiple = F,
+    possible_causes,
+    selected = "All"
+  ),
+  selectInput(
+    "error_topology",
+    "Error topology",
+    multiple = F,
+    error_topoliges,
+    selected = "All"
+  )
+)
+
+renderUI(
+  {
+    ps <- input$possible_cause
+    et <- input$error_topology
+    if (ps == 'All') {
+      C1 <- rep(T,nrow(fit_explanations))
+    } else if (ps == 'NA') {
+      C1 <- is.na(fit_explanations$`Possible cause`)
+    } else {
+      C1 <- fit_explanations$`Possible cause` == ps
+    } 
+    if (et == 'All') {
+      C2 <- rep(T,nrow(fit_explanations))
+    } else {
+      C2 <- fit_explanations$`Error topology` == et
+    }
+    NN <- fit_explanations$SardID[
+      C1 & C2
+    ]
+    NN <- unique(NN[!is.na(NN)])
+    selectInput('individual',
+                'SardID',    
+                multiple = F,
+                NN,
+                selected = ifelse(length(NN) > 0,NN[[1]],NA),
+                width="400px")
+  
+    })
+```
+
+```{r bad_example_output}
+renderPlot(
+  {
+    data_bad_statistics %>% 
+      subset(individual == input$individual) %>% 
+      plot_data() 
+  },
+  height=600,
+  width=700
+)
+```
+
+```{r bad_example_output_table}
+renderTable(
+  {
+    fit_explanations %>% 
+      subset(SardID == input$individual)
+  },
+  striped=T,
+  hover=T,
+  bordered=T
+)
+column(
+  12,
+  align="center",
+  renderTable(
+  {
+    data_bad_statistics_display %>% 
+      subset(SardID == input$individual)
+  },
+  digits = 4
+))
+
+renderUI({
+  data_bad_statistics_display %>%
+    subset(SardID == input$individual) %>%
+    select(Site,Fit) %>%
+    mutate(Site = as.character(Site),
+           Fit = as.character(Fit)) %>% 
+    apply(1,function(x) sprintf('%s (%s)',x[1],x[2])) %>% 
+    unique %>% 
+    paste(collapse='<br>') %>% 
+    HTML
+})
+```

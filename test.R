@@ -1,0 +1,1 @@
+print(commandArgs(trailingOnly=T))

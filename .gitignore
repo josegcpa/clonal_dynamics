@@ -4,3 +4,6 @@
 **/summaries
 .Rhistory
 .DS_Store
+*csv
+*pdf
+*svg

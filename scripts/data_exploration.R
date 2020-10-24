@@ -6,7 +6,7 @@ source("scripts/prepare_data.R")
 # A few figures -----------------------------------------------------------
 
 mutations_per_individual <- full_data %>% 
-  subset(amino_acid_change %in% formatted_data_train_1$unique_site) %>%
+  subset(amino_acid_change %in% full_formatted_data$unique_site) %>%
   subset(Gene %in% load_included_genes()) %>% 
   subset(relative_timepoint == 1 & MUTcount_Xadj > 0) %>% 
   ggplot(aes(y = Gene,x = as.factor(SardID),fill = MUTcount_Xadj)) + 
@@ -67,7 +67,7 @@ mutation_barplot_sites <- full_data %>%
         legend.position = "bottom") + 
   xlab("")
 
-mega_map <- formatted_data_train_1$full_data %>%
+mega_map <- full_formatted_data$full_data %>%
   subset(relative_timepoint == 1) %>%
   ggplot(aes(y = SardID %>% as.factor,x = amino_acid_change,fill = MUTcount_Xadj)) + 
   geom_tile() + 

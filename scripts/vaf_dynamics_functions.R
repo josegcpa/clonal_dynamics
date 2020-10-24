@@ -21,14 +21,17 @@ library(lmerTest)
 library(lcmm)
 library(glmnet)
 library(fda.usc)
+library(default)
 select <- dplyr::select
 tf <- import("tensorflow")
 
-gene_colours <- as.character(pals::kelly(n = 20)[3:20])
+options(dplyr.summarise.inform = FALSE)
+
+gene_colours <- as.character(pals::kelly(n = 20)[3:19])
 names(gene_colours) <- c(
   "ASXL1","BRCC3","CBL","CTCF","DNMT3A","GNB1",
-  "IDH1","IDH2","JAK2","KRAS","MYD88","PPM1D",
-  "SF3B1","SRSF2","STAT3","TET2","TP53","U2AF1"
+  "IDH1","IDH2","JAK2","KRAS","PPM1D","PTPN11",
+  "SF3B1","SRSF2","TET2","TP53","U2AF1"
 )
 gene_colours[c("DNMT3Ant","DNMT3At")] <- gene_colours["DNMT3A"]
 gene_colours[c("CBLnt","CBLt")] <- gene_colours["CBL"]
@@ -36,6 +39,8 @@ gene_colours[c("PPM1Dnt","PPM1Dt")] <- gene_colours["PPM1D"]
 gene_colours[c("TET2nt","TET2t")] <- gene_colours["TET2"]
 gene_colours[c("TP53nt","TP53t")] <- gene_colours["TP53"]
 gene_colours[c("ASXL1t","ASXL1nt")] <- gene_colours["ASXL1"]
+gene_colours[c("BRCC3t","BRCC3nt")] <- gene_colours["BRCC3"]
+
 
 map_sardinia <- function() {
   coords <- c(40.1209,9.0129)
@@ -136,10 +141,133 @@ add_term <- function(data,dist,dist_params) {
     return
 }
 
+load_data_keep <- function() {
+  domain_data <- load_domain_data()
+  full_data <- read.table('data/ALLvariants_exclSynonymous_Xadj.txt',header = T) %>%
+    mutate(mutation_identifier = paste(Gene,START,END,REF,ALT,sep = '-')) 
+  # Create unique identifiers for AA changes and use reference genome names when AA changes are unavailable
+  # Excluding individuals with a history of haematological malignancy
+  full_data <- full_data[!(full_data$SardID %in% load_excluded_individuals()),]
+  full_data <- full_data[!(full_data$SardID %in% load_excluded_individuals_lymph()),]
+  
+  # Merging the full data with the domain data 
+  full_data <- merge(
+    full_data,
+    domain_data[colnames(domain_data) %in% c("CHR","START","END","REF","ALT","Domain","AminoAcidStart_End")],
+    by = c("CHR","START","END","REF","ALT"),
+    all.x = T
+  )
+  
+  return(full_data)
+}
+
 load_data <- function() {
-  read.table('data/ALLvariants_exclSynonymous_Xadj.txt',header = T) %>%
-    mutate(mutation_identifier = paste(Gene,START,END,REF,ALT,sep = '-')) %>%
-    return
+  domain_data <- load_domain_data()
+  full_data <- read.table('data/ALLvariants_exclSynonymous_Xadj.txt',header = T) %>%
+    mutate(mutation_identifier = paste(Gene,START,END,REF,ALT,sep = '-')) 
+  # Create unique identifiers for AA changes and use reference genome names when AA changes are unavailable
+  # Excluding individuals with a history of haematological malignancy
+  full_data <- full_data[!(full_data$SardID %in% load_excluded_individuals()),]
+  full_data <- full_data[!(full_data$SardID %in% load_excluded_individuals_lymph()),]
+  
+  # Merging the full data with the domain data 
+  full_data <- merge(
+    full_data,
+    domain_data[colnames(domain_data) %in% c("CHR","START","END","REF","ALT","Domain","AminoAcidStart_End")],
+    by = c("CHR","START","END","REF","ALT")
+  )
+  
+  # Excluding genes with non-significant dN/dS
+  full_data <- full_data[full_data$Gene %in% load_included_genes(),] 
+  
+  # Defining truncating mutations
+  full_data$truncating <- full_data$Type %in% c("frameshift_deletion","frameshift_insertion", "splice_site", "stopgain", "stoploss")
+  
+  # Excluding truncating mutations from analysis (except for ASXL1)
+  full_data$Domain <- ifelse(
+    full_data$truncating & !(full_data$Gene %in% c('ASXL1','PPM1D')),
+    NA,
+    full_data$Domain
+  )
+  full_data$Domain <- paste(
+    full_data$Gene,
+    full_data$Domain,
+    sep = '-'
+  )
+  
+  # This allows us to have a coefficient for truncating and non-truncating mutations
+  # when we find significant dN/dS ratios in both
+  for (gene in c("BRCC3","CBL","CTCF","DNMT3A","TET2","TP53")) {
+    full_data$Gene <- ifelse(
+      as.character(full_data$Gene) == gene,
+      ifelse(full_data$truncating == TRUE,paste0(gene,'t'),paste0(gene,'nt')),
+      as.character(full_data$Gene)
+    ) 
+  }
+  
+  # Create unique identifiers for AA changes and use reference genome names when AA changes are unavailable
+  amino_acid_change <- full_data$AAChange.refGene %>% 
+    sapply(
+      function(x) {
+        y <- str_match_all(x,pattern = "p.[A-Z].[0-9]+[A-Za-z]+|p.[0-9]+_[0-9]+del") %>% 
+          unlist
+        if (length(y) > 0) {
+          out <- y[str_match_all(y,"[0-9]+") %>% unlist %>% which.max()] %>%
+            str_match("[A-Z].[0-9]+[A-Za-z]+|[0-9]+_[0-9]+del") %>%
+            unlist %>%
+            return
+        } else {
+          NA %>%
+            return
+        }
+      }
+    ) %>% 
+    unlist
+  
+  amino_acid_change <- ifelse(
+    is.na(amino_acid_change),
+    full_data$AAChange.refGene %>% as.character(),
+    amino_acid_change %>% as.character()
+  )
+  full_data$amino_acid_change <- paste(
+    full_data$Gene,
+    amino_acid_change,
+    sep = '-'
+  )
+  return(full_data)
+}
+
+load_data_6th_tp <- function() {
+  D <- read.table('data/Recurrent_sites_finalPhase.txt',header=T)
+  amino_acid_change <- D$AAChange.refGene %>% 
+    sapply(
+      function(x) {
+        y <- str_match_all(x,pattern = "p.[A-Z].[0-9]+[A-Za-z]+|p.[0-9]+_[0-9]+del") %>% 
+          unlist
+        if (length(y) > 0) {
+          out <- y[str_match_all(y,"[0-9]+") %>% unlist %>% which.max()] %>%
+            str_match("[A-Z].[0-9]+[A-Za-z]+|[0-9]+_[0-9]+del") %>%
+            unlist %>%
+            return
+        } else {
+          NA %>%
+            return
+        }
+      }
+    ) %>% 
+    unlist
+  
+  amino_acid_change <- ifelse(
+    is.na(amino_acid_change),
+    D$AAChange.refGene %>% as.character(),
+    amino_acid_change %>% as.character()
+  )
+  D$amino_acid_change <- paste(
+    D$Gene,
+    amino_acid_change,
+    sep = '-'
+  )
+  return(D)
 }
 
 load_domain_data <- function() {
@@ -219,6 +347,9 @@ load_domain_data <- function() {
   # MYD88
   domain_data$Domain[domain_data$Gene == 'MYD88'] <- NA
   
+  # PTPN11
+  domain_data$Domain[domain_data$Gene == 'PTPN11'] <- NA
+  
   # SRSF2 - domains are already relevantly labelled
   
   # STAT3 - domains are already relevantly labelled
@@ -291,6 +422,29 @@ load_comorbidity_data <- function() {
     mutate(SardID=INDIVIDUAL) %>% 
     select(-INDIVIDUAL)
   return(tmp)
+}
+
+load_jak2_phenotype <- function() {
+  file_name <- "data/CHP_data.xlsx"
+  all_workbook_names <- loadWorkbook(file = file_name)$sheet_names %>%
+    as.list()
+  
+  all_sheets <- lapply(all_workbook_names,function(x) read.xlsx(file_name,sheet = x)) 
+  names(all_sheets) <- all_workbook_names
+  
+  output <- list()
+  for (x in all_workbook_names[3:length(all_workbook_names)]) {
+    tmp <- all_sheets[[x]]
+    colnames(tmp) <- c("SardID","Dose","Genotype")
+    tmp <- tmp %>%
+      mutate(Site = x) %>%
+      mutate(Chromosome = str_match(Site,'[0-9]+'),
+             Site = gsub('\\.','',str_match(Site,'\\.[0-9]+\\.')))
+    output[[x]] <- tmp
+  }
+  output <- do.call(rbind,output)
+  rownames(output) <- NULL
+  return(output)
 }
 
 format_data <- function(full_data) {
@@ -745,4 +899,11 @@ HPDI <- function(samples,prob = 0.5) {
   output <- c(samples[interval_edge],samples[interval_edge + n_samples_interval])
   
   return(output)
+}
+
+theme_gerstung <- function(...) {
+  theme_minimal(...) + 
+    theme(panel.grid = element_blank(),
+          axis.line = element_line(),
+          axis.ticks = element_line())
 }

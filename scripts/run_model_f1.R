@@ -5,9 +5,9 @@ source("scripts/prepare_data.R")
 
 args <- commandArgs(trailingOnly = T)
 
-site_list <- formatted_data_train_1$unique_site_multiple
-domain_list <- formatted_data_train_1$unique_domain
-gene_list <- formatted_data_train_1$unique_gene
+site_list <- full_formatted_data$unique_site_multiple
+domain_list <- full_formatted_data$unique_domain
+gene_list <- full_formatted_data$unique_gene
 
 # gene_list <- c("SF3B1",
 #                "JAK2",
@@ -23,13 +23,8 @@ gene_list <- formatted_data_train_1$unique_gene
 # site_list <- grep(paste(gene_list,collapse = '|'),
 #                   site_list,value = T)
 
-if (args[1] == 'full') {
   train_subset <- full_formatted_data
   model_file_name <- 'models/model_F1_full.RDS'
-} else {
-  train_subset <- formatted_data_train_1  
-  model_file_name <- 'models/model_F1.RDS'
-}
 
 print(model_file_name)
 
@@ -61,8 +56,7 @@ output_list[["b_gene_values"]] <- b_gene_values
 output_list[["b_values"]] <- b_values
 output_list[["b_individual"]] <- b_individual_values
 
-output_list[["validation_subset"]] <- formatted_data_validation_1
-output_list[["training_subset"]] <- formatted_data_train_1
+output_list[["training_subset"]] <- full_formatted_data
 output_list[["u_values"]] <- u_values
 output_list[["u_idx"]] <- u_idx
 output_list[["interference_idxs"]] <- interference_idxs

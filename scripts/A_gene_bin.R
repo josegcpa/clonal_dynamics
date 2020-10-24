@@ -35,7 +35,11 @@ b_gene <- normal(mean = b_gene_mean,
 age_effect_gene <- train_subset$gene_to_site_indicator[gene_idxs,sub_gene_mask] %*% t(b_gene)
 full_effects <- age_effect_gene
 
-vaf_sums <- ((train_subset$counts/train_subset$coverage)[gene_idxs,]  %>% apply(2,na.replace,replace = 0)) %*% t(train_subset$individual_indicator)
+vaf_sums <- apply(
+  (train_subset$counts/train_subset$coverage)[gene_idxs,],
+  2,
+  gtools::na.replace,
+  replace = 0) %*% t(train_subset$individual_indicator)
 vaf_means <- vaf_sums/(train_subset$site_to_individual_indicator[gene_idxs,] %*% t(train_subset$individual_indicator))
 interference_list <- list() 
 j <- 0
@@ -77,7 +81,7 @@ interference_idxs_true <- interference_idxs %>%
 u_idx <- interference_idxs %>%
   select(site,inter_site,ind) %>%
   unique
-u <- variable(dim = c(1,nrow(u_idx)))
+u <- uniform(min = -50,max = 0,dim = c(1,nrow(u_idx)))
 
 ### Sparse model
 
@@ -103,22 +107,3 @@ distribution(X_sparse) <- binomial(prob = mu * 0.5,
 ### 
 
 m <- model(b_gene,u)
-
-u_initial <- data.frame(
-  vaf = (train_subset$counts[gene_idxs,]/train_subset$coverage[gene_idxs,])[cbind(interference_idxs$site,interference_idxs$ind_age)],
-  ind = interference_idxs$ind,
-  site = interference_idxs$site,
-  age = age[interference_idxs$ind_age],
-  count = train_subset$counts[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)],
-  cov = train_subset$coverage[gene_idxs,][cbind(interference_idxs$site,interference_idxs$ind_age)]
-) %>% 
-  group_by(ind,site) %>%
-  summarise(vaf = vaf[which.min(age)] %>% na.replace(0)) 
-u_initial <- u_idx %>% 
-  apply(1, function(x) {
-    u_initial[u_initial$site == x[1] & u_initial$ind == x[3],]$vaf
-  }) 
-u_initial <- (u_initial + 1e-8) %>%
-  gtools::logit() %>%
-  matrix(nrow = 1)
-init <- initials(u = u_initial)

@@ -1,0 +1,465 @@
+---
+title: "The Natural History and Fitness Landscape of Clonal Haematopoiesis"
+subtitle: "Leveraging this analysis in a clinical context"
+author: 
+    - José Guilherme de Almeida
+    - Moritz Gerstung
+output: 
+  html_document:
+    theme: lumen
+    highlight: tango
+    code_folding: hide
+    df_print: paged
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 4
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,dpi = 300)
+```
+
+```{r}
+source("scripts/vaf_dynamics_functions.R")
+set.seed(42)
+source("scripts/prepare_data.R")
+```
+
+```{r}
+all_models <- list.files(path = "models/clinical_application/",pattern = "*rds",
+                         full.names = T)
+model_one_statistics <- list()
+model_two_output <- list()
+failed_models <- c()
+i <- 0
+for (model_file in all_models) {
+  if (i %% 100 == 0) print(sprintf('%s/%s',i,length(all_models)))
+  model <- readRDS(model_file)  
+  gr_stat <- c(min(model$FIRST_MODEL$rubin_gelman_statistic$psrf[,1]),max(model$FIRST_MODEL$rubin_gelman_statistic$psrf[,1]))
+  ess <- c(min(model$FIRST_MODEL$effective_sample_size),max(model$FIRST_MODEL$effective_sample_size))
+  if (all(abs(1 - gr_stat) < 0.1) & all(ess > 500)) {
+    i <- i+1
+    tmp <- model$FIRST_MODEL$r_values_first_model %>%
+      select(individual,coefficient,coefficient_005,coefficient_095,site,b_clone,b_clone_005,b_clone_095) %>%
+      distinct %>%
+      group_by(site) %>%
+      mutate(recurring = length(unique(individual)) > 1)
+    mos <- merge(select(model$FIRST_MODEL$statistic,-recurring),
+                 tmp,by = c("individual","site"))
+    model_one_statistics[[i]] <- data.frame(mos,seed=model$SEED)
+    model_two_output[[i]] <- data.frame(model$SECOND_MODEL$output,seed=model$SEED,min_age=min(model$FIRST_MODEL$dataset$ages))
+  } else {
+    failed_models <- c(failed_models,model_file)
+  }
+}
+
+print(sprintf('%s/%s',i,length(all_models)))
+
+model_one_statistics <- do.call(rbind,model_one_statistics)
+model_two_output <- do.call(rbind,model_two_output)
+model_one_statistics <- model_one_statistics %>%
+  as.tibble() %>%
+  mutate(
+    b_clone = as.numeric(b_clone),
+    coefficient = as.numeric(coefficient),
+    coefficient_005 = as.numeric(coefficient_005),
+    coefficient_095 = as.numeric(coefficient_095),
+    b_clone_005 = as.numeric(b_clone_005),
+    b_clone_095 = as.numeric(b_clone_095)
+  )
+
+model_two_output <- model_two_output %>%
+  as_tibble() %>% 
+  mutate(
+    effect = as.numeric(effect),
+    age = as.numeric(age),
+    true = as.numeric(true),
+    coverage = as.numeric(coverage),
+    u = as.numeric(u),
+    u_high = as.numeric(u_high),
+    u_low = as.numeric(u_low),
+    min_age = as.numeric(min_age)
+  )
+```
+
+```{r, fig.width=5,fig.height=7}
+tmp_data <- model_one_statistics %>%
+  group_by(seed,site) %>% 
+  mutate(N = length(unique(individual))) %>% 
+  subset(recurring == T) %>% 
+  subset(N > 2) %>% 
+  ungroup() %>% 
+  mutate(site = as.character(site)) %>% 
+  mutate(gene = str_match(gene,"[A-Z0-9]+")) %>%
+  mutate(site = sapply(site,function(x) unlist(strsplit(x,'-'))[2])) %>%
+  mutate(site = sapply(site,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(site = sapply(site,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>%
+  select(individual,site,seed,gene,b_clone,coefficient,coefficient_005,coefficient_095,b_clone,b_clone_005,b_clone_095,N) %>%
+  distinct
+  # group_by(site,seed,gene) %>%
+  # summarise(fraction = sum(sum_stat < 0.7)/length(sum_stat),
+  #           coefficient = coefficient[1],
+  #           coefficient_095 = coefficient_095[1],
+  #           coefficient_005 = coefficient_005[1],
+  #           N = N[1]) %>% 
+tmp_data %>% 
+  group_by(gene,site) %>%
+  mutate(N_factor = ifelse(N==max(N),paste(N,'(max.)'),N)) %>%
+  ggplot(aes(x = reorder(N_factor,N),
+             y = coefficient,
+             ymin = coefficient_005,
+             ymax = coefficient_095
+             )) +
+  #geom_point(alpha = 0.4) + 
+  geom_pointrange(aes(color = gene),
+                  height = 0,
+                  alpha = 0.05,
+                  position = position_jitter(width = 0.2,height = 0)) +
+  geom_boxplot() +
+  facet_grid(gene + site ~ .,scales = "free_y",space = "free") + 
+  coord_flip() + 
+  theme_gerstung() + 
+  rotate_x_text() + 
+  xlab("Number of individuals used in inference") + 
+  ylab("Genetic growth effect") + 
+  theme(strip.text.y = element_text(angle=0),panel.border = element_rect(fill=NA)) +
+  scale_color_manual(values = gene_colours,
+                     guide=F)
+```
+
+```{r, fig.width=4,fig.height=30}
+tmp_data %>%
+  subset(N > 3) %>% 
+  ggplot(aes(x = as.factor(N),y = b_clone,color = gene)) +
+  geom_point(alpha = 0.1) + 
+  geom_boxplot() + 
+  facet_grid(gene + site + individual ~ .,scales = "free_y",space = "free") + 
+  xlab("Number of individuals used in inference") + 
+  theme_gerstung() + 
+  coord_flip() + 
+  scale_color_manual(values = gene_colours,name = NULL) + 
+  theme(strip.text.y = element_text(angle=0),
+        legend.position = "bottom",
+        panel.border = element_rect(fill=NA)) +
+  ylab("Unknown cause growth effect")
+```
+
+```{r, fig.width=7,fig.height=7}
+beta_values <- readRDS("models/overdispersion.RDS")
+beta_value <- beta_values[1,1]
+N_data <- tmp_data %>%
+  select(gene,site,seed,N) %>%
+  distinct
+validation_metrics <- model_two_output %>%
+  group_by(individual,site,seed) %>% 
+  filter(true[which.min(age)]/coverage[which.min(age)] > 0.005) %>% 
+  ungroup() %>% 
+  mutate(site = as.character(site)) %>% 
+  mutate(gene = str_match(site,"[A-Z0-9]+")) %>%
+  mutate(site = sapply(site,function(x) unlist(strsplit(x,'-'))[2])) %>%
+  mutate(site = sapply(site,function(x) unlist(strsplit(x,';'))[1])) %>%
+  mutate(site = sapply(site,function(x) {
+    tmp <- unlist(strsplit(x,':'))
+    return(tmp[length(tmp)])})) %>%
+  merge(N_data,by = c("gene","site","seed")) %>%
+  mutate(mu_val = u / coverage) %>% 
+  mutate(tail_prob = extraDistr::pbbinom(
+    q = true,
+    size = coverage,
+    alpha = (mu_val * beta_value)/(1 - mu_val),
+    beta = beta_value)) %>%
+  group_by(gene,site,individual,N,seed) %>% 
+  summarise(sum_stat = pchisq(sum(qnorm(tail_prob)^2),length(tail_prob)),
+            mse = mean(abs(true/coverage-u/coverage),na.rm=T))
+
+re_stat_metrics_plot <- validation_metrics %>% 
+  na.omit() %>%
+  group_by(N,gene,site) %>%
+  summarise(fraction = sum(sum_stat < 0.7,na.rm=T)/length(sum_stat)) %>%
+  ggplot(aes(x = as.factor(N),y = 1-fraction,fill = gene,color = gene)) + 
+  geom_bar(stat="identity",color = 'white') +
+  #geom_boxplot() + 
+  facet_grid(gene+site~.,scales="free_y",space="free") + 
+  theme_gerstung(base_size = 15) + 
+  coord_flip() + 
+  scale_color_manual(values = gene_colours,guide = NULL) + 
+  scale_fill_manual(values = gene_colours,name = NULL) + 
+  theme(strip.text.y = element_text(angle=0),
+        legend.position = "bottom",
+        panel.grid.major.y = element_blank(),
+        panel.border = element_rect(fill=NA,size=0.1)) +
+  scale_y_continuous(limits = c(0,1),expand = c(0,0)) + 
+  xlab("Number of individuals used in training") +
+  ylab("Fraction of outliers")
+
+mse_metrics_plot <- validation_metrics %>%
+  na.omit() %>%
+  ggplot(aes(x = as.factor(N),y = mse, fill = gene, color = gene)) + 
+  geom_point(alpha = 0.2) +
+  geom_boxplot(fill = NA,color = 'black',outlier.colour = NA,lwd=0.25) + 
+  facet_grid(gene+site~.,scales="free_y",space="free") + 
+  theme_gerstung(base_size = 15) + 
+  coord_flip() + 
+  scale_y_continuous(trans = 'log10') + 
+  scale_color_manual(values = gene_colours,guide = F) + 
+  scale_fill_manual(values = gene_colours,guide = F) + 
+  theme(strip.text = element_text(angle=0),
+        legend.position = "bottom",
+        panel.grid.major.y = element_blank(),
+        panel.border = element_rect(fill=NA,size = 0.1)) +
+  xlab("Number of individuals used in training") +
+  ylab("Mean absolute error")
+
+g <- mse_metrics_plot %>%
+  ggplotGrob()
+strips <- g$layout$name[which(grepl('strip-',g$layout$name))]
+g <- gtable_remove_grobs(g,strips)
+
+comp_plot <- plot_grid(g,
+          re_stat_metrics_plot + theme(legend.position = "none",
+                                       axis.text.y = element_blank()) + xlab(" "),nrow = 1,align = "h",
+          rel_widths = c(0.8,1)) 
+
+comp_plot %>%
+  plot_grid(get_legend(re_stat_metrics_plot),ncol=1,rel_heights = c(1.0,0.1)) + 
+  ggsave(useDingbats=FALSE,"figures/model_F5/statistical_analysis/mse_gof_boxplot_barplot.pdf",width = 10,height = 7) +
+  ggsave("figures/model_F5/statistical_analysis/mse_gof_boxplot_barplot.svg",width = 10,height = 7)
+
+ggsave(useDingbats=FALSE,"figures/model_F5/statistical_analysis/mse_gof_boxplot_barplot_no_legend.pdf",comp_plot,width = 10,height = 7)
+ggsave("figures/model_F5/statistical_analysis/mse_gof_boxplot_barplot_no_legend.svg",comp_plot,width = 10,height = 7)
+ggsave("figures/model_F5/statistical_analysis/mse_gof_boxplot_barplot_legend.svg",get_legend(re_stat_metrics_plot),width = 4,height = 1)
+```
+
+```{r number_of_clones}
+NMutations <- load_data() %>% 
+  group_by(SardID) %>%
+  summarise(NMutations = length(unique(amino_acid_change)))
+
+validation_metrics %>% 
+  na.omit() %>% 
+  merge(NMutations,by.x = "individual",by.y = "SardID") %>%
+  ggplot(aes(x=NMutations,y=sum_stat,colour=as.factor(individual))) + 
+  geom_point(alpha = 0.6,position = position_dodge(width = 0.5)) + 
+  scale_x_continuous(breaks = seq(1,10,every=2)) + 
+  facet_wrap(~ paste(gene,site,sep='-'),scales = "free") + 
+  theme_gerstung(base_size = 15) + 
+  theme(legend.position = "none") +
+  scale_y_continuous(limits = c(0,1)) + 
+  scale_x_continuous(limits = c(min(NMutations$NMutations),max(NMutations$NMutations)),
+                     breaks = seq(1,max(NMutations$NMutations)))
+```
+
+```{r performance_plot, fig.height=4.5,fig.width=4.5}
+model_two_output %>%
+  group_by(individual,site,seed) %>% 
+  filter(true[which.min(age)]/coverage[which.min(age)] > 0.005) %>% 
+  mutate(gene = str_match(site,'[A-Z0-9]+')) %>%
+  group_by(seed,site) %>%
+  mutate(N = length(unique(individual))) %>% 
+  ungroup() %>% 
+  group_by(site) %>%
+  filter(N == 1) %>% 
+  filter(phase != 1) %>%
+  ungroup() %>% 
+  filter(site %in% full_formatted_data$unique_site_multiple) %>%
+  ggplot(aes(x = true / coverage, y = u / coverage,colour = gene)) +
+  geom_abline(slope = 1) + 
+  geom_point(alpha = 0.5) + 
+  theme_gerstung(base_size = 15) +
+  scale_x_continuous(trans = 'log10',
+                     breaks = c(1e-4,1e-3,1e-2,1e-1,5e-1)) + 
+  scale_y_continuous(trans = 'log10',
+                     breaks = c(1e-4,1e-3,1e-2,1e-1,5e-1)) + 
+  scale_color_manual(values = gene_colours,name = NULL) + 
+  facet_wrap(~ phase) + 
+  xlab("Observed VAF") +
+  ylab("Predicted VAF") +
+  theme(legend.position = "bottom")
+
+performance_plot_gene_data <- model_two_output %>%
+  group_by(seed,site,individual) %>%
+  mutate(MAE = mean(abs(u / coverage - true / coverage))) %>% 
+  group_by(site,individual) %>%
+  filter(MAE == min(MAE)) %>% 
+  filter(seed == sample(seed,size=1)) %>% 
+  group_by(individual,site) %>% 
+  filter(true[which.min(age)]/coverage[which.min(age)] >= 0.01) %>% 
+  mutate(gene = str_match(site,'[A-Z0-9]+')) %>%
+  filter(phase != 1) %>%
+  mutate(ageSince = age - min(age)) %>% 
+  ungroup() %>% 
+  filter(site %in% full_formatted_data$unique_site_multiple)
+
+plot_min <- min(performance_plot_gene_data$u/performance_plot_gene_data$coverage,
+                performance_plot_gene_data$true/performance_plot_gene_data$coverage)
+
+performance_mae_plot <- performance_plot_gene_data %>%
+  group_by(gene) %>% 
+  summarise(MAE = mean(abs(u / coverage - true / coverage)))
+
+performance_plot_gene <- performance_plot_gene_data %>% 
+  ggplot(aes(x = true / coverage, y = u / coverage,colour = gene,
+             fill=gene,group = paste(gene,individual),
+             alpha = -ageSince,size = ageSince)) +
+  geom_abline(slope = 1,linetype = 3) + 
+  geom_point() + 
+  #geom_line() +
+  theme_gerstung(base_size = 15) +
+  scale_x_continuous(trans = 'log10',
+                     breaks = c(1e-3,1e-2,1e-1,5e-1),
+                     limits = c(plot_min,5e-1)) + 
+  scale_y_continuous(trans = 'log10',
+                     breaks = c(1e-3,1e-2,1e-1,5e-1),
+                     limits = c(plot_min,5e-1)) + 
+  scale_color_manual(values = gene_colours,name = NULL,
+                     guide=F) + 
+  scale_fill_manual(values = gene_colours,name = NULL,
+                    guide=F) + 
+  geom_text(
+    data = performance_mae_plot,
+    inherit.aes = F,
+    aes(
+      x = plot_min,
+      y = 0.40,
+      label = sprintf('MAE = %.4f',MAE)
+    ),
+    hjust = 0
+  ) +
+  xlab("Observed VAF") +
+  ylab("Predicted VAF") +
+  theme(legend.position = "bottom") + 
+  facet_wrap(~ gene,scales = "free") +
+  scale_alpha(guide=F,range = c(0.3,1.0)) +
+  scale_size(guide=F,range = c(2,4)) +
+  theme(panel.grid = element_blank()) 
+
+performance_plot_gene
+```
+
+
+```{r example_trajectories, fig.height=3.6,fig.width=14}
+model_two_output %>% 
+  mutate(age = age + min_age) %>% 
+  group_by(seed,site) %>%
+  mutate(N = length(unique(individual))) %>% 
+  ungroup() %>% 
+  group_by(site) %>% 
+  filter(N == 1) %>% 
+  filter(site %in% c('SF3B1-K666N','DNMT3Ant-R882H','SF3B1-K700E','TET2nt-I1873T','JAK2-V617F')) %>% 
+  ungroup() %>% 
+  mutate(site = paste(str_match(site,'[A-Z0-9]+'),str_match(site,'-[A-Z0-9]+'),sep='')) %>% 
+  group_by(individual,site,seed) %>% 
+  filter(true[which.min(age)]/coverage[which.min(age)] > 0.005) %>% 
+  group_by(individual,site,seed) %>% 
+  mutate(mse = mean((true-u)^2)) %>% 
+  group_by(individual,site) %>%
+  filter(mse == min(mse)) %>% 
+  filter(seed == sample(seed,1)) %>% 
+  group_by(site) %>%
+  filter(mse %in% quantile(mse,c(0.1,0.5,0.9),type=1)) %>% 
+  group_by(site,individual) %>% 
+  mutate(first_tp = age == min(age)) %>%
+  ggplot(aes(x = age,group = paste(individual,seed),colour = as.factor(individual))) + 
+  geom_ribbon(aes(ymax = u_high / coverage,
+                  ymin = u_low / coverage,
+                  fill = as.factor(individual)),alpha = 0.2,color=NA) + 
+  geom_line(aes(y = u/coverage),alpha = 0.6,linetype = 'longdash') + 
+  geom_line(aes(y = true / coverage),linetype='dotted',color = 'black',alpha = 0.2) + 
+  geom_point(aes(y = true / coverage,shape = first_tp,alpha = first_tp),color = 'black') + 
+  scale_shape_manual(values = c(3,16)) +
+  scale_alpha_manual(values = c(1,0.2)) +
+  theme_gerstung(base_size = 15) + 
+  facet_wrap(~ site,nrow = 1,scales = "free") + 
+  theme(legend.position = 'none') + 
+  scale_x_continuous(breaks = seq(0,100,by = 10),limits = c(58,92),expand=c(0,0)) + 
+  scale_y_continuous(trans = 'log10',limits = c(1e-4,0.5),breaks = c(1e-4,1e-3,1e-2,1e-1,5e-1)) +
+  theme(strip.text = element_text(size = 15),
+        plot.title = element_text(face = "italic")) +
+  ylab("VAF") + 
+  xlab("Age") + 
+  ggtitle("Predictions for new individuals conditioned on the first timepoint") + 
+  ggsave(useDingbats=FALSE,"figures/model_F5/inferred_trajectories/example_trajectories_clinical.pdf",
+         width = 14, height = 3.6) +
+  ggsave("figures/model_F5/inferred_trajectories/example_trajectories_clinical.svg",
+         width = 14, height = 3.6)
+```
+
+```{r mse_gof_and_clone_variance_associations,fig.height=4.5,fig.width=3.5}
+clone_specific_coefficients <- read.csv("clone_specific_coefficients.csv",header = T) %>%
+  as_tibble() %>% 
+  mutate(gene = str_match(site,'[A-Z0-9]+')) %>%
+  subset(grepl('DNMT3A|SF3B1|TET2|JAK2',gene)) %>%
+  group_by(gene,site) %>%
+  mutate(N = length(site)) %>%
+  filter(N > 2) %>% 
+  summarise(var = var(as.numeric(as.character(mean)))) %>%
+  ungroup() %>% 
+  mutate(site = str_match(site,'-.*') %>% gsub(pattern = '-',replacement = ''))
+  
+mse_vs_gof_data <- validation_metrics %>% 
+  mutate(MSE = mse) %>% 
+  na.omit() %>%
+  group_by(gene,site) %>%
+  filter(N == max(N)) %>%
+  group_by(N,gene,site) %>%
+  summarise(fraction = sum(sum_stat < 0.7,na.rm=T)/length(sum_stat),
+            mse = median(MSE),
+            mse_075 = quantile(MSE,c(0.75)),
+            mse_025 = quantile(MSE,c(0.25)),
+            mse_095 = quantile(MSE,c(0.95)),
+            mse_005 = quantile(MSE,c(0.05))) %>%
+  merge(clone_specific_coefficients,by = c("site","gene"))
+
+mse_vs_gof_cor <- cor.test(log(mse_vs_gof_data$mse),1-mse_vs_gof_data$fraction)
+
+mse_vs_gof_plot <- mse_vs_gof_data %>%
+  ggplot(aes(x = 1-fraction,y = mse,colour = gene)) +
+  geom_smooth(se = F,color = 'black',linetype = 2,method = 'lm',formula = y~x) +
+  geom_point() + 
+  geom_linerange(aes(ymin = mse_005,ymax = mse_095)) +
+  theme_gerstung(base_size = 15) + 
+  scale_y_continuous(trans = 'log10') + 
+  scale_colour_manual(values = gene_colours,name = NULL) + 
+  theme(legend.position = 'none',
+        panel.grid = element_blank()) + 
+  ylab("Mean\nabsolute error") + 
+  annotate(geom = 'label',x = 0.0,hjust=0,y = 0.03,vjust = -0.1,
+           label = sprintf('R = %.2f\np = %.4f',
+                           mse_vs_gof_cor$estimate,
+                           mse_vs_gof_cor$p.value),
+           label.padding = unit(0,"cm"),
+           label.size = unit(0,"cm"),
+           label.r = unit(0,"cm")) +
+  xlab("Fraction of outliers") 
+
+mse_vs_var_cor <- cor.test(log(mse_vs_gof_data$mse),mse_vs_gof_data$var)
+
+mse_vs_var_plot <- mse_vs_gof_data %>%
+  ggplot(aes(x = var,y = mse,ymin = mse_005,ymax = mse_095,colour = gene)) +
+  geom_smooth(se = F,color = 'black',linetype = 2,method = 'lm',formula = y~x) +
+  geom_point() + 
+  geom_linerange(aes(ymin = mse_005,ymax = mse_095)) +
+  theme_gerstung(base_size = 15) + 
+  scale_y_continuous(trans = 'log10') + 
+  scale_x_continuous(breaks = seq(0,10,by=3)/1000) +
+  scale_colour_manual(values = gene_colours,name = NULL) + 
+  theme(legend.position = 'none',
+        panel.grid = element_blank()) + 
+  ylab("Mean\nabsolute error") + 
+  annotate(geom = 'label',x = 0.0067,hjust=0,y = 0.0025,vjust = -0.1,
+           label = sprintf('R = %.2f\np = %.4f',
+                           mse_vs_var_cor$estimate,
+                           mse_vs_var_cor$p.value),
+           label.padding = unit(0,"cm"),
+           label.size = unit(0,"cm"),
+           label.r = unit(0,"cm")) +
+  xlab("Unknown cause variance") 
+
+plot_grid(mse_vs_gof_plot,mse_vs_var_plot,ncol=1) + 
+  ggsave(useDingbats=FALSE,"figures/model_F5/statistical_analysis/mse_vs_gof_and_clone_variance.pdf",width = 5,height = 7) +
+  ggsave(useDingbats=FALSE,"figures/model_F5/statistical_analysis/mse_vs_gof_and_clone_variance.svg",width = 5,height = 7)
+```
