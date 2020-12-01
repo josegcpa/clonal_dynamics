@@ -22,15 +22,15 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r import_functions, include=FALSE}
-source("scripts/vaf_dynamics_functions.R")
-model_file_name <- "models/model_F5_full.RDS"
+source("Scripts/vaf_dynamics_functions.R")
+model_file_name <- "models/model_D.RDS"
 set.seed(42)
 ```
 
 # Post-hoc analysis
 
 ```{r making_dirs_loading_data}
-model_id <- gsub('_$','',str_match(model_file_name,'model_.*_'))
+model_id <- gsub('_$','',str_match(model_file_name,'model_[A-Z]+'))
 load(file = sprintf("vaf_modelling_coefficients_%s.Rdata",model_id))
 values_model <- readRDS(file = model_file_name)
 c('prevalence','dnds',
@@ -39,7 +39,7 @@ c('prevalence','dnds',
   sapply(
     function(x) dir.create(sprintf("figures/%s/%s",model_id,x),showWarnings = F)
   )
-source("scripts/prepare_data.R")
+source("Scripts/prepare_data.R")
 ```
 
 ## What if - recreating mutation prevalence
@@ -237,31 +237,56 @@ Using the trajectories we can replicate the observed prevalence to some extent. 
 A popular measure of evolutionary selection in cancer is the dN/dS ratio as per Martincorena, which uses the ratio of non-synonymous mutations to synonymous mutations normalised by nucleotide context as a proxy for evolutionary selection. However, what is observable is that there is no correlation between the expected values for dN/dS and growth coefficients; indeed, a few genes appear to have higher than expected growth coefficients when considering their relative prevalence in our cohort (i.e. U2AF1-Q157R and SRSF2-P95H). 
 
 ```{r dnds_comparison, fig.height=4,fig.width=8}
-values_b <- values_model$b_values[[1]]
-values_b$site_name <- rep(values_model$training_subset$unique_site[values_model$gene_idxs],
-                          each = length(unique(values_model$b_values[[1]]$labels)))
-values_b$gene <- values_b$site_name %>% 
-  sapply(function(x) unlist(str_split(x,pattern = '-'))[1])
+unique_gene <- values_model$sub_data %>%
+  select(Gene,gene_numeric) %>% 
+  distinct %>%
+  arrange(gene_numeric) %>%
+  select(Gene) %>%
+  unlist
+unique_site <- values_model$sub_data %>%
+  select(amino_acid_change,site_numeric) %>% 
+  distinct %>%
+  arrange(site_numeric) %>%
+  select(amino_acid_change) %>%
+  unlist
+unique_site_multiple <- values_model$sub_data %>%
+  select(amino_acid_change,site_numeric_multiple) %>% 
+  subset(!is.na(site_numeric_multiple)) %>%
+  distinct %>%
+  arrange(site_numeric_multiple) %>%
+  select(amino_acid_change) %>%
+  unlist %>% 
+  as.character() %>% as.factor
+
+values_b <- r_values %>%
+  select(
+    mean = coefficient,
+    HDPI_low = coefficient_005,
+    HDPI_high = coefficient_095,
+    coefficient_var,
+    site_name = site,
+    gene = genes
+  ) %>%
+  distinct
 
 dnds_data <- load_dnds()
 dnds_site <- dnds_data$site %>%
   mutate(site_merge = paste(gene,aachange,sep = '-'))
 coefficients_dnds <- values_b %>%
-  spread(key = "labels",value = "values") %>%
   mutate(genes_corrected = str_match(gene,"[A-Z0-9]+")) %>%
   mutate(site_merge = paste(genes_corrected,str_match(site_name,'[a-zA-Z0-9:>;\\.\\+]+$'),sep = '-')) %>% 
   merge(dnds_site,by = "site_merge") %>%
   subset(sig == T) %>%
-  select(HDPI_low,`0.025`,`0.50`,`0.975`,HDPI_high,
+  select(mean,HDPI_low,HDPI_high,
          "dnds","genes_corrected","site_merge","aachange") %>%
   distinct()
 
-dnds_cor_test <- cor.test(coefficients_dnds$`0.50`,log10(coefficients_dnds$dnds))
+dnds_cor_test <- cor.test(coefficients_dnds$mean,log10(coefficients_dnds$dnds))
 dnds_site_plot <- coefficients_dnds %>%
   ggplot(aes(x = dnds,
-             y = `0.50`,
-             ymax = `0.025`,
-             ymin = `0.975`)) +
+             y = mean,
+             ymax = HDPI_low,
+             ymin = HDPI_high)) +
   geom_smooth(method = 'lm',linetype = 2,color = 'black',
               alpha = 0.05,
               formula = y ~ x - 1) + 
@@ -277,7 +302,7 @@ dnds_site_plot <- coefficients_dnds %>%
   theme(legend.position = "bottom") +
   xlab('log(Site-specific dN/dS)') + 
   ylab("Genetic clone growth coefficient") + 
-  scale_y_continuous(limits = c(-0.2,0.5)) + 
+  scale_y_continuous() + 
   scale_x_continuous(trans='log10') + 
   #ggtitle("dN/dS associations with genetic growth coefficients") + 
   ggsave(useDingbats=FALSE,filename = sprintf("figures/%s/dnds/dnds.pdf",model_id),
@@ -306,23 +331,27 @@ dnds_gene <- rbind(
 ) %>%
   mutate(Gene=as.character(Gene))
 
-values_b_gene <- values_model$b_gene_values[[1]] 
-values_b_gene$Gene <- rep(values_model$training_subset$unique_gene,
-                          each = length(unique(values_model$b_gene_values[[1]]$labels)))
-values_b_gene <- values_b_gene %>% 
-  spread(key = "labels",value = "values") %>% 
-  mutate(Truncating = grepl('[0-9A-Z]t',Gene)) %>%
-  mutate(Gene = as.character(str_match(Gene,'[0-9A-Z]+'))) %>%
-  select(-variable) 
+values_b_gene <- r_values %>%
+  select(
+    mean = b_gene,
+    HDPI_low = b_gene_005,
+    HDPI_high = b_gene_095,
+    b_gene_var,
+    gene = genes
+  ) %>%
+  distinct %>%
+  mutate(Truncating = grepl(pattern = '[A-Z0-9]t',x = gene)) %>% 
+  mutate(Gene = str_match(gene,'[A-Z0-9]+'))
+  
 coefficients_dnds_gene <- values_b_gene %>%
   merge(dnds_gene,by = c("Gene","Truncating"))
-dnds_cor_test_gene <- cor.test(coefficients_dnds_gene$`0.50`,log10(coefficients_dnds_gene$Value))
+dnds_cor_test_gene <- cor.test(coefficients_dnds_gene$mean,log10(coefficients_dnds_gene$Value))
 dnds_gene_plot <- coefficients_dnds_gene %>%
-  ggplot(aes(y=`0.50`,ymin=`0.025`,ymax=`0.975`,
+  ggplot(aes(y=mean,ymin=HDPI_low,ymax=HDPI_high,
              x=Value,xmin=Value_0025,xmax=Value_0975,
              color=Gene,shape = Truncating)) + 
   geom_smooth(method = 'glm',inherit.aes=F,
-              mapping = aes(y=`0.50`,x=Value),
+              mapping = aes(y=mean,x=Value),
               color='black',linetype=2,
               alpha=0.05,
               formula = y ~ x - 1) + 
@@ -370,7 +399,7 @@ fuller_data <- merge(load_data(),blood_count_data,by = c("SardID","Phase")) %>%
 complete_blood_counts <- fuller_data %>%
   group_by(SardID) %>%
   mutate(relative_timepoint = Phase - min(Phase) + 1) %>% 
-  select(SardID,Phase,VAF,Age,amino_acid_change,relative_timepoint,
+  select(SardID,Phase,Age,relative_timepoint,Gender,
          RBC,HB,MCV,MCH,WBC,NEUT_PERC,LYMPH_PERC,MONO_PERC,EOS_PERC,BASO_PERC,
          PLT,Glucose,SerumInsulin,BLoodUreaNitrogen,Creatinine,ALT = ALT.y,AST,GGT,Fibrinogen,
          TotalCholesterol,HDLcholesterol,Triglycerides,Iron,Transferrin,UricAcid,ESR,Phase,Age) %>%
@@ -385,647 +414,40 @@ complete_blood_counts <- fuller_data %>%
     BASO = WBC * BASO_PERC/100,
     EOS = WBC * EOS_PERC/100
   ) %>%
-  mutate(GRAN = NEUT + BASO + EOS)
-```
+  mutate(GRAN = NEUT + BASO + EOS) %>%
+  distinct %>% 
+  subset(complete == T) %>% 
+  gather(key = "par",value = "val",-SardID,-Phase,-Age,-relative_timepoint,-complete,-Gender) 
 
-Latent class mixture models allow us to define different classes for time series. For our case, the time series we consider here are those described by blood count and chemistry parameters through time, allowing us to stratify individuals based on their growth. This was inspired by [this work](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6819541/pdf/12889_2019_Article_7752.pdf).
-
-```{r prepare_lcmm}
-complete_blood_counts_lcmm <- complete_blood_counts %>% 
-  subset(!(SardID %in% c(load_excluded_individuals(),load_excluded_individuals_lymph()))) %>%
-  merge(distinct(select(full_data,SardID,Gender)),by = "SardID",all = F) %>%
-  group_by(SardID) %>%
-  mutate(MinAge = min(Age),
-         Age = Age - min(Age),
-         subject = as.numeric(SardID)) %>%
-  distinct()
-
-LINK <- "linear"
-MIXTURE_FORMULA <- formula(" ~ Age + Age:factor(Gender) + factor(Gender)")
-
-LCMM_MODELS <- list()
-```
-
-```{r lcmm_esr, fig.height=10,fig.width=5}
-LCMM_MODELS$ESR <- list()
-
-lcmm_fit <- lcmm(
-  fixed = ESR ~ Age +  Age:factor(Gender) + factor(Gender),
-  random = ~ 1,
-  subject = "subject",
-  mixture = MIXTURE_FORMULA,
-  data = as.data.frame(complete_blood_counts_lcmm),
-  link = LINK,
-  idiag = T,
-  ng = 2)
-
-LCMM_MODELS$ESR$MODEL_FULL <- lcmm(
-  fixed = ESR ~ Age +  Age:factor(Gender) + factor(Gender),
-  random = ~ 1,
-  subject = "subject",
-  data = as.data.frame(complete_blood_counts_lcmm),
-  link = LINK,
-  idiag = 1)
-
-summary(lcmm_fit)
-
-tmp <- which.max(table(lcmm_fit$pprob$class))
-
-if (tmp == 1) {
-  lcmm_fit$pprob <- data.frame(
-    subject = lcmm_fit$pprob$subject,
-    class = lcmm_fit$pprob$class,
-    prob1 = lcmm_fit$pprob$prob1,
-    prob2 = lcmm_fit$pprob$prob2
-  )
-} else {
-  lcmm_fit$pprob <- data.frame(
-    subject = lcmm_fit$pprob$subject,
-    class = 3 - lcmm_fit$pprob$class,
-    prob1 = lcmm_fit$pprob$prob2,
-    prob2 = lcmm_fit$pprob$prob1
-  )
-}
-
-LCMM_MODELS$ESR$MODEL <- lcmm_fit
-LCMM_MODELS$ESR$TRAJECTORIES <- complete_blood_counts_lcmm %>%
-  merge(lcmm_fit$pprob,by = "subject") %>%
-  mutate(class = factor(ifelse(class == 1,'A','B'),levels=c("A","B"))) %>%
-  ggplot(aes(x = Age,y = ESR)) + 
-  geom_line(aes(group = SardID),alpha = 0.5,colour = 'grey') +
-  facet_wrap( ~ class) +
-  geom_smooth(method = 'loess',formula = y ~ x,span = 0.8,method.args = list(degree = 1),
-              colour = 'black',fill = 'grey20') + 
-  theme_gerstung(base_size = 15) + 
-  theme(legend.position = 'bottom') + 
-  xlab("Years since study entry")
-
-LCMM_MODELS$ESR$BOXPLOT <- r_values %>%
-  select(individual,coefficient,b_clone) %>%
-  group_by(individual) %>%
-  filter((b_clone) == max(b_clone)) %>%
-  distinct() %>%
-  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject",all.y = T) %>%
-  mutate(class = factor(ifelse(class == 1,'A','B'),levels=c("A","B"))) %>%
-  mutate(b_clone = ifelse(is.na(b_clone),0,b_clone)) %>% 
-  ggplot(aes(x = as.factor(class),y = b_clone)) + 
-  geom_boxplot(alpha = 0.8) + 
-  geom_signif(comparisons = list(c("A","B")),
-                map_signif_level = function(x) return(paste("p-value =",round(x,4))),
-              test = wilcox.test) + 
-  stat_summary(geom = 'text',
-               fontface = 'italic',
-               fun.data = function(x) return(list(y = 0.22,label = sprintf('n = %s',length(x))))) +
-  xlab("Trajectory type") + 
-  ylab("Growth effect") + 
-  theme_gerstung(base_size = 15) 
-```
-
-```{r lcmm_wbc, fig.height=10,fig.width=5}
-LCMM_MODELS$WBC <- list()
-
-lcmm_fit <- lcmm(
-  fixed = WBC ~ Age + Age:factor(Gender) + factor(Gender),
-  random = ~ 1,
-  subject = "subject",
-  mixture = MIXTURE_FORMULA,
-  data = as.data.frame(complete_blood_counts_lcmm),
-  link = LINK,
-  idiag = T,
-  ng = 2)
-
-LCMM_MODELS$WBC$MODEL_FULL <- lcmm(
-  fixed = WBC ~ Age +  Age:factor(Gender) + factor(Gender),
-  random = ~ 1,
-  subject = "subject",
-  data = as.data.frame(complete_blood_counts_lcmm),
-  link = LINK,
-  idiag = 1)
-
-summary(lcmm_fit)
-
-tmp <- which.max(table(lcmm_fit$pprob$class))
-
-if (tmp == 1) {
-  lcmm_fit$pprob <- data.frame(
-    subject = lcmm_fit$pprob$subject,
-    class = lcmm_fit$pprob$class,
-    prob1 = lcmm_fit$pprob$prob1,
-    prob2 = lcmm_fit$pprob$prob2
-  )
-} else {
-  lcmm_fit$pprob <- data.frame(
-    subject = lcmm_fit$pprob$subject,
-    class = 3 - lcmm_fit$pprob$class,
-    prob1 = lcmm_fit$pprob$prob2,
-    prob2 = lcmm_fit$pprob$prob1
-  )
-}
-
-LCMM_MODELS$WBC$MODEL <- lcmm_fit
-LCMM_MODELS$WBC$TRAJECTORIES <- complete_blood_counts_lcmm %>%
-  merge(lcmm_fit$pprob,by = "subject") %>%
-  mutate(class = factor(ifelse(class == 1,'A','B'),levels=c("A","B"))) %>%
-  ggplot(aes(x = Age,y = WBC)) + 
-  geom_line(aes(group = SardID),alpha = 0.5,colour = 'grey') +
-  facet_wrap( ~ class) +
-  geom_smooth(method = 'loess',formula = y ~ x,span = 0.8,method.args = list(degree = 1),
-              colour = 'black',fill = 'grey20') + 
-  theme_gerstung(base_size = 15) + 
-  theme(legend.position = 'bottom') + 
-  xlab("Years since study entry")
-
-LCMM_MODELS$WBC$BOXPLOT <- r_values %>%
-  select(individual,coefficient,b_clone) %>%
-  group_by(individual) %>%
-  filter((b_clone) == max(b_clone)) %>%
-  distinct() %>%
-  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject",all.y = T) %>%
-  mutate(class = factor(ifelse(class == 1,'A','B'),levels=c("A","B"))) %>%
-  mutate(b_clone = ifelse(is.na(b_clone),0,b_clone)) %>% 
-  ggplot(aes(x = as.factor(class),y = b_clone)) + 
-  geom_boxplot(alpha = 0.8) + 
-  geom_signif(comparisons = list(c("A","B")),
-                map_signif_level = function(x) return(paste("p-value =",round(x,4))),
-              test = wilcox.test) + 
-  stat_summary(geom = 'text',
-               fontface = 'italic',
-               fun.data = function(x) return(list(y = 0.22,label = sprintf('n = %s',length(x))))) +
-  xlab("Trajectory type") + 
-  ylab("Growth effect") + 
-  theme_gerstung(base_size = 15) 
-```
-
-```{r lcmm_hb, fig.height=10,fig.width=5}
-LCMM_MODELS$HB <- list()
-
-lcmm_fit <- lcmm(
-  fixed = HB ~ Age + Age:factor(Gender) + factor(Gender),
-  random = ~ 1,
-  subject = "subject",
-  mixture = MIXTURE_FORMULA,
-  data = as.data.frame(complete_blood_counts_lcmm),
-  link = LINK,
-  idiag = T,
-  ng = 2)
-
-LCMM_MODELS$HB$MODEL_FULL <- lcmm(
-  fixed = HB ~ Age +  Age:factor(Gender) + factor(Gender),
-  random = ~ 1,
-  subject = "subject",
-  data = as.data.frame(complete_blood_counts_lcmm),
-  link = LINK,
-  idiag = T)
-
-summary(lcmm_fit)
-
-tmp <- which.max(table(lcmm_fit$pprob$class))
-
-if (tmp == 1) {
-  lcmm_fit$pprob <- data.frame(
-    subject = lcmm_fit$pprob$subject,
-    class = lcmm_fit$pprob$class,
-    prob1 = lcmm_fit$pprob$prob1,
-    prob2 = lcmm_fit$pprob$prob2
-  )
-} else {
-  lcmm_fit$pprob <- data.frame(
-    subject = lcmm_fit$pprob$subject,
-    class = 3 - lcmm_fit$pprob$class,
-    prob1 = lcmm_fit$pprob$prob2,
-    prob2 = lcmm_fit$pprob$prob1
-  )
-}
-
-LCMM_MODELS$HB$MODEL <- lcmm_fit
-LCMM_MODELS$HB$TRAJECTORIES <- complete_blood_counts_lcmm %>%
-  merge(lcmm_fit$pprob,by = "subject") %>%
-  mutate(class = factor(ifelse(class == 1,'A','B'),levels=c("A","B"))) %>%
-  ggplot(aes(x = Age,y = HB)) + 
-  geom_line(aes(group = SardID),alpha = 0.5,colour = 'grey') +
-  facet_wrap( ~ class) +
-  geom_smooth(method = 'loess',formula = y ~ x,span = 0.8,method.args = list(degree = 1),
-              colour = 'black',fill = 'grey20') + 
-  theme_gerstung(base_size = 15) + 
-  theme(legend.position = 'bottom') + 
-  xlab("Years since study entry")
-
-LCMM_MODELS$HB$BOXPLOT <- r_values %>%
-  select(individual,coefficient,b_clone) %>%
-  group_by(individual) %>%
-  filter((b_clone) == max(b_clone)) %>%
-  distinct() %>%
-  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject",all.y = T) %>%
-  mutate(class = factor(ifelse(class == 1,'A','B'),levels=c("A","B"))) %>%
-  mutate(b_clone = ifelse(is.na(b_clone),0,b_clone)) %>% 
-  ggplot(aes(x = as.factor(class),y = b_clone)) + 
-  geom_boxplot(alpha = 0.8) + 
-  geom_signif(comparisons = list(c("A","B")),
-                map_signif_level = function(x) return(paste("p-value =",round(x,4))),
-              test = wilcox.test) + 
-  stat_summary(geom = 'text',
-               fontface = 'italic',
-               fun.data = function(x) return(list(y = 0.22,label = sprintf('n = %s',length(x))))) +
-  xlab("Trajectory type") + 
-  ylab("Growth effect") + 
-  theme_gerstung(base_size = 15) 
-```
-
-```{r lcmm_plt, fig.height=10,fig.width=5}
-LCMM_MODELS$PLT <- list()
-
-lcmm_fit <- lcmm(
-  fixed = PLT ~ Age + Age:factor(Gender) + factor(Gender),
-  random = ~ 1,
-  subject = "subject",
-  mixture = MIXTURE_FORMULA,
-  data = as.data.frame(complete_blood_counts_lcmm),
-  link = LINK,
-  idiag = T,
-  ng = 2)
-
-LCMM_MODELS$PLT$MODEL_FULL <- lcmm(
-  fixed = PLT ~ Age +  Age:factor(Gender) + factor(Gender),
-  random = ~ 1,
-  subject = "subject",
-  data = as.data.frame(complete_blood_counts_lcmm),
-  link = LINK,
-  idiag = 1)
-
-summary(lcmm_fit)
-
-tmp <- which.max(table(lcmm_fit$pprob$class))
-
-if (tmp == 1) {
-  lcmm_fit$pprob <- data.frame(
-    subject = lcmm_fit$pprob$subject,
-    class = lcmm_fit$pprob$class,
-    prob1 = lcmm_fit$pprob$prob1,
-    prob2 = lcmm_fit$pprob$prob2
-  )
-} else {
-  lcmm_fit$pprob <- data.frame(
-    subject = lcmm_fit$pprob$subject,
-    class = 3 - lcmm_fit$pprob$class,
-    prob1 = lcmm_fit$pprob$prob2,
-    prob2 = lcmm_fit$pprob$prob1
-  )
-}
-
-LCMM_MODELS$PLT$MODEL <- lcmm_fit
-LCMM_MODELS$PLT$TRAJECTORIES <- complete_blood_counts_lcmm %>%
-  merge(lcmm_fit$pprob,by = "subject") %>%
-  mutate(class = factor(ifelse(class == 1,'A','B'),levels=c("A","B"))) %>%
-  ggplot(aes(x = Age,y = PLT)) + 
-  geom_line(aes(group = SardID),alpha = 0.5,colour = 'grey') +
-  facet_wrap( ~ class) +
-  geom_smooth(method = 'loess',formula = y ~ x,span = 0.8,method.args = list(degree = 1),
-              colour = 'black',fill = 'grey20') + 
-  theme_gerstung(base_size = 15) + 
-  theme(legend.position = 'bottom') + 
-  xlab("Years since study entry")
-
-LCMM_MODELS$PLT$BOXPLOT <- r_values %>%
-  select(individual,coefficient,b_clone) %>%
-  group_by(individual) %>%
-  filter((b_clone) == max(b_clone)) %>%
-  distinct() %>%
-  merge(lcmm_fit$pprob,by.x = "individual",by.y = "subject",all.y = T) %>%
-  mutate(class = factor(ifelse(class == 1,'A','B'),levels=c("A","B"))) %>%
-  mutate(b_clone = ifelse(is.na(b_clone),0,b_clone)) %>% 
-  ggplot(aes(x = as.factor(class),y = b_clone)) + 
-  geom_boxplot(alpha = 0.8) + 
-  geom_signif(comparisons = list(c("A","B")),
-                map_signif_level = function(x) return(paste("p-value =",round(x,4))),
-              test = wilcox.test) + 
-  stat_summary(geom = 'text',
-               fontface = 'italic',
-               fun.data = function(x) return(list(y = 0.22,label = sprintf('n = %s',length(x))))) +
-  xlab("Trajectory type") + 
-  ylab("Growth effect") + 
-  theme_gerstung(base_size = 15) 
-```
-
-```{r visualise_all_lcmm,fig.height = 6.5,fig.width = 14}
-plot_grid(
-  plot_grid(LCMM_MODELS$WBC$TRAJECTORIES + 
-              theme(plot.title = element_text(hjust = 0.5)) + 
-              xlab("") + 
-              ylab(bquote('WBC'~(10^3/uL))),
-            LCMM_MODELS$WBC$BOXPLOT + 
-              xlab("") + 
-              ylab("Mutation-independent effect") + 
-              theme(panel.grid.major.x = element_blank()),
-            ncol = 1,
-            rel_heights = c(0.9,0.8)),
-  plot_grid(LCMM_MODELS$HB$TRAJECTORIES + 
-              theme(plot.title = element_text(hjust = 0.5)) + 
-              ylab("Hb (g/dL)"),
-            LCMM_MODELS$HB$BOXPLOT + 
-              ylab("") + 
-              theme(panel.grid.major.x = element_blank()),
-            ncol = 1,
-            rel_heights = c(0.9,0.8)),
-  plot_grid(LCMM_MODELS$PLT$TRAJECTORIES + 
-              theme(plot.title = element_text(hjust = 0.5)) + 
-              xlab("") +
-              ylab(bquote('Plt'~(10^3/uL))),
-            LCMM_MODELS$PLT$BOXPLOT + 
-              xlab("") + 
-              ylab("") + 
-              theme(panel.grid.major.x = element_blank()),
-            ncol = 1,
-            rel_heights = c(0.9,0.8)),
-  plot_grid(LCMM_MODELS$ESR$TRAJECTORIES + 
-              theme(plot.title = element_text(hjust = 0.5)) + 
-              xlab("") + 
-              ylab("ESR (mm/h)"),
-            LCMM_MODELS$ESR$BOXPLOT + 
-              xlab("") + 
-              ylab("") + 
-              theme(panel.grid.major.x = element_blank()),
-            ncol = 1,
-            rel_heights = c(0.9,0.8)),
-  nrow = 1
-) + 
-  ggsave(useDingbats=FALSE,filename = sprintf("figures/%s/phenotype_associations/FigureBloodCounts.pdf",model_id),
-         height = 6.5,width = 14) +
-  ggsave(filename = sprintf("figures/%s/phenotype_associations/FigureBloodCounts.svg",model_id),
-         height = 6.5,width = 14)
-```
-
-We can also analyse this data if we consider each blood count/chemistry parameter trajectory independently and calculate its slope and average value. These values can then be used in a simple model as predictors of unknown growth effects. We also use the LCMM model trajectory probabilities in a second linear model to assess their utility in these scenarios. 
-
-```{r linear_model_blood_counts,fig.width=10,fig.height=4} 
-model_probs <- list(select(LCMM_MODELS$ESR$MODEL$pprob,SardID=subject,ESR_traj_B=prob2), 
-                    select(LCMM_MODELS$WBC$MODEL$pprob,SardID=subject,WBC_traj_B=prob2),
-                    select(LCMM_MODELS$HB$MODEL$pprob,SardID=subject,HB_traj_B=prob2),
-                    select(LCMM_MODELS$PLT$MODEL$pprob,SardID=subject,PLT_traj_B=prob2)
-                    ) %>% 
-  reduce(left_join, by = "SardID") 
-           
-slope <- function(x,y) {
-  s_x <- sum(x)
-  s_x2 <- sum(x^2)
-  s_y <- sum(y)
-  s_xy <- sum(x*y)
-  return((s_xy - s_x * s_y) / (s_x2 - s_x^2))
-}                             
-
-data_linear_model <- merge(load_data(),blood_count_data,by = c("SardID","Phase"),all.y = T) %>% 
-  group_by(SardID) %>%
-  mutate(MeanAge = mean(Age)) %>% 
-  group_by(SardID,Gender,MeanAge) %>%
+slopes_and_means <- complete_blood_counts %>% 
+  subset(!is.na(val)) %>% 
+  group_by(SardID,par,Gender) %>%
   summarise(
-    WBC_mean = mean(WBC),
-    Hb_mean = mean(HB),
-    Plt_mean = mean(PLT),
-    ESR_mean = mean(ESR),
-    WBC_slope = slope(Age,WBC),
-    Hb_slope = slope(Age,HB),
-    Plt_slope = slope(Age,PLT),
-    ESR_slope = slope(Age,ESR)
-  ) %>% 
-  merge(distinct(select(r_values,"individual","b_clone","coefficient","site")),by.x = "SardID",by.y = "individual",all.x = T)  %>% 
-  merge(model_probs,by = "SardID",all=T)
+    mean = mean(val),
+    slope = ifelse(length(Phase) > 2,
+                   sum((Age - mean(Age)) * (val - mean(val))) / sum((Age-mean(Age))^2),
+                   NA),
+    meanAge = mean(Age)
+  )
+```
 
-data_linear_model <- data_linear_model[
-  apply(data_linear_model[,4:11],1,function(x) !any(is.na(x))),
-] 
-data_linear_model[,c(3:11,15:18)] <- apply(data_linear_model[,c(3:11,15:18)],2,scale)
-data_linear_model <- data_linear_model %>% 
-  mutate(b_clone = ifelse(is.na(b_clone),0,b_clone),
-         coefficient = exp(ifelse(is.na(coefficient),0,coefficient))) %>%
+```{r }
+blood_and_clonal_data <- slopes_and_means %>%
+  merge(Parameters_Age,by.x = "SardID",by.y = "individual") %>%
   group_by(SardID) %>%
-  filter(abs(b_clone) == max(abs(b_clone)))
+  filter(b_clone_mean + b_gene_mean + b_site_mean == max(b_clone_mean + b_gene_mean + b_site_mean))
 
-linear_model_slopes <- lm(
-  b_clone ~ WBC_mean + Hb_mean + Plt_mean + ESR_mean + WBC_slope + Hb_slope + Plt_slope + ESR_slope + MeanAge + Gender,
-  data = data_linear_model) 
+associations <- unique(blood_and_clonal_data$par) %>%
+  lapply(
+    function(x) {
+      tmp_data <- subset(blood_and_clonal_data,par == x)
+      lm(b_clone_mean ~ mean + slope + meanAge + Gender,tmp_data) %>%
+        return
+    }
+  )
 
-linear_model_traj_probs <- lm(
-  b_clone ~ WBC_mean + Hb_mean + Plt_mean + ESR_mean + ESR_traj_B + WBC_traj_B + HB_traj_B + PLT_traj_B + MeanAge + Gender,
-  data = data_linear_model
-)
-
-lm_res_plot <- data.frame(
-  b_clone = data_linear_model$b_clone,
-  Slopes = predict(linear_model_slopes,data_linear_model),
-  Trajectories = predict(linear_model_traj_probs,data_linear_model)
-) %>% 
-  gather("key","value",Slopes,Trajectories) %>%
-  ggplot(aes(x = b_clone,y = b_clone)) +
-  geom_abline(slope = 1,size = 1.5) +
-  geom_segment(aes(xend = b_clone,yend = value,colour = key),alpha = 0.2) + 
-  geom_point(aes(y = value,colour = key),alpha=0.5) + 
-  scale_color_aaas(name = "Model") + 
-  theme_gerstung(base_size = 15) + 
-  theme(legend.position = "bottom") + 
-  xlab("Unknown effect") + 
-  ylab("Unknown effect")
-
-lmss <- summary(linear_model_slopes)
-lmtps <- summary(linear_model_traj_probs)
-lm_coef_plot <- data.frame(coefficient = c(lmss$coefficients[,1],lmtps$coefficients[,1]),
-           std_error = c(lmss$coefficients[,2],lmtps$coefficients[,2]),
-           p.val = c(lmss$coefficients[,4],lmtps$coefficients[,4]),
-           names = c(rownames(lmss$coefficients),rownames(lmtps$coefficients)),
-           model = c(rep(sprintf("Slopes\n(Adj. R sq. = %.4f)",lmss$adj.r.squared),nrow(lmss$coefficients)),
-                     rep(sprintf("Trajectories\n(Adj. R sq. = %.4f)",lmtps$adj.r.squared),nrow(lmtps$coefficients)))
-           ) %>% 
-  mutate(signif = cut(p.val,breaks = c(0,0.001,0.01,0.05,0.1,1),labels = c("***","**","*",".","n.s."))) %>%
-  mutate(namesGroup = ifelse(
-    grepl("_mean",names),
-    "Mean",
-    ifelse(
-      grepl("_slope",names),
-      "Slope",
-      ifelse(
-        grepl("_traj_",names),
-        "Trajectories",
-        "Other"
-      )
-    )
-  )) %>% 
-  mutate(namesGroup = factor(namesGroup,levels = c("Mean","Slope","Trajectories","Other"))) %>% 
-  mutate(names = str_match(names,"[A-Za-z()]+")) %>% 
-  ggplot(aes(x = names,y = coefficient,colour = model)) + 
-  geom_hline(yintercept = 0,alpha = 0.7) +
-  geom_point() + 
-  geom_errorbar(aes(ymin = coefficient - std_error,ymax = coefficient + std_error),
-                width = 0.2) + 
-  geom_text(aes(label = signif,y = coefficient + std_error + 0.02),size=3) +
-  theme_gerstung(base_size = 15) + 
-  facet_wrap(~ model + namesGroup,scales = "free_x",nrow = 1) + 
-  rotate_x_text() + 
-  xlab("Parameters") + 
-  ylab("Coefficient") + 
-  scale_color_aaas() + 
-  theme(legend.position = "none",
-        strip.text.x = element_text(margin = margin(0,0,0,0, "cm")))
-
-plot_grid(lm_res_plot + theme(legend.position = "none"),lm_coef_plot,rel_widths = c(2,3.8)) %>%
-  plot_grid(get_legend(lm_res_plot),ncol=1,rel_heights = c(1,0.1))
-```
-
-From this analysis we can observe that using the slopes in this context does allows us to make relatively little conclusions between clonal growth and other factors (average parameter value ,trajectory membership and slopes). Apart from a positive association with Plt slope and a negative association with Plt mean in the slopes model, little else can be inferred from this.
-
-```{r compare_trajectories}
-trajectory_class_data <- rbind(
-  data.frame(LCMM_MODELS$ESR$MODEL$pprob[,c(1,2)],
-             Parameter = "ESR"),
-  data.frame(LCMM_MODELS$WBC$MODEL$pprob[,c(1,2)],
-             Parameter = "WBC"),
-  data.frame(LCMM_MODELS$HB$MODEL$pprob[,c(1,2)],
-             Parameter = "Hb"),
-  data.frame(LCMM_MODELS$PLT$MODEL$pprob[,c(1,2)],
-             Parameter = "Plt")
-) %>%
-  group_by(subject) %>%
-  mutate(N = sum(class == 2)) %>%
-  ungroup() %>%
-  arrange(N) %>%
-  mutate(subject = factor(subject,
-                          levels = rev(unique(subject)),
-                          ordered = T)) 
-
-N_trajectory_plot <- trajectory_class_data %>%
-  ggplot(aes(y = "N",x = subject,fill = N)) + 
-  geom_tile() +
-  scale_fill_material(palette = "blue") + 
-  theme_gerstung() +
-  scale_x_discrete(expand = c(0,0)) + 
-  scale_y_discrete(expand = c(0,0)) + 
-  theme(axis.text.x = element_blank(),
-        legend.position = 'none') + 
-  ylab("") + 
-  xlab("")
-
-class_trajectory_plot <- trajectory_class_data %>%
-  ggplot(aes(x = subject,y = Parameter,fill = as.factor(class))) + 
-  geom_tile(color = 'black') + 
-  theme_gerstung() + 
-  scale_x_discrete(expand = c(0,0)) + 
-  scale_y_discrete(expand = c(0,0)) +
-  theme(axis.text.x = element_blank(),
-        legend.position = 'bottom') +
-  scale_fill_lancet(name="Trajectory") + 
-  xlab("Individual")
-
-plot_grid(
-  N_trajectory_plot,
-  class_trajectory_plot,
-  ncol=1,
-  rel_heights = c(0.15,1.0),align = T
-)
-```
-
-```{r table_trajectory_coefficients}
-trajectory_coefficient_data <- rbind(
-  data.frame(coeff = c(coef(LCMM_MODELS$WBC$MODEL)[c(3,4)],
-                       coef(LCMM_MODELS$WBC$MODEL_FULL)[1]),
-             Parameter = "WBC",
-             class = c(1,2,"Full")),
-  data.frame(coeff = c(coef(LCMM_MODELS$HB$MODEL)[c(3,4)],
-                       coef(LCMM_MODELS$HB$MODEL_FULL)[1]),
-             Parameter = "Hb",
-             class = c(1,2,"Full")),
-  data.frame(coeff = c(coef(LCMM_MODELS$PLT$MODEL)[c(3,4)],
-                       coef(LCMM_MODELS$PLT$MODEL_FULL)[1]),
-             Parameter = "Plt",
-             class = c(1,2,"Full")),
-  data.frame(coeff = c(coef(LCMM_MODELS$ESR$MODEL)[c(3,4)],
-                       coef(LCMM_MODELS$ESR$MODEL_FULL)[1]),
-             Parameter = "ESR",
-             class = c(1,2,"Full"))
-)
-
-trajectory_coefficient_data %>% 
-  spread(key = "class",value = "coeff") %>%
-  mutate_if(.predicate = is.numeric,function(x) round(x,4))
-```
-
-To better assess the relevance of these data we need to compare them with reference values. A few studies ([here](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3446744/) and [here](https://www.jstage.jst.go.jp/article/geriatrics1964/28/4/28_4_509/_pdf/-char/ja)) have assessed this, so we can use them to approximate a reference value. 
-
-```{r reference_values}
-reference_values_women_HD <- data.frame(
-  Decade = c("50-59","60-69","70-79","80-89","+90"),
-  Decade_numeric = c(5,6,7,8,9),
-  Hb = c(12.1,10.5,10.2,9.3,8.8),
-  Plt = c(442.40,385.91,443.72,388.04,360.02),
-  WBC = c(4.6,3.2,4.5,4.2,4.0),
-  N = c(122,100,121,111,49),
-  Sex = "F",
-  Place = "HD"
-)
-reference_values_men_HD <- data.frame(
-  Decade = c("50-59","60-69","70-79","80-89","+90"),
-  Decade_numeric = c(5,6,7,8,9),
-  Hb = c(12.1,11.7,9.9,9.6,9.7),
-  Plt = c(136.5,123.9,82.8,104.8,137.4),
-  WBC = c(4.3,3.9,4.1,4.2,NA),
-  N = c(99,102,105,113,20),
-  Sex = "M",
-  Place = "HD"
-)
-
-reference_values_women_JP_1 <- data.frame(
-  Decade = c("50-59","60-69","70-79","80-89","+90"),
-  Decade_numeric = c(5,6,7,8,9),
-  Hb = c(13.6,13.3,NA,NA,NA),
-  Plt = c(235,244,NA,NA,NA),
-  WBC = c(5.4,5.5,NA,NA,NA),
-  N = c(152,33,NA,NA,NA),
-  Sex = "F",
-  Place = "JP"
-)
-reference_values_men_JP_1 <- data.frame(
-  Decade = c("50-59","60-69","70-79","80-89","+90"),
-  Decade_numeric = c(5,6,7,8,9),
-  Hb = c(15.3,15.0,14.6,NA,NA),
-  Plt = c(231,232,237,NA,NA),
-  WBC = c(6.3,6.1,5.9,NA,NA),
-  N = c(300,110,6,NA,NA),
-  Sex = "M",
-  Place = "JP"
-)
-
-reference_values_women_JP_2 <- data.frame(
-  Decade = c("50-59","60-69","70-79","80-89","+90"),
-  Decade_numeric = c(5,6,7,8,9),
-  Hb = c(NA,13.8,13.8,13.4,13.5),
-  Plt = c(NA,279,268,269,205),
-  WBC = c(NA,5.9,5.8,5.8,5.3),
-  N = c(NA,81,208,109,4),
-  Sex = "F",
-  Place = "JP"
-)
-reference_values_men_JP_2 <- data.frame(
-  Decade = c("50-59","60-69","70-79","80-89","+90"),
-  Decade_numeric = c(5,6,7,8,9),
-  Hb = c(NA,13.8,13.8,13.4,13.5),
-  Plt = c(NA,269,261,239,269),
-  WBC = c(NA,6.7,6.3,6.6,6.2),
-  N = c(NA,72,106,61,4),
-  Sex = "M",
-  Place = "JP"
-)
-
-reference_values <- rbind(
-  reference_values_women_HD,
-  reference_values_women_JP_1,
-  reference_values_women_JP_2,
-  reference_values_men_HD,
-  reference_values_men_JP_1,
-  reference_values_men_JP_2
-)
-
-glm(Hb ~ Decade_numeric + Place,data = reference_values,weights = reference_values$N) %>%
-  summary
-glm(Plt ~ Decade_numeric + Place,data = reference_values,weights = reference_values$N) %>%
-  summary 
-glm(WBC ~ Decade_numeric + Place,data = reference_values,weights = reference_values$N) %>%
-  summary
+associations %>%
+  lapply(summary) 
 ```
 
 ## Sex, smoking and other factors
@@ -1081,7 +503,7 @@ effect_distribution_gender <- full_data %>%
   geom_signif(comparisons = list(c("Male","Female")),
               map_signif_level = function(x) return(paste("p-value =",format(x,scientifier = T,digits = 4))),
               test = wilcox.test) + 
-  ylab("Genetic effect") + 
+  ylab("Driver gene effect") + 
   xlab("Sex") 
 
 gene_mutation_distribution_gender <- full_data %>%
@@ -1128,6 +550,16 @@ effect_distribution_gender %>%
 effect_distribution_gender %>% 
   ggsave(filename = sprintf("figures/%s/phenotype_associations/FigureGender.svg",model_id),
          width = 3.5,height = 4)
+
+D <- full_data %>% 
+  group_by(SardID,Gene,Gender) %>% 
+  summarise(Age = min(Age)) %>% 
+  distinct %>% 
+  group_by(SardID,Gender,Age) %>% 
+  summarise(HasU2AF1 = "U2AF1" %in% Gene)
+
+glm(HasU2AF1 ~ Gender + Age, data = D,
+    family = stats::binomial(link = "logit")) %>% summary
 
 plot_grid(gene_mutation_distribution_gender,effect_distribution_gender,nrow = 1,rel_widths = c(1,0.3)) + 
   ggsave(useDingbats=FALSE,filename = sprintf("figures/%s/phenotype_associations/FigureGenderWithBarplot.pdf",model_id),
@@ -1295,7 +727,7 @@ load_smoking_data() %>%
   theme(legend.position = 'bottom') + 
   scale_color_manual(values = gene_colours,name = NULL) + 
   xlab("Smoked") + 
-  ylab("Genetic effect") + 
+  ylab("Driver gene effect") + 
   ggsave(useDingbats=FALSE,filename = sprintf("figures/%s/phenotype_associations/FigureSmoking.pdf",model_id),
          width = 2.8,height = 4) +
   ggsave(filename = sprintf("figures/%s/phenotype_associations/FigureSmoking.svg",model_id),
@@ -1323,7 +755,7 @@ load_smoking_data() %>%
   group_by(SardID) %>%
   mutate(effect = coefficient) %>%
   filter(effect == max(effect)) %>% 
-  select(SardID,effect,status) %>%
+  select(SardID,effect,status,age) %>%
   mutate(status = ifelse(status == 'Never','No','Yes')) %>%
   distinct() %>% 
   ggplot(aes(x = status,y = effect)) + 
@@ -1336,7 +768,7 @@ load_smoking_data() %>%
   theme(legend.position = 'bottom') + 
   scale_color_manual(values = gene_colours,name = NULL) + 
   xlab("Smoked") + 
-  ylab("Genetic effect") + 
+  ylab("Driver gene effect") + 
   ggsave(filename = sprintf("figures/%s/phenotype_associations/FigureSmoking_2levels.svg",model_id),
          width = 3.5,height = 4) +
   ggsave(useDingbats=FALSE,filename = sprintf("figures/%s/phenotype_associations/FigureSmoking_2levels.pdf",model_id),
@@ -1353,17 +785,16 @@ smoking_clone_ages <- load_smoking_data() %>%
   group_by(SardID) %>%
   filter(phase == max(phase)) %>%
   ungroup() %>%
-  merge(clone_ages,by.x = "SardID",by.y = "individual") %>%
-  merge(select(subset(load_data_keep(),Gene %in% load_included_genes() | is.na(Gene)),Gender,SardID),
+  merge(Parameters_Age,by.x = "SardID",by.y = "individual",all.x = T) %>%
+  merge(distinct(select(subset(load_data_keep(),Gene %in% load_included_genes() | is.na(Gene)),Gender,SardID,age=Age)),
         by = "SardID",all.y = T) %>%
   mutate(individual = SardID) %>%
-  #merge(statistics_data,by = c("individual","site")) %>%
-  mutate(genes = str_match(genes,'[A-Z0-9]+')) %>%
+  mutate(genes = str_match(gene,'[A-Z0-9]+')) %>%
   group_by(SardID) %>%
-  mutate(effect = (CloneAgeHenryLower_adj + CloneAgeHenryUpper_adj)/2) %>%
+  mutate(effect = Mean) %>%
   filter(age == max(age)) %>%
   select(SardID,effect,site,CurrentSmoker, QuitYears,status,age,genes,Gender) %>% 
-  subset(effect > 18 & effect < 100) %>% 
+  #subset(effect > 18 & effect < 100) %>% 
   mutate(effect = age - effect) %>% 
   mutate(QuitYears = ifelse(CurrentSmoker == 'Y',0,QuitYears)) %>% 
   mutate(CurrentlySmoking = effect > QuitYears) %>%
@@ -1372,9 +803,10 @@ smoking_clone_ages <- load_smoking_data() %>%
 
 smoking_clone_ages %>% 
   ungroup() %>%
-  subset(AgeGroups <= 60) %>% 
+  subset(AgeGroups <= 60 | is.na(AgeGroups)) %>% 
+  subset(AgeGroups >= 15) %>% 
   mutate(AgeGroups = paste(AgeGroups,AgeGroups + INTERVAL,sep='-')) %>% 
-  mutate(AgeGroups = ifelse(AgeGroups == '10-20','18-20',AgeGroups)) %>%
+  mutate(AgeGroups = ifelse(AgeGroups == '15-20','18-20',AgeGroups)) %>%
   group_by(SardID,AgeGroups) %>%
   distinct() %>%
   summarise(NClones = length(site),
@@ -1443,9 +875,9 @@ load_smoking_data() %>%
 We have access to gene dosage data for different mutations which relate with JAK2 oncogenesis. We can, as such, test if they are in any way or form correlated with the unknown cause effect in JAK2, a gene whose unknown cause effects appear to be quite varied.
 
 ```{r}
-jak2_phenotype <- load_jak2_phenotype() %>%
+jak2_karyotype <- load_jak2_karyotype() %>%
   na.omit()
-jak2_phenotype %>%
+jak2_karyotype %>%
   na.omit() %>% 
   ggplot(aes(x = Genotype)) +
   geom_bar() + 
@@ -1454,18 +886,18 @@ jak2_phenotype %>%
   scale_y_continuous(breaks = seq(0,20,by=2)) + 
   ylab("Number of individuals")
 
-jak2_phenotype_and_effect <- r_values %>%
+jak2_karyotype_and_effect <- r_values %>%
   select(b_clone,SardID=individual,genes,age) %>%
   group_by(SardID) %>%
   filter(age == min(age)) %>% 
   distinct() %>% 
   subset(genes == 'JAK2') %>%
-  merge(jak2_phenotype,by = "SardID") %>%
+  merge(jak2_karyotype,by = "SardID") %>%
   select(-Dose) %>% 
   mutate(Chromosome = paste('Chr',Chromosome,sep='')) %>% 
   pivot_wider(names_from = c(Chromosome,Site),values_from = Genotype,names_sep = 'Site')
 
-jak2_phenotype_and_effect %>% 
+jak2_karyotype_and_effect %>% 
   gather("key","value",-SardID,-b_clone,-genes,-age) %>% 
   ggplot(aes(x = value,y = b_clone)) + 
   geom_point() +
@@ -1474,10 +906,10 @@ jak2_phenotype_and_effect %>%
   xlab("Genotype") + 
   ylab("Unknown cause effect")
 
-iou_genotype <- apply(t(combn(colnames(jak2_phenotype_and_effect)[5:16],2)),1,
+iou_genotype <- apply(t(combn(colnames(jak2_karyotype_and_effect)[5:16],2)),1,
       function(x) {
-        tmp <- data.frame(A = jak2_phenotype_and_effect[,x[1]],
-                          B = jak2_phenotype_and_effect[,x[2]]) %>% 
+        tmp <- data.frame(A = jak2_karyotype_and_effect[,x[1]],
+                          B = jak2_karyotype_and_effect[,x[2]]) %>% 
           table
         I <- sum(diag(tmp))
         U <- sum(tmp)
@@ -1487,14 +919,14 @@ iou_genotype <- apply(t(combn(colnames(jak2_phenotype_and_effect)[5:16],2)),1,
   as.data.frame(stringsAsFactors=F) %>%
   mutate(IoU = as.numeric(as.character(IoU)))
 
-all_chr_site <- colnames(jak2_phenotype_and_effect)[c(5:16)]
+all_chr_site <- colnames(jak2_karyotype_and_effect)[c(5:16)]
 all_chr_site <- all_chr_site[!(all_chr_site %in% iou_genotype$A[iou_genotype$IoU == 1])]
 
 lm_formula <- formula(
   paste('b_clone',paste(c(all_chr_site),collapse = ' + '),sep=' ~ ')
 )
 
-lm(formula = lm_formula,data = jak2_phenotype_and_effect) %>%
+lm(formula = lm_formula,data = jak2_karyotype_and_effect) %>%
   summary
 ```
 
