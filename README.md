@@ -40,7 +40,7 @@ This is the code required to run
 4. Analysis of the historical growth effect and poor fits
     1. Run `Notebook_HistoricalGrowth_PoorFits.Rmd` - this runs analyses which factors - technical and biological - may be determinant of the difference between historical and inferred growth and a fit being poor (having one or more outlier)
 
-5. Phylogenetic trees from single cell colines, the determination of growth per year and age at onset from these trees and comparison with estimates from longitudinal data
+5. Phylogenetic trees from single cell colonies, the determination of growth per year and age at onset from these trees and comparison with estimates from longitudinal data
     1. Run `Scripts/plot_tree.R` (`Rscript Scripts/plot_tree.R`) - this runs all of the aforementioned analysis and plots it as displayed in the manuscript
 
 *Optional: run `Scripts/plots_for_initial_panel.R`*
