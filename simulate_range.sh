@@ -1,7 +1,7 @@
 mut_rate_range="10 5 350"
 fitness_range="1 1 25"
 
-DIR=hsc_output
+DIR=hsc_output # output directory
 CLONEX_PATH=/homes/josegcpa/clonex/clonex
 mkdir -p $DIR
 
