@@ -22,6 +22,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r import_functions, include=FALSE}
+dir.create("figures",showWarnings = F)
 dir.create("figures/overdispersion/",showWarnings = F)
 source("Scripts/vaf_dynamics_functions.R")
 set.seed(42)
