@@ -1,16 +1,12 @@
-#' Function and constant library for "Paper name"
-
+#' Function and constant library for "The Natural History of Clonal Haematopoiesis"
 
 library(reticulate)
-#use_virtualenv("/homes/josegcpa/.virtualenvs/r-reticulate/",required = T)
 use_python('/homes/josegcpa/r-crap/bin/python3',required = T)
 Sys.setenv(LD_LIBRARY_PATH = paste(Sys.getenv('LD_LIBRARY_PATH'), "/homes/josegcpa/r-crap/lib", sep = ":"))
 Sys.setenv(PYTHONPATH="/homes/josegcpa/r-crap/lib/python3.6/site-packages")
 library(greta)
 library(ggplot2)
 library(ggpubr)
-library(ggmap)
-library(magrittr)
 library(tidyverse)
 library(bayesplot)
 library(openxlsx)
@@ -19,20 +15,15 @@ library(cowplot)
 library(ggsci)
 library(ggrepel)
 library(extraDistr)
-library(lme4)
-library(lmerTest)
-library(lcmm)
-library(glmnet)
-library(fda.usc)
 library(default)
 library(dendextend)
 library(ape)
-library(phylodyn)
 library(ggtree)
-INLA:::inla.dynload.workaround()
+library(grid)
+library(scatterpie)
+library(reghelper)
 
 select <- dplyr::select
-tf <- import("tensorflow")
 
 options(dplyr.summarise.inform = FALSE)
 
@@ -369,7 +360,9 @@ load_dnds <- function() {
 #' 
 #' @returns Returns the blood count data.
 load_blood_count_data <- function() {
+  RDW <- read.table("data/RDW.txt",header = T,sep = '\t')
   read.table("data/FBC_biochem.txt",header = T,sep = '\t') %>%
+    merge(RDW,by = c("SardID","phase"),all.x = T) %>%
     mutate(Phase = phase) %>%
     select(-phase) %>%
     return
@@ -405,10 +398,10 @@ load_comorbidity_data <- function() {
   return(tmp)
 }
 
-#' Load JAK2 karyotype data.
+#' Load JAK2 genotype data.
 #' 
-#' @returns Returns the JAK2 karyotype data.
-load_jak2_karyotype <- function() {
+#' @returns Returns the JAK2 genotype data.
+load_jak2_genotype <- function() {
   file_name <- "data/CHP_data.xlsx"
   all_workbook_names <- loadWorkbook(file = file_name)$sheet_names %>%
     as.list()
@@ -432,23 +425,40 @@ load_jak2_karyotype <- function() {
 }
 
 load_trees <- function() {
-  all_trees <- list.files('data/',pattern = "tree",full.names = T)
-  normal_trees <- grep('ultra',all_trees,invert = T,
-                       value = T)
-  ultra_trees <- grep('ultra',all_trees,
-                      value = T)
-  ids <- str_match(normal_trees,'id[0-9]+') %>%
+  all_trees <- list.files('data',pattern = "tree",full.names = T)
+  ids <- str_match(all_trees,'id[0-9]+') %>%
     gsub(pattern = "id",replacement = "") %>%
     as.vector()
   output <- list()
   for (I in ids) {
-    load(grep(I,normal_trees,value=T))
-    load(grep(I,ultra_trees,value=T))
+    load(grep(I,all_trees,value=T))
     output[[I]] <- list(
-      tree = tree_c,
-      tree_ultra = tree_c_ultra,
+      tree_ultra = tree_SNV_c_ultra,
       ID = I
     )
+  }
+  return(output)
+}
+
+load_tree_details <- function() {
+  all_details <- list.files('data',pattern = 'details_id',full.names = T)
+  ids <- str_match(all_details,'id[0-9]+') %>%
+    gsub(pattern = "id",replacement = "") %>%
+    as.vector()
+  output <- list()
+  for (I in ids) {
+    x <- load(grep(I,all_details,value=T))
+    if (I == "2259") {
+      output[[I]] <- list(
+        details = details5,
+        ID = I
+      )
+    } else {
+      output[[I]] <- list(
+        details = details3,
+        ID = I
+      )
+    }
   }
   return(output)
 }
@@ -657,7 +667,12 @@ subsample_formatted_data_timepoints <- function(formatted_data,timepoint = c(1))
     return
 }
 
-
+#' Extracts a set of summary statistics from MCMC draws
+#' 
+#' @param df the dataframe containing the draws
+#' @returns A dataframe containing mean, variance, 2.5%, 5%, 
+#' 50%, 95% and 97.5% quantiles and the high and low 95% highest posterior
+#' density interval
 variable_summaries <- function(df) {
   c_names <- colnames(df)
   out <- df %>% 
@@ -677,46 +692,51 @@ variable_summaries <- function(df) {
   return(out)
 }
 
+#' Calculates the age at onset assuming exponential growth, such as 
+#' vaf = exp(t * beta + alpha), with t as the time.
+#' 
+#' @param alpha the offset for the exponential model
+#' @param beta the coefficient for the time in the exponential model
+#' (fitness advantage)
+#' @param n the population size
+#' @returns the estimated age at onset
 t0 <- function(alpha,beta,n) {
   return((log(1/n) - alpha) / beta)
 }
 
+#' Calculates the age at onset assuming a biphasic growth with an 
+#' initial growth regime where growth is linear and a final growth
+#' regime where growth is approximately exponential
+#' 
+#' @param alpha the offset for the exponential model
+#' @param beta the coefficient for the time in the exponential model
+#' (fitness advantage)
+#' @param g number of generations per year
+#' @param n the population size
+#' @returns the estimated age at onset
 t0_adjusted <- function(alpha, beta, g, n) {
   X <- suppressWarnings((log(g/beta/n) - alpha - 1)/beta)
   return(X)
 }
 
+#' Probability of a population with N individuals reaching frequency 
+#' x with selective advantage s 
+#' 
+#' @param x the VAF to be tested
+#' @param N the population size
+#' @param s the fitness advantage
+#' @returns probability of a population with \code{N} individuals reaching 
+#' frequency \code{x} with selective advantage \code{s}
 rho <- function(x,N,s) {
-  # probability of population with N individuals reaching frequency x with selective advantage s
   return((1-exp(-N*s*x))/(1-exp(-N*s)))
 }
 
-fetch_examples <- function(full_data,mutation) {
-  sard_ids <- full_data %>%
-    subset(amino_acid_change == mutation) %>%
-    select(SardID) %>%
-    unlist() %>%
-    unique
-  full_data %>%
-    subset(SardID %in% sard_ids) %>%
-    return
-}
-
-fold_change <- function(points,data) {
-  df <- cbind(
-    points = points,
-    data = data
-  ) %>%
-    as.data.frame()
-  df <- df[order(df$points),]
-  rates <- matrix(0,nrow = nrow(df),ncol = 2)
-  for (r in 2:nrow(df)) {
-    rates[r,] <- c(df$data[r]/df$data[r-1],
-                   (df$points[r-1] + df$points[r])/2)
-  }
-  return(rates)
-}
-
+#' Calculates the highest posterior density for a set of values
+#' 
+#' @param samples the vector containing a set of values
+#' @param prob the probability to be contained in the interval
+#' @returns a vector containing the lower and upper bounds of the 
+#' HPDI
 HPDI <- function(samples,prob = 0.5) {
   samples <- sort(samples)
   n_samples <- length(samples)
@@ -730,13 +750,33 @@ HPDI <- function(samples,prob = 0.5) {
   return(output)
 }
 
+#' Convenience function to format plots
+#' 
+#' @param ... parameters for theme_minimal
+#' @returns a ggtheme object
 theme_gerstung <- function(...) {
+  args <- list(...)
+  if ("base_size" %in% names(args)) {
+    S <- args$base_size
+  } else {
+    S <- 11
+  }
   theme_minimal(...) + 
     theme(panel.grid = element_blank(),
           axis.line = element_line(),
-          axis.ticks = element_line())
+          axis.ticks = element_line(),
+          axis.text = element_text(size = S),
+          strip.text = element_text(size = S),
+          plot.title = element_text(size = S),
+          legend.text = element_text(size = S),
+          legend.title = element_text(size = S))
 }
 
+#' Cuts a tree into clades
+#' 
+#' @param tree a tree object
+#' @param depth depth at which to cut the tree
+#' @returns list containing all clades at depth \code{depth}
 cut_tree <- function(tree, depth){
   t <- length(tree$tip.label)
   d <- node.depth.edgelength(tree)
@@ -750,7 +790,11 @@ cut_tree <- function(tree, depth){
   return(clades)
 }
 
-# calculates 
+#' Times a branch in a tree
+#' 
+#' @param tree a tree object
+#' @param node the node to be timed
+#' @returns upper and lower bounds for branch timing
 time_mutation <- function(tree,node) {
   proceed <- T
   N <- node
@@ -769,7 +813,15 @@ time_mutation <- function(tree,node) {
   return(c(O - first_edge,O))
 }
 
-trajectory <- function(x=0:1000, t0=0, s=0.01, N=2e5, g=1){
+#' Clonal trajectory from an age at onset
+#' 
+#' @param x ages at which to calculate the number of cells
+#' @param t0 age at onset
+#' @param s fitness advantage
+#' @param N population size
+#' @param g number of generations per year
+#' @returns number of cells at times \code{x}
+trajectory_from_t0 <- function(x=0:1000, t0=0, s=0.01, N=2e5, g=1){
   s <- s/g
   t <- x-t0
   t <- t*g
@@ -782,10 +834,18 @@ trajectory <- function(x=0:1000, t0=0, s=0.01, N=2e5, g=1){
   return(y)
 }
 
+#' Clonal trajectory from model parameters
+#' 
+#' @param b fitness advantage
+#' @param u offset for the exponential model
+#' @param endpoint last timepoint for prediction
+#' @param N population size
+#' @param g number of generations per year
+#' @returns vaf until \code{endpoint}
 trajectory_from_parameters <- function(b,u,endpoint=50,N=2e5,g=13) {
   time_during_drift <- 1/b
   vaf_at_drift <- 1 / (2*N) * (g / b)
-  time_at_drift <- (logit(vaf_at_drift) - u)/b
+  time_at_drift <- (logit(vaf_at_drift*2) - u)/b
   time_drift <- seq(time_at_drift - time_during_drift,time_at_drift,
                     length.out = 100)
   vaf_drift <- seq(1/N,vaf_at_drift,length.out = 100)
@@ -803,12 +863,105 @@ trajectory_from_parameters <- function(b,u,endpoint=50,N=2e5,g=13) {
   ))
 }
 
-trajectory_from_parameters_unadjusted <- function(b,u,endpoint=50) {
-  time <- seq(0,endpoint,length.out = 100)
+#' Clonal trajectory from model parameters
+#' 
+#' @param b fitness advantage
+#' @param u offset for the exponential model
+#' @param x times at which to infer vaf
+#' @param N population size
+#' @param g number of generations per year
+#' @returns vaf at times \code{x}
+trajectory_from_parameters_2 <- function(b,u,x=c(-100:100),N=2e5,g=13) {
+  time_during_drift <- 1/b
+  vaf_at_drift <- 1 / (2*N) * (g / b)
+  time_at_drift <- (logit(vaf_at_drift*2) - u)/b
+  age_at_onset <- t0_adjusted(u,b,g,N)
+  if (!is.na(age_at_onset)) {
+    trajectory_drift <- data.frame(
+      x = seq(age_at_onset,max(x),length.out = 1000),
+      y = (0 + seq(0,max(x)-age_at_onset,length.out = 1000)) / N
+    )
+    trajectory_deterministic <- data.frame(
+      x = seq(age_at_onset,max(x),length.out = 1000),
+      y = 0.5 * inv.logit(b * seq(age_at_onset,max(x),length.out = 1000) + u)
+    )
+    trajectory <- ifelse(
+      trajectory_drift$x < time_at_drift,
+      trajectory_drift$y,
+      trajectory_deterministic$y
+    )
+    return(approx(trajectory_drift$x,trajectory,x))
+  } else {
+    return(data.frame(x=x,y=rep(NA,length(x))))
+  }
+}
+
+#' Clonal trajectory from model parameters without adjusting for 
+#' the stochastic phase
+#' 
+#' @param b fitness advantage
+#' @param u offset for the exponential model
+#' @param time times at which to infer vaf
+#' @returns vaf at \code{time}
+trajectory_from_parameters_unadjusted <- function(b,u,time) {
   vaf <- inv.logit(b * time + u) / 2
-  return(data.frame(
-    time = c(time),
-    af = c(vaf),
-    traj_type = c(rep("deterministic",100))
-  ))
+  return(vaf)
+}
+
+#' Formats numbers to appear in scientific notation for plotting
+#' 
+#' @param x numeric vector
+#' @returns scientific notation of \code{x}
+scientific <- function(x){
+  ifelse(x==0 | x == 0.5, x, parse(text=gsub("[+]", "", gsub("[0-9]e", "10^", scales::scientific_format()(x)))))
+}
+
+#' Convenience logical operator `and`
+#' 
+#' @param x boolean vector
+#' @param y boolean vector
+#' @returns x & y
+and <- function(x,y) {
+  return(x & y)
+}
+
+#' determines the onset given a vaf at an age at detection and a fitness 
+#' effect
+#' 
+#' @param b fitness effect
+#' @param vaf value of vaf at detection
+#' @param age_at_detection age at clone detection
+#' @param g generation time
+#' @param N population size
+#' @returns x & y
+onset_from_detection <- function(b,vaf,age_at_detection,g=2,N=0.5e5) {
+  vaf_at_drift <- 1 / (2*N) * (g / b)
+  if (b < 0) {
+    return(age_at_detection - vaf * (N*2))
+  }
+  if (vaf < vaf_at_drift) {
+    return(age_at_detection - vaf * (N*2))
+  } else {
+    time_during_drift <- 1/b
+    logit_vaf_at_drift <- log(vaf_at_drift/(1 - vaf_at_drift))
+    logit_vaf <- log(vaf/(1 - vaf))
+    u <- logit_vaf - b * age_at_detection
+    time_at_drift <- - (u - logit_vaf_at_drift)/b
+    return(time_at_drift - time_during_drift)
+  }
+}
+
+#' determines a threshold for Bonferroni-Hochberg multiple testing
+#' correction
+#' 
+#' @param p.val a vector of p-values
+#' @param fdr false discovery rate
+#' @returns a p-value threshold 
+bh_threshold <- function(p.val,fdr=0.05) {
+  n_t <- length(p.val)
+  spv <- sort(p.val)
+  n_alpha_n <- seq(1,n_t) * (fdr/n_t)
+  out <- n_alpha_n[max(which(spv < n_alpha_n))]
+  th <- ifelse(is.na(out),min(n_alpha_n),out)
+  return(th)
 }

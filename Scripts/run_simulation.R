@@ -9,7 +9,6 @@ all_files <- list.files(path = "hsc_output/",
                         full.names = T,
                         recursive = T,
                         pattern = "csv")
-pop_size <- 2e5
 
 min_age_data <- full_data %>%
   select(SardID,Age) %>%
@@ -24,7 +23,6 @@ min_age_data <- full_data %>%
 
 coverage_distr <- fitdistrplus::fitdist(full_data$TOTALcount/2,
                                         method = "mme",
-                                        #probs = c(0.1,0.9),
                                         distr = "gamma")
 min_age_distr <- fitdistrplus::fitdist(min_age_data,
                                        method = "mge",

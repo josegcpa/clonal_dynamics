@@ -1,0 +1,644 @@
+---
+title: "The Natural History of Clonal Haematopoiesis"
+subtitle: "Historical growth and its determinants; poor fits and their determinants"
+author: 
+    - José Guilherme de Almeida
+    - Moritz Gerstung
+output: 
+  html_document:
+    theme: lumen
+    highlight: tango
+    code_folding: hide
+    df_print: paged
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 4
+    number_sections: true
+--- 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,dpi = 300)
+```
+
+# Historical growth effect
+
+We here define historical growth effect as the growth effect calculated only from posterior samples which yield age at onset estimates which are larger than 0.
+
+```{r setup_data}
+pop_size <- 0.5e5
+source("Scripts/vaf_dynamics_functions.R")
+source("Scripts/prepare_data.R")
+model_file_name <- "models/model_ch.RDS"
+set.seed(42)
+model_id <- "model_ch"
+load(file = sprintf('data_output/vaf_modelling_coefficients_%s.Rdata',model_id))
+values_model <- readRDS(file = model_file_name)
+
+site_samples <- values_model$draws$`11`[,grep('site',colnames(values_model$draws$`11`))]
+gene_samples <- values_model$draws$`11`[,grep('gene',colnames(values_model$draws$`11`))]
+clone_samples <- values_model$draws$`11`[,grep('clone',colnames(values_model$draws$`11`))]
+offset_samples <- values_model$draws$`11`[,grep('u',colnames(values_model$draws$`11`))]
+beta_samples <- values_model$draws$`11`[,grep('beta',colnames(values_model$draws$`11`))] %>%
+  unlist()
+
+sampling_idxs <- r_values_full %>%
+  subset(b_site_095 + b_gene_095 + b_clone_095 > 0) %>%
+  group_by(
+    individual,site,
+    site_numeric,
+    gene_numeric,
+    clone_numeric
+  ) %>% 
+  summarise(
+    minAge = min(age[which(round(true/coverage,4) >= 0.005)]),
+    maxAge = max(age),
+    maxVAF = max(true/coverage)
+  ) %>%
+  arrange(site)
+
+c_names <- colnames(values_model$draws$`11`)
+
+good_sites_individual <- statistics_data %>%
+  ungroup %>% 
+  select(site,individual,sum_stat) %>%
+  filter(sum_stat) %>%
+  select(-sum_stat)
+```
+
+```{r calculate_historical_estimates}
+historical_estimates <- sampling_idxs %>%
+  apply(1,function(x) {
+    site_numeric <- as.numeric(x[3])
+    gene_numeric <- as.numeric(x[4])
+    clone_numeric <- as.numeric(x[5])
+    minAge <- as.numeric(x[6])
+    
+    if (is.na(site_numeric)) {
+      b_site <- 0} else {
+        b_site <- site_samples[,site_numeric]
+      }
+    b_gene <- gene_samples[,gene_numeric]
+    b_clone <- clone_samples[,clone_numeric]
+    b <- b_gene + b_clone + b_site
+    u_values <- offset_samples[,clone_numeric]
+    ages_at_onset <- t0_adjusted(u_values,b,g=2,n=pop_size) + values_model$min_age
+    biologically_feasible <- ages_at_onset > 0 & ages_at_onset < minAge
+    historical_b <- b[biologically_feasible]
+    Q <- quantile(historical_b,c(0.05,0.5,0.95),na.rm = T)
+    Q_observed <- quantile(b,c(0.05,0.5,0.95),na.rm = T)
+    names(Q) <- c("Q05","Q50","Q95")
+    return(data.frame(individual=x[1],
+                      site=x[2],
+                      observed_growth_q05=Q_observed[1],
+                      observed_growth_q50=Q_observed[2],
+                      observed_growth_q95=Q_observed[3],
+                      observed_growth_mean=mean(b,na.rm=T),
+                      historical_growth_q05=Q[1],
+                      historical_growth_q50=Q[2],
+                      historical_growth_q95=Q[3],
+                      historical_growth_mean=mean(historical_b,na.rm=T),
+                      min_age=minAge))
+  }) %>%
+  do.call(what=rbind)
+historical_estimates$gene <- str_match(historical_estimates$site,"[A-Z0-9]+")
+historical_estimates <- historical_estimates %>%
+  filter(paste(individual,site) %in% paste(good_sites_individual$individual,good_sites_individual$site))
+```
+
+## Comparing historical with observed growth
+
+We can see clearly a bias in terms of genes where the difference between historical and observed growth is concerned - particularly, the phase of clonal dynamics we are able to observe for *TP53*, *DNMT3A* and *BRCC3* is far too slow to explain the observed VAF.
+
+```{r historical_growth_plots,fig.height=2,fig.width=4}
+min_max <- c(
+  exp(min(historical_estimates$observed_growth_mean,historical_estimates$historical_growth_mean,na.rm=T))-1,
+  exp(max(historical_estimates$observed_growth_mean,historical_estimates$historical_growth_mean,na.rm=T))-1
+)
+
+growth_per_year_plot <- historical_estimates %>% 
+  ggplot(aes(x = exp(observed_growth_mean)-1,
+             y = exp(historical_growth_mean)-1,
+             colour = gene)) + 
+  geom_abline(slope = 1,
+              size = 0.2,
+              linetype=2) +
+  geom_point(size = 0.2) +
+  scale_y_continuous(limits = min_max,
+                     breaks = seq(-0.2,1,by = 0.2),
+                     expand = c(0.02,0),
+                     labels = sprintf("%s%%",seq(-0.2,1,by = 0.2)*100)) + 
+  scale_x_continuous(limits = min_max,
+                     breaks = seq(-0.2,1,by = 0.2),
+                     expand = c(0.02,0),
+                     labels = sprintf("%s%%",seq(-0.2,1,by = 0.2)*100)) + 
+  theme_gerstung(base_size = 6) + 
+  scale_colour_manual(values = gene_colours,guide = F) +
+  xlab("Observed growth per year") + 
+  ylab("Historical growth per year")
+
+growth_per_year_gene_plot <- historical_estimates %>%
+  group_by(gene) %>%
+  summarise(average_historical_growth = exp(mean(historical_growth_mean,na.rm=T))-1,
+            average_observed_growth = exp(mean(observed_growth_mean,na.rm=T))-1) %>% 
+  ggplot(aes(x = reorder(gene,average_observed_growth),
+             y = (average_observed_growth + average_historical_growth)/2,
+             width = 0.9,
+             height = average_historical_growth-average_observed_growth,
+             fill = gene)) +  
+  geom_tile(size = 0.2,color = "black") + 
+  geom_hline(yintercept = 0,size = 0.2) +
+  theme_gerstung(base_size = 6) + 
+  xlab("") + 
+  ylab("Growth per year") +
+  scale_y_continuous(breaks = seq(-0.2,1,by = 0.05),
+                     labels = sprintf("%s%%",seq(-0.2,1,by = 0.05)*100),
+                     expand = c(0,0,0.01,0)) + 
+  scale_x_discrete(expand = c(0.05,0.05)) + 
+  scale_fill_manual(values = gene_colours,guide = F) + 
+  rotate_x_text(face = "italic")
+
+plot_grid(growth_per_year_plot,growth_per_year_gene_plot,nrow=1,align = "h") +
+  ggsave(filename = sprintf("figures/%s/dynamic_coefficients/historical_growth_figure.pdf",model_id),
+         height = 2,
+         width = 4,
+         useDingbats = F)
+```
+
+## Investigating the determinants of the difference between historical and observed growth effect
+
+```{r historical_ratios}
+unique_genes <- historical_estimates %>%
+  group_by(gene) %>%
+  filter(length(unique(paste(individual,site))) > 10) %>%
+  select(gene) %>%
+  distinct %>%
+  unlist
+historical_estimates <- historical_estimates %>%
+  mutate(
+    ratio_q05 = exp(historical_growth_q05-observed_growth_q05),
+    ratio_q50 = exp(historical_growth_q50-observed_growth_q50),
+    ratio_q95 = exp(historical_growth_q95-observed_growth_q95),
+    ratio_mean = exp(historical_growth_mean-observed_growth_mean)
+  )
+```
+
+### Distribution by gene
+
+```{r historical_distribution_gene,fig.height=2,fig.width=2.5}
+historical_estimates %>%
+  group_by(gene) %>%
+  mutate(M = unlist(quantile(ratio_q50,c(0.5),na.rm = T))) %>%
+  ggplot(aes(x = reorder(gene,M),y = ratio_q50)) + 
+  geom_point(size = 0.5,position = position_jitter(width = 0.1)) +
+  geom_boxplot(outlier.size = 0,alpha = 0.7,size = 0.25) + 
+  coord_flip() + 
+  theme_gerstung(base_size = 6) +
+  theme(axis.text.y = element_text(face = "italic")) + 
+  ylab("Ratio of historical and observed annual fold change") + 
+  xlab("Gene")
+```
+
+### Association with recurrence and truncation status 
+
+```{r historical_recurrence_truncation,fig.width=2.5,fig.height=1}
+unique_site_multiple <- values_model$sub_data %>%
+  select(amino_acid_change,site_numeric_multiple) %>% 
+  subset(!is.na(site_numeric_multiple)) %>%
+  distinct %>%
+  arrange(site_numeric_multiple) %>%
+  select(amino_acid_change) %>%
+  unlist %>% 
+  as.character() %>% as.factor
+
+tmp <- historical_estimates %>%
+  mutate(truncating = grepl("[A-Z0-9]+t-",site)) %>% 
+  mutate(recurring = site %in% unique_site_multiple) %>%
+  mutate(f = paste(
+    ifelse(recurring,"Recurring","Non-recurring"),
+    ifelse(truncating,"truncating","non-truncating"),
+    sep = ' and\n'
+  ))
+
+anvar_test <- anova(glm(ratio_q50 ~ f,data = tmp),
+                    test = "F")
+tmp %>%
+  ggplot(aes(x = f,y = ratio_q50)) + 
+  geom_boxplot(outlier.size = 0.5,size = 0.25) + 
+  ylab("Ratio of historical and observed annual fold change") + 
+  xlab("") +
+  theme_gerstung(base_size = 6) + 
+  coord_flip() + 
+  scale_y_continuous() +
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_tnt_rec.pdf",model_id),
+         height = 1.2,width = 2.0) 
+anvar_test
+```
+
+### Association with gender and smoking
+
+We tested whether age, gender and smoking could explain a greater amount of variance than age alone and found no evidence for this.
+
+```{r historical_gender_smoking,fig.width=2,fig.height=1.3}
+smoking_gender_data <- load_smoking_data() %>% 
+  group_by(SardID) %>%
+  summarise(HasSmoked = any(PackYears>0)) %>%
+  merge(distinct(select(full_data,SardID,Gender))) %>%
+  select(individual = SardID,HasSmoked,Gender)
+
+historical_estimates_gender_smoking <- merge(
+  historical_estimates,smoking_gender_data,
+  by = c("individual")) 
+
+tmp <- historical_estimates_gender_smoking %>%
+  filter(!is.na(ratio_q50) & !is.na(HasSmoked) & !is.na(Gender) & !is.na(min_age))
+all_models <- list(
+  `All genes` = list(
+    m = glm(ratio_q50 ~ HasSmoked + Gender + min_age,data = tmp,
+            family = Gamma),
+    null_m = glm(ratio_q50 ~ min_age,data = tmp,
+                 family = Gamma)))
+
+for (g in unique_genes) {
+  x <- tmp %>% 
+    subset(gene == g)
+  all_models[[g]] <- list(
+    m = glm(ratio_q50 ~ HasSmoked + Gender + min_age,data = x,
+            family = Gamma),
+    null_m = glm(ratio_q50 ~ min_age,data = x,
+                 family = Gamma))
+}
+
+significance_df <- all_models %>% 
+  lapply(
+    function(x) anova(x$null_m,x$m,test="F")[2,c(5,6)]
+  ) %>%
+  do.call(what = rbind)
+significance_df$gene <- names(all_models)
+significance_df$SignificantAfterCorrection <- p.adjust(significance_df$`Pr(>F)`,method = "BH") < 0.05
+
+significance_df
+
+tmp %>% 
+  mutate(
+    L = paste(ifelse(Gender == "M","Male","Female"),
+              ifelse(HasSmoked == T,"\nhas smoked","\nnever smoked"),
+              sep = '')
+  ) %>%
+  ggplot(aes(x = L,y = ratio_q50, colour = Gender)) + 
+  geom_boxplot(size = 0.2,outlier.size = 0.5) + 
+  theme_gerstung(base_size = 6) + 
+  coord_flip() +
+  xlab("") + 
+  ylab("Ratio of historical and observed annual fold change") +
+  scale_y_continuous() +
+  scale_colour_aaas(guide = F)
+```
+
+### Associations with blood indices 
+
+Here, we test the association between blood indices and the historical/observed fold change ratio. We study only a few relevant blood indices - haemoglobin concentration (Hb), mean corpuscular volume (MCV), red cell distribution width (RDW), white blood cell count (WBC), neutrophyle, lymphocyte and monocyte absolute counts (Neut, Lymph and Mono, respectively), and platelet counts (Plt). To characterise these blood indices over time, we calculate their average value (Mean) and their dynamics assuming they follow a linear trend through time (Slope).
+
+```{r historical_blood_indices_preprocessing}
+stat_sign_individuals <- statistics_data %>%
+  group_by(individual,site) %>%
+  summarise(sig = sum(sum_stat == T) > 0) 
+
+blood_count_data <- load_blood_count_data()
+fuller_data <- merge(load_data_keep(),blood_count_data,by = c("SardID","Phase"),all.y = T) %>%
+  subset(!(SardID %in% c(load_excluded_individuals(),load_excluded_individuals_lymph()))) 
+
+complete_blood_counts <- fuller_data %>%
+  group_by(SardID) %>%
+  mutate(relative_timepoint = Phase - min(Phase) + 1) %>% 
+  transmute(
+    Phase,Age,relative_timepoint,Gender,
+    HB,
+    MCV,
+    RDW,
+    WBC,
+    NEUT = NEUT_PERC*WBC,
+    LYMPH = LYMPH_PERC*WBC,
+    MONO = MONO_PERC*WBC,
+    PLT,
+    Phase,Age,
+    VAF) %>%
+  distinct %>% 
+  gather(key = "par",value = "val",-SardID,-Phase,-Age,-relative_timepoint,-Gender,-VAF) 
+
+blood_counts_effects <- complete_blood_counts %>% 
+  select(-VAF) 
+
+id_par_df <- blood_counts_effects %>%
+  select(SardID,par) %>% 
+  distinct
+
+max_vaf <- full_data %>%
+  group_by(SardID,amino_acid_change) %>%
+  summarise(
+    maxVAF = VAF[which.max(Age)]) %>%
+  transmute(maxVAF = maxVAF,
+            SardID = SardID,
+            site = amino_acid_change)
+
+pre_slope_intercept_blood <- id_par_df %>%
+  apply(1,function(x) {
+    S <- gsub(' ','',x[1])
+    P <- x[2]
+    sub_data <- blood_counts_effects %>%
+      subset(SardID == S & par == P) %>%
+      distinct %>%
+      subset(!is.na(Age))
+    age_val <- sub_data %>%
+      ungroup() %>% 
+      select(Age,val) %>%
+      na.omit() %>% 
+      distinct
+    Age <- age_val$Age
+    val <- age_val$val
+    Formula <- 'Age ~ val'
+
+    M <- data.frame(
+      SardID = S,
+      Slope = ifelse(
+        length(Age) > 1,
+        sum((Age - mean(Age))*(val - mean(val))) / sum((Age-mean(Age))^2),
+        NA),
+      par = P,
+      meanAge = mean(Age),
+      Mean = mean(val),
+      Gender = sub_data$Gender[1]
+    )
+    return(M)
+  }) %>%
+  Filter(f = function(x) !is.null(x)) %>%
+  do.call(what = rbind) %>% 
+  mutate(
+    par = factor(
+      par,
+      levels = c("MCV","HB","RDW",
+                 "PLT",
+                 "WBC","LYMPH","MONO","NEUT"),
+      labels = c("MCV","Hb","RDW",
+                 "Plt",
+                 "WBC","Lymph","Mono","Neut")
+    )
+  )
+
+slope_intercept_blood_full_ <- pre_slope_intercept_blood %>%
+  merge(select(max_vaf,-maxVAF),by = c("SardID"),all.x = T) %>%
+  merge(select(historical_estimates,SardID = individual,site,gene,ratio_q50),
+        by = c("SardID","site"),all.x = T) %>%
+  merge(stat_sign_individuals,by.x = c("SardID","site"),by.y = c("individual","site"))
+
+slope_intercept_blood_full <- slope_intercept_blood_full_ %>%
+  subset(sig == T)
+```
+
+#### *DNMT3A*
+
+```{r historical_blood_indices_dnmt3a}
+bh_threshold <- function(p.val,fdr=0.05) {
+  n_t <- length(p.val)
+  spv <- sort(p.val)
+  n_alpha_n <- seq(1,n_t) * (fdr/n_t)
+  out <- n_alpha_n[max(which(spv < n_alpha_n))]
+  out <- ifelse(is.na(out),min(n_alpha_n),out)
+  return(out)
+}
+
+tmp <- slope_intercept_blood_full %>%
+  subset(gene == "DNMT3A")
+
+all_comparisons_dnmt3a <- list()
+for (P in unique(tmp$par)) {
+  x <- tmp %>%
+    subset(par == P) %>%
+    subset(!is.na(Mean) & !is.na(Slope))
+  if (P == "RDW") {
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x,family = Gamma(link = "identity"))
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    all_comparisons_dnmt3a[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "mean")
+  }
+  else {
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x,family = Gamma(link = "identity"))
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    all_comparisons_dnmt3a[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "mean")
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Slope,data = x,family = Gamma(link = "identity"))
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    all_comparisons_dnmt3a[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "slope")
+  }
+}
+```
+
+#### *TET2*
+
+```{r historical_blood_indices_TET2}
+tmp <- slope_intercept_blood_full %>%
+  subset(gene == "TET2")
+
+all_comparisons_tet2 <- list()
+for (P in unique(tmp$par)) {
+  x <- tmp %>%
+    subset(par == P) %>%
+    subset(!is.na(Mean) & !is.na(Slope))
+  if (P == "RDW") {
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x,family = Gamma(link = "identity"))
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    all_comparisons_tet2[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "mean")
+  }
+  else {
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x,family = Gamma(link = "identity"))
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    all_comparisons_tet2[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "mean")
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Slope,data = x,family = Gamma(link = "identity"))
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    all_comparisons_tet2[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "slope")
+  }
+}
+```
+
+We find that neither mean nor slope can be used to explain a statistically-significantly larger amount of variance than age and gender when analysing the ratio of historical and observed fold change.
+
+```{r historical_blood_indices_results,fig.height=1.5,fig.width=1.5}
+all_comparisons <- rbind(
+  cbind(do.call(rbind,all_comparisons_dnmt3a),gene = "DNMT3A"),
+  cbind(do.call(rbind,all_comparisons_tet2),gene = "TET2")
+)
+
+bht <- bh_threshold(all_comparisons$Pr..F.)
+
+all_comparisons %>%
+  ggplot(aes(x = F,y = -log10(`Pr..F.`))) +
+  geom_point(size = 0.5) + 
+  theme_gerstung(base_size = 6) + 
+  scale_y_continuous(breaks = c(0,1,2,4,6),labels = scientific(c(1,1e-1,1e-2,1e-4,1e-6))) + 
+  geom_hline(yintercept = -log10(bht),linetype = 2) + 
+  xlab("F-statistic") + 
+  ylab("p-value") + 
+  theme(legend.position = "top",
+        legend.margin = margin(),
+        legend.key.height = unit(0.1,"cm"),
+        axis.text = element_text(size = 6),
+        legend.text = element_text(size = 6)) + 
+  scale_colour_manual(values = gene_colours,
+                      name = NULL) + 
+  scale_shape(name = NULL) +
+  rotate_x_text() +
+  ggsave(useDingbats=FALSE,
+         filename = sprintf("figures/%s/phenotype_associations/blood_count_significance.pdf",model_id),
+         width = 3,height = 2)
+```
+
+# Poor fits
+
+## Investigating the determinants of poor fits
+
+### Association with recurrence and truncation status
+
+```{r poor_fits_recurrence_truncation,fig.width=2.5,fig.height=1}
+tmp <- statistics_data %>%
+  mutate(truncating = grepl("[A-Z0-9]+t-",site)) %>% 
+  mutate(recurring = site %in% unique_site_multiple) %>%
+  mutate(f = paste(
+    ifelse(recurring,"Recurring","Non-recurring"),
+    ifelse(truncating,"truncating","non-truncating"),
+    sep = ' and\n'
+  ))
+
+anvar_test <- anova(glm(sum_stat ~ f,data = tmp,family = stats::binomial()),
+                    test = "F")
+tmp %>%
+  group_by(f) %>% 
+  summarise(Proportion = sum(sum_stat)/length(sum_stat)) %>%
+  ggplot(aes(x = f,y = Proportion)) + 
+  geom_bar(outlier.size = 0.5,size = 0.25,stat = "identity") + 
+  ylab("Proportion of fits with no outliers") + 
+  xlab("") +
+  theme_gerstung(base_size = 6) + 
+  coord_flip() + 
+  scale_y_continuous(expand = c(0,0)) +
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_tnt_rec.pdf",model_id),
+         height = 1.2,width = 2.0) 
+anvar_test
+```
+
+### Associations with smoking status and gender
+
+```{r poor_fits_gender_smoking,fig.width=2,fig.height=1.3}
+good_stat_smoking_gender <- merge(
+  statistics_data,smoking_gender_data,
+  by = c("individual")) 
+
+tmp <- good_stat_smoking_gender %>%
+  filter(!is.na(sum_stat) & !is.na(HasSmoked) & !is.na(Gender))
+all_models <- list(
+  `All genes` = list(
+    m = glm(sum_stat ~ HasSmoked + Gender,data = tmp,
+            family = stats::binomial()),
+    null_m = glm(sum_stat ~ 1,data = tmp,
+                 family = stats::binomial())))
+
+for (g in unique_genes) {
+  x <- tmp %>% 
+    subset(gene == g)
+  all_models[[g]] <- list(
+    m = glm(sum_stat ~ HasSmoked + Gender,data = x,
+            family = stats::binomial()),
+    null_m = glm(sum_stat ~ 1,data = x,
+                 family = stats::binomial()))
+}
+
+significance_df <- all_models %>% 
+  lapply(
+    function(x) anova(x$null_m,x$m,test="F")[2,c(5,6)]
+  ) %>%
+  do.call(what = rbind)
+significance_df$gene <- names(all_models)
+significance_df$SignificantAfterCorrection <- p.adjust(significance_df$`Pr(>F)`,method = "BH") < 0.05
+
+significance_df
+
+tmp %>% 
+  mutate(
+    L = paste(ifelse(Gender == "M","Male","Female"),
+              ifelse(HasSmoked == T,"\nhas smoked","\nnever smoked"),
+              sep = '')
+  ) %>%
+  group_by(L,Gender) %>%
+  summarise(proportion = sum(sum_stat) / length(sum_stat)) %>%
+  ggplot(aes(x = L,y = proportion, fill = Gender)) + 
+  geom_bar(stat = "identity") + 
+  theme_gerstung(base_size = 6) + 
+  coord_flip() +
+  xlab("") + 
+  ylab("Proportion of fits with no outliers") +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_aaas(guide = F)
+```
+
+### Association with blood indices
+
+We find no significant associations between a fit having outliers and the blood indices of an individual. 
+
+```{r poor_fits_blood_indices,fig.height=1.5,fig.width=1.5}
+slope_intercept_blood <- slope_intercept_blood_full_ %>%
+  group_by(SardID) %>%
+  mutate() %>%
+  mutate(NTrajectories = length(unique(site)),
+         NBadTrajectories = sum(sig == F) / length(unique(par))) %>%
+  select(SardID,meanAge,Gender,Mean,Slope,NTrajectories,NBadTrajectories,par) %>%
+  distinct %>% 
+  ungroup()
+
+mt_statistics <- list()
+for (P in unique(slope_intercept_blood$par)) {
+  tmp <- subset(slope_intercept_blood,par==P) %>%
+    na.omit
+  NM <- glm(NBadTrajectories ~ NTrajectories + meanAge*Gender,
+            data = tmp,family = stats::poisson())
+  M <- glm(NBadTrajectories ~ NTrajectories + Slope + Mean + meanAge*Gender,
+           data = tmp,family = stats::poisson())
+  mt_statistics[[P]] <- list(A=anova(NM,M,test = "Chisq"),P=P)}
+
+mt_statistics %>%
+  lapply(function(x) unlist(c(x$P,x$A[2,c(4,5)]))) %>%
+  do.call(what = rbind) %>%
+  as.data.frame() %>%
+  mutate(p.val = as.numeric(as.character(`Pr(>Chi)`)),
+         Deviance = as.numeric(as.character(Deviance))) %>%
+  ggplot(aes(x = Deviance,y = -log10(p.val))) + 
+  geom_point() + 
+  theme_gerstung(base_size = 6) + 
+  scale_y_continuous(breaks = c(0,1,2,4,6),labels = scientific(c(1,1e-1,1e-2,1e-4,1e-6))) + 
+  geom_hline(yintercept = -log10(bht),linetype = 2) + 
+  xlab("Deviance") + 
+  ylab("p-value") + 
+  theme(legend.position = "top",
+        legend.margin = margin(),
+        legend.key.height = unit(0.1,"cm"),
+        axis.text = element_text(size = 6),
+        legend.text = element_text(size = 6)) + 
+  scale_colour_manual(values = gene_colours,
+                      name = NULL) + 
+  scale_shape(name = NULL) +
+  rotate_x_text() +
+  ggsave(useDingbats=FALSE,
+         filename = sprintf("figures/%s/phenotype_associations/blood_count_significance.pdf",model_id),
+         width = 3,height = 2)
+```
+
+# Session details
+
+```{r session_details}
+cat(system("git log -n1", intern=TRUE), sep="\n")
+```
+
+```{r session_objects}
+l <- ls()
+data.frame(variable=l, Reduce("rbind",lapply(l, function(x) data.frame(classes=paste(class(get(x)),collapse = ','), size=format(object.size(get(x)), units="auto")))))
+```
+
+```{r session_packages}
+sessionInfo()
+```

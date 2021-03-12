@@ -1,8 +1,40 @@
-source("scripts/vaf_dynamics_functions.R")
+---
+title: "The Natural History of Clonal Haematopoiesis"
+subtitle: "Modelling the technical overdispersion"
+author: 
+    - José Guilherme de Almeida
+    - Moritz Gerstung
+output: 
+  html_document:
+    theme: lumen
+    highlight: tango
+    code_folding: hide
+    df_print: paged
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 4
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r import_functions, include=FALSE}
+dir.create("figures/overdispersion/",showWarnings = F)
+source("Scripts/vaf_dynamics_functions.R")
 set.seed(42)
-
 source("scripts/prepare_data.R")
+```
 
+## Modelling the technical overdispersion
+
+Technical replicate data shows some level of technical overdispersion. This can be modelled in our current model by changing our binomial modelling of the counts to a beta binomial, with a fixed $\beta$ parameter and an $\alpha$ parameter that depends on $\beta$ and on the probability that is inferred by modelling, particularly by using the formulation for the expected value of the beta distribution $E[X] = \frac{\alpha}{\alpha+\beta}$. 
+
+Considering the above, we can model the counts as $counts \sim BB(n =  coverage,alpha = \frac{\beta p}{1 - p},beta = \beta)$
+
+```{r visualising overdispersion,fig.height=14,fig.width=14}
 one_hot_encode <- function(factor_vector) {
   factor_levels <- sort(as.character(unique(factor_vector)))
   print(factor_levels)
@@ -18,7 +50,7 @@ one_hot_encode <- function(factor_vector) {
 tru_q_data <- read.table('data/TruQ.txt',header = T)
 replicate_data <- read.table('data/Replicates_all.txt',header = T) %>%
   mutate(VAF = ifelse(CHR == "X", VAF / 2,VAF),
-         MUTcount = ifelse(CHR == "X", MUTcount / 2,MUTcount))
+         MUTcount = ifelse(CHR == "X", floor(MUTcount / 2),MUTcount))
 ages <- merge(full_data,replicate_data,by = c("SardID","Phase")) %>%
   select(Age, SardID, Phase) %>%
   unique
@@ -34,8 +66,6 @@ replicate_data <- merge(
 ) %>% 
   subset(SardID %in% replicated_data_multiple$SardID & variant %in% replicated_data_multiple$variant)
 
-# Some data exploration ---------------------------------------------------
-
 tru_q_data %>% 
   ggplot(aes(x = VAF_expected,y = VAF_observed)) + 
   geom_point(aes(colour = as.factor(Replicate))) + 
@@ -44,12 +74,14 @@ tru_q_data %>%
       ymin = qbeta(0.05,MUTcount + 1,TOTALcount - MUTcount + 1),
       ymax = qbeta(0.95,MUTcount + 1,TOTALcount - MUTcount + 1)
   )) + 
-  theme_minimal(base_size = 15) +
+  theme_gerstung(base_size = 15) +
   facet_wrap(~ Gene) + 
   ggsci::scale_color_lancet(name = "Replicate") +
   theme(legend.position = 'bottom') + 
   xlab("VAF expected") +
-  ylab("VAF observed")
+  ylab("VAF observed") + 
+  ggtitle("TruQ data") + 
+  ggsave(useDingbats=FALSE,"figures/overdispersion/overdispersion_vis_truq.pdf",height=14,width=14)
 
 replicate_data %>% 
   ggplot(aes(x = as.factor(Phase),y = VAF)) + 
@@ -60,15 +92,21 @@ replicate_data %>%
       ymin = qbeta(0.05,MUTcount + 1,TOTALcount - MUTcount + 1),
       ymax = qbeta(0.95,MUTcount + 1,TOTALcount - MUTcount + 1)
     )) + 
-  theme_minimal(base_size = 15) +
+  theme_gerstung(base_size = 15) +
   facet_wrap(~ paste(Gene,variant,SardID,sep = '-'),scale = 'free') + 
   ggsci::scale_color_lancet(name = "Replicate") +
   theme(legend.position = 'bottom') + 
   xlab("Phase") +
-  ylab("VAF")
+  ylab("VAF") + 
+  ggtitle("Replicate data from Sardinian samples") + 
+  ggsave(useDingbats=FALSE,"figures/overdispersion/overdispersion_vis_sard.pdf",height=14,width=14)
+```
 
-# Modelling the technical dispersion parameter  ---------------------------
+The invervals here are estimated using a beta distribution ($Beta(alpha = count+1,beta = coverage - count + 1)$).
 
+### Modelling the overdispersion for TruQ data
+
+```{r,fig.height=8,fig.width=10}
 VAF_expected <- tru_q_data$VAF_expected + 1/tru_q_data$TOTALcount
 VAF_observed <- tru_q_data$VAF_observed + 1/tru_q_data$TOTALcount
 
@@ -136,21 +174,51 @@ replicate_data_samples %>%
   theme(legend.position = 'bottom') + 
   xlab("Phase") +
   ylab("VAF")
+```
 
-# Modelling the dispersion for everything ---------------------------------
+### Estimating $\beta$ with technical replicates
 
+Using technical replicates for known DNA quantities ($truQ$) and for actual patient data ($SR$), we can posit the following model:
+
+$$
+p_{truQ} = observed\ VAF_{truQ} + 1/coverage_{truQ}
+\\
+\beta ~ \sim exponential(0.001)
+\\
+\alpha_{truQ} = \frac{\beta p_{truQ}}{1 - p_{truQ}}
+\\
+expected\ VAF_{truQ} + 1/coverage_{truQ} \sim Beta(alpha,beta)
+$$
+
+We need to adjust the expected and observed VAFs with the equivalent of having one count due to the fact that beta distributions only permit $\alpha>0$ and $\beta>0$.
+
+$$
+p_{SR} = growth\ coefficient = effect_{gene} + individual_{offset}
+\\
+\alpha_{SR} = \frac{\beta p_{SR}}{1 - p_{SR}}
+\\
+observed\ counts_{SR} \sim BB(coverage + 1,alpha,beta)
+$$
+
+Here, $p_{SR}$ is parametrized as $p_{SR} = ilogit((b_{gene_{i}} + b_{c_{ji}}) * t + u_{ji})$. 
+
+For this subsubsection, the model is specified in `scripts/estimating_overdispersion.R`.
+
+We used this model to infer the $\mu_{\beta}$ and $\sigma_{\beta}$ mentioned in the model specification above.
+
+```{r,fig.height=10,fig.width=10}
 VAF_expected <- tru_q_data$VAF_expected + 1/tru_q_data$TOTALcount
 VAF_observed <- tru_q_data$VAF_observed + 1/tru_q_data$TOTALcount
 Sard_count <- replicate_data$MUTcount 
 Sard_cover <- replicate_data$TOTALcount
+n_clones <- length(unique(paste(replicate_data$SardID,replicate_data$variant,sep = '-')))
 
-gene_b <- normal(0,sqrt(sum(0.1^2,0.1^2,0.1^2)),dim = c(length(unique(replicate_data$Gene)),1))
-u <- uniform(min=-50,max=0,dim = c(length(unique(paste(replicate_data$SardID,replicate_data$variant,sep = '-'))),1))
-gene_ind <- one_hot_encode(replicate_data$Gene)
+clone_b <- normal(0,sqrt(sum(0.1^2,0.1^2)),dim = c(n_clones,1))
+u <- uniform(min=-50,max=0,dim = c(n_clones,1))
 individual_ind <- one_hot_encode(paste(replicate_data$SardID,replicate_data$variant,sep = '-'))
 
 offset <- individual_ind %*% u
-gene_effect <- gene_ind %*% gene_b * (replicate_data$Age - min(replicate_data$Age))
+gene_effect <- individual_ind %*% clone_b * replicate_data$Age#(replicate_data$Age - min(replicate_data$Age))
 r <- gene_effect + offset
 mu <- ilogit(r) * 0.5
 
@@ -170,11 +238,11 @@ distribution(Sard_count) <- beta_binomial(
   beta = beta_variable
 )
 
-m <- model(beta_variable,beta_rate,gene_b,u)
+m <- model(beta_variable,beta_rate,clone_b,u)
 
 draws <- mcmc(m,
-              sampler = hmc(Lmin = 100,Lmax = 150),
-              warmup = 1000,
+              sampler = hmc(Lmin = 400,Lmax = 500),
+              warmup = 2000,
               n_samples = 1000,
               n_cores = 4)
 
@@ -203,7 +271,7 @@ parameter_df <- data.frame(
 samples <- parameter_df %>% 
   apply(
     1,function(x){
-      S <- extraDistr::rbbinom(n = 1000,size = x[1],alpha = x[2],beta = x[3]) - 1
+      S <- extraDistr::rbbinom(n = 1000,size = x[1],alpha = x[2],beta = x[3])
       if (sum(is.na(S)) > 0) {
         print(x)
       }
@@ -218,7 +286,7 @@ prediction_matrix <- data.frame(
   pred = samples$Q_050,
   pred_005 = samples$Q_005,
   pred_095 = samples$Q_095,
-  true = (Sard_count - 1)/Values$size,
+  true = (Sard_count)/Values$size,
   prob = Values$mu,
   variant = replicate_data$variant,
   Gene = replicate_data$Gene,
@@ -239,3 +307,4 @@ prediction_matrix %>%
 
 Values$beta %>%
   saveRDS("models/overdispersion.RDS")
+```
