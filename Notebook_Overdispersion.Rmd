@@ -26,7 +26,7 @@ dir.create("figures",showWarnings = F)
 dir.create("figures/overdispersion/",showWarnings = F)
 source("Scripts/vaf_dynamics_functions.R")
 set.seed(42)
-source("scripts/prepare_data.R")
+source("Scripts/prepare_data.R")
 ```
 
 ## Modelling the technical overdispersion
