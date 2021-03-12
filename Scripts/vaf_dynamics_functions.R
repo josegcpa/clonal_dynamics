@@ -23,6 +23,7 @@ library(grid)
 library(scatterpie)
 library(reghelper)
 
+beta <- greta::beta
 select <- dplyr::select
 
 options(dplyr.summarise.inform = FALSE)
