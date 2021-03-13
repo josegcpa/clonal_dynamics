@@ -739,7 +739,7 @@ for (i in 1:nrow(good_examples[2,])) {
     
     tmp <- example_trajectory_driver %>% 
       subset(!is.na(Deterministic) & Mutation == inferred_gen_at_foundation$Mutation) 
-    driver_fit_coefficient <- lsfit(tmp$Gen / 13,logit(tmp$Count))$coefficients
+    driver_fit_coefficient <- lsfit(tmp$Gen / 13,logit(tmp$Count*0.999999))$coefficients
     points_meeting_threshold <- c(
       x=(logit(population_threshold) - driver_fit_coefficient[1])/driver_fit_coefficient[2],
       y=population_threshold
