@@ -364,24 +364,6 @@ age_data_full <- age_data_list %>%
 age_data <- age_data_list[[4]] %>%
   cbind(sampling_idxs)
 
-age_data_full %>% 
-  mutate(pre_birth = Q50 < 0) %>% 
-  group_by(gen_time,population) %>% 
-  summarise(P = sum(pre_birth) / length(pre_birth)) %>% 
-  ggplot(aes(x = as.factor(population),y = as.factor(gen_time),fill = P)) +
-  geom_tile() +
-  geom_text(aes(label = round(P,4))) + 
-  theme_gerstung(base_size = 6) + 
-  ylab("tau (gen/year)") + 
-  xlab("Population size") + 
-  scale_fill_material(reverse = F,
-                      name = "No. of developmental clones") + 
-  scale_x_discrete(expand = c(0,0)) + 
-  scale_y_discrete(expand = c(0,0)) + 
-  theme(legend.position = "bottom") + 
-  ggsave(useDingbats=FALSE,sprintf("figures/%s/age_at_clone_foundation/Q50.pdf",model_id),
-         height = 3.5,width = 3.5)
-
 plot_min_max <- c(
   min(age_data$Q05,
       age_data$true_clone_age),
@@ -640,10 +622,7 @@ counts <- Data %>%
 chosen_one_full <- counts %>% 
   arrange(minGen,M,L)
 
-good_examples <- chosen_one_full %>% 
-  subset((mutation_rate == "3.2e-09" & fitness == 0.011 & Replicate == 3) |
-           (mutation_rate == "1.8e-09" & fitness == 0.010 & Replicate == 2) | 
-           (mutation_rate == "2.95e-09" & fitness == 0.008 & Replicate == 2))
+good_examples <- chosen_one_full[c(58,201,212),]
 
 plot_list <- list()
 for (i in 1:nrow(good_examples[2,])) {
