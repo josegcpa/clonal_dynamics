@@ -2,7 +2,7 @@
 
 ## Motivation
 
-This is the code required to run 
+This is the repository for [The Natural History of Clonal Haematopoiesis](). In this work, we investigate the fitness differences between genes, sites and individual clones using longitudinal data from a targetted sequencing panel.
 
 ## Code map
 
@@ -10,13 +10,20 @@ This is the code required to run
 
 #### Software
 
+* `R` 3.6.3 - other versions may work, but this was the version it was tested on
+* `Rstudio` - to run the R notebooks
 * `clonex` - a multi-purpose and efficient implementation of Fisher-Wright simulations. Available [here](https://github.com/josegcpa/clonex)
-* `R` 3.6.3 - other versions will probably work
-* `Rstudio`
 
 #### R library
 
-`reticulate`,`greta`,`ggplot2`,`ggpubr`,`tidyverse`,`bayesplot`,`openxlsx`,`gtools`,`cowplot`,`ggsci`,`ggrepel`,`extraDistr`,`default`,`dendextend`,`ape`,`ggtree`,`grid`,`scatterpie`,`reghelper`,`phylodyn`
+`reticulate`,`greta`,`ggplot2`,`ggpubr`,`tidyverse`,`bayesplot`,`openxlsx`,`gtools`,`cowplot`,`ggsci`,`ggrepel`,`extraDistr`,`default`,`dendextend`,`ape`,`ggtree`,`grid`,`scatterpie`,`reghelper`,`phylodyn`,`survival`,`survminer`
+
+### Accessing the analysis
+
+1. [Estimating the technical overdispersion]()
+2. [Validating this approach through Fisher-Wright simulations]()
+3. [Growth rate coefficients and age at onset inference, possible associations with phenotype]()
+4. [Investigating the historical growth effect and poor fits]()
 
 ### Running the analysis
 
@@ -24,7 +31,7 @@ This is the code required to run
 
 *Please note this assumes that you are running this script from the root directory of this project*
 
-*Notebooks with complete runs are already present in [LINK TO UPDATE](), but if one wants to run this locally the following steps can be taken:*
+*Notebooks with complete runs are already present above, but if one wants to run this locally the following steps can be taken:*
 
 1. Technical overdispersion estimation
     1. Run `Notebook_Overdispersion.Rmd` (in `Rstudio`) - R notebook containing the overdispersion estimation from technical replicates.
@@ -45,3 +52,5 @@ This is the code required to run
     1. Run `Scripts/plot_tree.R` (`Rscript Scripts/plot_tree.R`) - this runs all of the aforementioned analysis and plots it as displayed in the manuscript
 
 *Optional: run `Scripts/plots_for_initial_panel.R`*
+
+
