@@ -1666,7 +1666,9 @@ The advantage of having unknown cause effects is that we have a coefficient whic
 
 In this section we analyse possible effects influencing the unknown-cause growth effect, both technical - such as the explicit modelling of recurring sites - and biological - such as clonality and within- and between- individual variance.
 
-We conduct this analysis to better understand the impacts that different factos may have on the unknown cause effect. We begin by estimating the within and between individual variance. We show here that there is no difference between inter- and intra-individual variance, which would further confirm the independence of clone onset even within individuals. 
+##### Between- and within-individual variance
+
+We begin by estimating the within and between individual variance. We show here that there is no difference between inter- and intra-individual variance, which would further confirm the independence of clone onset even within individuals. 
 
 ```{r within_between_individual_variance,fig.height=1.2,fig.width=1.5}
 within_between_individual_variance <- r_values %>%
@@ -1707,6 +1709,8 @@ ggplot(data = NULL) +
          height = 1.2,width = 1.5) 
 ```
 
+##### Truncating and recurring status
+
 It is also important to understand if there are meaningful differences between the groups defined in this study, particularly when it comes to the explicit modelling of a few recurring sites. Here, we also test the possibility of clones with truncating mutations having different UC effects. As shown below, we find no evidence for either of these. 
 
 ```{r trucating_recurring,fig.width=2.0,fig.height=1.2}
@@ -1735,6 +1739,8 @@ truncating_recurring_uc %>%
          height = 1.2,width = 2.0) 
 anvar_test
 ```
+
+##### Co-clonality and unknown cause effect
 
 From our data we cannot observe any association between the unknown cause growth effect of the fastest clone and the number of mutations in each individual while controlling for age. We also conduct this analysis while stratifying by gene. To do so, we compare a multivariate quasipoisson regression which models the number of mutations as dependent on the UC growth effect and age with a null quasipoisson regression which considers the number of mutations in an individual as solely dependent on age. 
 
@@ -1818,6 +1824,8 @@ subset(n_mut_r_values,gene == "U2AF1") %>%
   ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_nmut.pdf",model_id),
          height = 1.5,width = 1) 
 ```
+
+##### Age, gender and smoking status
 
 To explain the greater prevalence of CH in older ages, it could be postulated that clone development is accelerated by age, dependent on gender or accelerated by previous smoking experience. Here, we find no evidence for such an effect. As such, it is unlikely that either of these factors plays a role in accelerating clonal dynamics in a senior population.
 
@@ -1978,6 +1986,8 @@ Parameters %>%
          height = 1,width = 1.5) 
 ```
 
+##### Driver effect vs. unknown cause effect at the clone level
+
 Here we compare how the predicted driver effect - that which is explained by driver genetics alone - with the observed effect - that which is also explained by the UC effect. We can clearly see that growth is mostly driver by driver genetics.
 
 ```{r compare_gene_unknown_cause,fig.height=2.4,fig.width=2.4}
@@ -2044,6 +2054,8 @@ mutation_independent_coefficients %>%
   ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_gene.pdf",model_id),
          height = 1.6,width = 1.9)
 ```
+
+##### Driver effect vs. unknown cause effect at the gene level
 
 An analysis of the unknown cause variance on a per gene level is valuable, but by accounting for the average total effect we can see there appears to be a linear trend for most genes. The exceptions are, very clearly, *JAK2*, whose UC variance is much higher than expected, and *SRSF2*-P95H (notice that *SRSF2* here is stratified here into P95H (*SRSF2*-P95H) and into other variants(*SRSF2*-other)), *PTPN11* and *U2AF1*, whose variance is much lower than expected. Additionally, we can test whether *TET2* and *DNMT3A*, the most frequently occurring genes, have different variances. Indeed, we can observe that *TET2* has variance which is 2.3 times higher than that of *DNMT3A*.
 
@@ -2117,6 +2129,8 @@ Parameters %>%
 var.test(Parameters$b_clone_mean[Parameters$gene == "TET2"],
          Parameters$b_clone_mean[Parameters$gene == "DNMT3A"])
 ```
+
+##### Investigating individuals with high or low average unknown cause effect or individuals with a wide range of unknown cause effects
 
 Now that we teased apart most effects which are either technical or biological, we can focus on specific trajectories within each individual. Observing how the unknown cause effects are distributed in each individual with two or more clones also allows us to draw additional conclusions regarding their growth. Immediately apparent is how varied these distributions can be (as evidenced in the first column), with: 
 
@@ -3846,8 +3860,6 @@ slope_intercept_blood_full <- slope_intercept_blood_full_ %>%
 
 To test this, as an initial step we assess whether there is a monotonic relationship between the unknown cause effect and each blood index, doing so separately for *DNMT3A* and *TET2*. We find no relevant associations between UC effect and blood indices, something which may be associated with low statistical power.
 
-#### TET2
-
 ```{r uc_blood_effect_tet2}
 slope_intercept_blood <- slope_intercept_blood_full %>%
   subset(gene == "TET2") %>% 
@@ -3924,8 +3936,6 @@ all_model_significance_tet2 <- lapply(names(blood_effect_models),function(x) {
   mutate(p.val = as.numeric(as.character(p.val)),
          rho = as.numeric(as.character(rho.rho)))
 ```
-
-#### DNMT3A
 
 ```{r uc_blood_effect_dnmt3a}
 slope_intercept_blood <- slope_intercept_blood_full %>%
@@ -4260,8 +4270,6 @@ iou_genotype <- apply(t(combn(colnames(jak2_genotype_and_effect)[5:ncol(jak2_gen
         tmp <- data.frame(A = jak2_genotype_and_effect[,x[1]],
                           B = jak2_genotype_and_effect[,x[2]]) %>% 
           table
-        print(x)
-        print(tmp)
         I <- sum(diag(tmp))
         U <- sum(tmp)
         return(c(A=x[1],B=x[2],IoU=I/U))
