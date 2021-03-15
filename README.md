@@ -2,7 +2,7 @@
 
 ## Motivation
 
-This is the repository for [The Natural History of Clonal Haematopoiesis](). In this work, we investigate the fitness differences between genes, sites and individual clones using longitudinal data from a targetted sequencing panel.
+This is the repository for [The Natural History of Clonal Haematopoiesis](). In this work, we investigate the fitness differences between genes, sites and individual clones using longitudinal sequencing data from >300 individuals between 54 and 103 years old.
 
 ## Code map
 
