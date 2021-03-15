@@ -30,6 +30,7 @@ pop_size <- 0.5e5
 source("Scripts/vaf_dynamics_functions.R")
 source("Scripts/prepare_data.R")
 model_file_name <- "models/model_ch.RDS"
+dir.create("figures/model_ch/other_associations")
 set.seed(42)
 model_id <- "model_ch"
 load(file = sprintf('data_output/vaf_modelling_coefficients_%s.Rdata',model_id))
@@ -230,7 +231,7 @@ tmp %>%
   theme_gerstung(base_size = 6) + 
   coord_flip() + 
   scale_y_continuous() +
-  ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_tnt_rec.pdf",model_id),
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/other_associations/uc_tnt_rec.pdf",model_id),
          height = 1.2,width = 2.0) 
 anvar_test
 ```
@@ -486,7 +487,7 @@ all_comparisons %>%
   scale_shape(name = NULL) +
   rotate_x_text() +
   ggsave(useDingbats=FALSE,
-         filename = sprintf("figures/%s/phenotype_associations/blood_count_significance.pdf",model_id),
+         filename = sprintf("figures/%s/other_associations/blood_count_significance.pdf",model_id),
          width = 3,height = 2)
 ```
 
@@ -518,7 +519,7 @@ tmp %>%
   theme_gerstung(base_size = 6) + 
   coord_flip() + 
   scale_y_continuous(expand = c(0,0)) +
-  ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_tnt_rec.pdf",model_id),
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/other_associations/uc_tnt_rec.pdf",model_id),
          height = 1.2,width = 2.0) 
 anvar_test
 ```
@@ -624,7 +625,7 @@ mt_statistics %>%
   scale_shape(name = NULL) +
   rotate_x_text() +
   ggsave(useDingbats=FALSE,
-         filename = sprintf("figures/%s/phenotype_associations/blood_count_significance.pdf",model_id),
+         filename = sprintf("figures/%s/other_associations/blood_count_significance.pdf",model_id),
          width = 3,height = 2)
 ```
 
