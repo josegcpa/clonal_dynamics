@@ -2444,8 +2444,12 @@ characterise_age_samples <- function(age_samples) {
       A <- A[!is.na(A)]
       M <- mean(A)
       Qs <- quantile(A,c(0.05,0.10,0.16,0.5,0.84,0.90,0.95))
-      D <- density(A)
-      MAP <- D$x[which.max(D$y)]
+      if (length(A) == 0) {
+        MAP <- NA
+      } else {
+        D <- density(A)
+        MAP <- D$x[which.max(D$y)]
+      }
       return(
         c(Mean = M,Qs,MAP = MAP)
       )
@@ -2457,7 +2461,7 @@ characterise_age_samples <- function(age_samples) {
 
 sampling_idxs <- r_values_full %>%
   merge(select(statistic_full,site,sum_stat,individual)) %>% 
-  subset(b_site_095 + b_gene_095 + b_clone_095 > 0) %>%
+  #subset(b_site_095 + b_gene_095 + b_clone_095 > 0) %>%
   group_by(
     individual,site,
     site_numeric,
@@ -2547,14 +2551,16 @@ par(mfrow = c(floor(N_examples/10) + 1,10),
 for (S in all_samples_for_age_estimation) {
   X <- na.omit(S$age_distribution)
   X <- ifelse(X < -1, -1 ,X)
-  D <- density(X)
-  map_age_clones[[length(map_age_clones)+1]] <- data.frame(
-    MAP = D$x[which.max(D$y)],
-    Individual = S$individual[1],
-    Site = S$site[1])
-  plot(D,
-       main = sprintf('SardID = %s\n%s',S$individual[1],S$site[1]),
-       xlim = c(-1,max(full_data$Age)))
+  if (length(X) > 0) {
+    D <- density(X)
+    map_age_clones[[length(map_age_clones)+1]] <- data.frame(
+      MAP = D$x[which.max(D$y)],
+      Individual = S$individual[1],
+      Site = S$site[1])
+    plot(D,
+         main = sprintf('SardID = %s\n%s',S$individual[1],S$site[1]),
+         xlim = c(-1,max(full_data$Age)))
+  }
 }
 dev.off()
 
@@ -2595,9 +2601,11 @@ for (S in all_samples_for_age_estimation_gene) {
   S <- do.call(rbind,S)
   X <- na.omit(S$age_distribution)
   X <- ifelse(X < -1, -1 ,X)
-  plot(density(X),
-       main = S$gene[1],
-       xlim = c(-1,max(full_data$Age)))
+  if (length(X) > 0) { 
+    plot(density(X),
+         main = S$gene[1],
+         xlim = c(-1,max(full_data$Age)))
+  }
 }
 dev.off()
 
@@ -2610,9 +2618,11 @@ for (S in all_samples_for_age_estimation_gene) {
   S <- do.call(rbind,S)
   Samp <- S$age_distribution
   Samp <- Samp[Samp > -1]
-  plot(density(na.omit(Samp)),
-       main = S$gene[1],
-       xlim = c(-1,max(full_data$Age)))
+  if (length(Samp) > 0) {
+    plot(density(na.omit(Samp)),
+         main = S$gene[1],
+         xlim = c(-1,max(full_data$Age)))
+  }
 }
 dev.off()
 
@@ -3939,16 +3949,15 @@ all_model_significance_tet2 <- lapply(names(blood_effect_models),function(x) {
 
 ```{r uc_blood_effect_dnmt3a}
 slope_intercept_blood <- slope_intercept_blood_full %>%
-  group_by(SardID) %>%
-  mutate(maxVAF = max(maxVAF)) %>% 
   subset(gene == "DNMT3A") %>% 
-  mutate(maxVAF = ifelse(is.na(maxVAF),0,maxVAF),
-         b_clone_mean = ifelse(is.na(b_clone_mean),0,b_clone_mean),
-         total_effect = ifelse(is.na(total_effect),0,total_effect)) %>% 
-  group_by(SardID,gene,par,Mean,Slope,meanAge,Gender,maxVAF) %>%
-  summarise(b_clone_mean = b_clone_mean[which.max(maxVAF)],
-            site = site[which.max(maxVAF)]) %>%
-  ungroup 
+  group_by(SardID) %>%
+  mutate(clauseSite = maxVAF == max(maxVAF),
+         clauseTotal = total_effect == max(total_effect)) %>%
+  mutate(clauseSite = ifelse(is.na(clauseSite),T,clauseSite),
+         clauseTotal = ifelse(is.na(clauseTotal),T,clauseTotal)) %>%
+  subset(clauseSite)  %>% 
+  mutate(logMaxVAF = log(maxVAF)) %>%
+  ungroup()
 
 blood_effect_models <- list()
 for (x in unique(slope_intercept_blood$par)) {
@@ -3962,7 +3971,7 @@ for (x in unique(slope_intercept_blood$par)) {
       subset(par == x) %>%
       subset(!is.na(Mean)) %>%
       mutate(gene = str_match(site,'[A-Z0-9]+')) %>%
-      select(Mean,meanAge,Gender,maxVAF,b_clone_mean,site)
+      select(Mean,meanAge,Gender,maxVAF,total_effect,b_clone_mean)
     tmp$mean$model <- glm(Mean ~ maxVAF + Gender*meanAge + b_clone_mean,data=sub_data)
     tmp$mean$model_null <- glm(Mean ~ maxVAF + Gender*meanAge,data=sub_data)
     tmp$slope$model <- NULL
@@ -3970,10 +3979,6 @@ for (x in unique(slope_intercept_blood$par)) {
     tmp$mean$data <- cbind(sub_data,
                            Pred = predict(tmp$mean$model,newdata=sub_data))
     tmp$slope$data <- NULL
-    tmp$mean$coefficients <- cbind(as.data.frame(coef(summary(tmp$mean$model))),
-                                   StandardizedEstimate = beta(tmp$mean$model,y=T)$coef[,1],
-                                   StandardizedError = beta(tmp$mean$model,y=T)$coef[,2],
-                                   coef = names(tmp$mean$model$coefficients))
     tmp$slope$coefficients <- NULL
     tmp$mean$rank_correlation <- cor.test(sub_data$Mean,sub_data$b_clone_mean,method = "spearman")
   } else {
@@ -3982,7 +3987,7 @@ for (x in unique(slope_intercept_blood$par)) {
       subset(par == x) %>%
       subset(!is.na(Mean) & !is.na(Slope) & !is.na(maxVAF) & !is.na(b_clone_mean)) %>%
       mutate(gene = str_match(site,'[A-Z0-9]+')) %>%
-      select(Mean,Slope,meanAge,Gender,maxVAF,b_clone_mean,site)
+      select(Mean,Slope,meanAge,Gender,maxVAF,total_effect,b_clone_mean)
     tmp$mean$model <- glm(Mean ~ maxVAF + Gender*meanAge + b_clone_mean,data=sub_data)
     tmp$mean$model_null <- glm(Mean ~ maxVAF + Gender*meanAge,data=sub_data)
     tmp$slope$model <- glm(Slope ~ maxVAF + Gender*meanAge + b_clone_mean,data=sub_data)
