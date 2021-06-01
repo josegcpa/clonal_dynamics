@@ -36,19 +36,30 @@ This is the repository for [The Natural History of Clonal Haematopoiesis](). In 
 1. Technical overdispersion estimation
     1. Run `Notebook_Overdispersion.Rmd` (in `Rstudio`) - R notebook containing the overdispersion estimation from technical replicates.
 
-2. Method validation (please note that, due to the stochastic nature of the simulations, results may difer slightly)
+2. Longitudinal modelling validation (please note that, due to the stochastic nature of the simulations, results may differ slightly)
     1. Run `simulate_range.sh` (`sh simulate_range.sh`) - this will run a set of Fisher-Wright simulations with different driver fitness advantages and mutation rates. The `CLONEX_PATH` should be updated. As it is, the script will submit jobs to a LSF job scheduler - if no such job scheduler is available, one should adjust accordingly by removing the line containing `bsub`.
-    2. Run `run_simulation.R` (`Rscript run_simulation.R`) - this will run the model that uses the Fisher-Wright simulations to validate our approach
+    2. Run simulations - this will run the model that uses the Fisher-Wright simulations to validate our approach
+        * Run `Scripts/run_simulation_50k_1.R` (`Rscript Scripts/run_simulation_50k_1.R`)
+        * Run `Scripts/run_simulation_100k_5.R` (`Rscript Scripts/run_simulation_100k_5.R`)
+        * Run `Scripts/run_simulation_200k_200.R` (`Rscript Scripts/run_simulation_200k_13.R`)
     3. Run `Notebook_Simulations.Rmd` (in `Rstudio`) - R notebook containing the method validation using Fisher-Wright simulations
+    4. Additional validation (regarding estimation using early and late parts of the trajectory and the effect of clonal competition on inference can also be done)
+        1. Run `simulate_range_2.sh` (`sh simulate_range_2.sh`)
+        2. Run `Scripts/investigate_simulations_early_late.R` (`Rscript Scripts/investigate_simulations_early_late.R`)
+        3. Run `Scripts/investigate_simulations_competition.R` (`Rscript Scripts/investigate_simulations_competition.R`)
 
-3. Data analysis - growth rate coefficient and age at onset inference, possible associations with phenotype
+3. Phylogenetic population size and annual growth rates validation
+    1. Run `simulate_few_complete.sh` (`sh simulate_few_complete.sh`)
+    2. Run `Notebook_BNPRFit.Rmd` (in `Rstudio`)
+
+4. Data analysis - growth rate coefficient and age at onset inference, possible associations with phenotype
     1. Run `Scripts/run_model.R` (`Rscript Scripts/run_model.R`) - this runs the model that infers all growth rate coefficients
     2. Run `Notebook_GrowthCoefficients_AgeAtOnset_PossibleAssociations.Rmd` (in `Rstudio`) - this is the notebook containing the bulk of the analysis
 
-4. Analysis of the historical growth effect and poor fits
+5. Analysis of the historical growth effect and poor fits
     1. Run `Notebook_HistoricalGrowth_PoorFits.Rmd` (in `Rstudio`) - this runs analyses which factors - technical and biological - may be determinant of the difference between historical and inferred growth and a fit being poor (having one or more outlier)
 
-5. Phylogenetic trees from single cell colonies, the determination of growth per year and age at onset from these trees and comparison with estimates from longitudinal data
+6. Phylogenetic trees from single cell colonies, the determination of growth per year and age at onset from these trees and comparison with estimates from longitudinal data
     1. Run `Scripts/plot_tree.R` (`Rscript Scripts/plot_tree.R`) - this runs all of the aforementioned analysis and plots it as displayed in the manuscript
 
 *Optional: run `Scripts/plots_for_initial_panel.R`*
