@@ -21,9 +21,11 @@ This is the repository for [The Natural History of Clonal Haematopoiesis](). In 
 ### Accessing the analysis
 
 1. [Estimating the technical overdispersion]()
-2. [Validating this approach through Fisher-Wright simulations]()
-3. [Growth rate coefficients and age at onset inference, possible associations with phenotype]()
-4. [Investigating the historical growth effect and poor fits]()
+2. [Validating the approach to estimate annual growth from longitudinal data with Wright-Fisher simulations]()
+3. [Validating the approach to estimate annual growth from single-cell phylogenies with Wright-Fisher simulations]()
+4. [Growth rate coefficients and age at onset inference, possible associations with phenotype]()
+5. [Analysing the trees obtained from single cell colonies in old individuals in Mitchell et al. (2021)]()
+6. [Investigating the historical growth effect and poor fits]()
 
 ### Running the analysis
 
