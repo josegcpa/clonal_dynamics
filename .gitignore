@@ -1,6 +1,7 @@
 *
 **/
 !Notebook_*
+Notebook_Emily_SimulatedTrees.Rmd
 !README.md
 !simulate_few_complete.sh
 !simulate_range_2.sh
