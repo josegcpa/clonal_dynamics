@@ -29,7 +29,7 @@ set.seed(42)
 source("Scripts/prepare_data.R")
 ```
 
-## Modelling the technical overdispersion
+# Modelling the technical overdispersion
 
 Technical replicate data shows some level of technical overdispersion. This can be modelled in our current model by changing our binomial modelling of the counts to a beta binomial, with a fixed $\beta$ parameter and an $\alpha$ parameter that depends on $\beta$ and on the probability that is inferred by modelling, particularly by using the formulation for the expected value of the beta distribution $E[X] = \frac{\alpha}{\alpha+\beta}$. 
 
@@ -105,7 +105,7 @@ replicate_data %>%
 
 The invervals here are estimated using a beta distribution ($Beta(alpha = count+1,beta = coverage - count + 1)$).
 
-### Modelling the overdispersion for TruQ data
+## Modelling the overdispersion for TruQ data
 
 ```{r,fig.height=8,fig.width=10}
 VAF_expected <- tru_q_data$VAF_expected + 1/tru_q_data$TOTALcount
@@ -177,7 +177,7 @@ replicate_data_samples %>%
   ylab("VAF")
 ```
 
-### Estimating $\beta$ with technical replicates
+## Estimating $\beta$ with technical replicates
 
 Using technical replicates for known DNA quantities ($truQ$) and for actual patient data ($SR$), we can posit the following model:
 

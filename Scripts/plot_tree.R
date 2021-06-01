@@ -174,17 +174,19 @@ bnpr_estimates <- trees %>%
     }
   )
 
-
 # calculate linear fits ---------------------------------------------------
 for (item_name in names(bnpr_estimates)) {
+  tree_size <- length(trees[[item_name]]$tree_ultra$tip.label)
   for (clade_name in names(bnpr_estimates[[item_name]][["clade_dynamics"]])) {
     clade <- bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]
     bnpr_estimate <- clade$bnpr_estimate
+    vaf <- length(clade$clade) / tree_size
     Y <- log(bnpr_estimate$summary$quant0.5)
     X <- -bnpr_estimate$summary$time
     W <- (log(bnpr_estimate$summary$quant0.975) - log(bnpr_estimate$summary$quant0.025))^2/16
     linear_estimate <- lm(Y ~ X,w = 1/W)
     mp <- mean(X[Y > max(Y)/2])
+    Y_exp <- exp(Y)
     non_linear_estimate <- nls(exp(Y) ~ SSlogis(X,theta1,theta2,theta3),
                                weights = 1/W,
                                control = nls.control(warnOnly = T,
@@ -193,6 +195,14 @@ for (item_name in names(bnpr_estimates)) {
                                start = c(theta1 = max(exp(Y)),
                                          theta2 = mp,
                                          theta3 = 1))
+    non_linear_estimate_vaf <- nls(Y_exp / Y_exp[1] * vaf ~ SSlogis(X,1,theta2,theta3),
+                                   weights = 1/W,
+                                   control = nls.control(warnOnly = T,
+                                                         maxiter = 1000,
+                                                         minFactor = 1 / (1024^16)),
+                                   start = c(theta2 = max(X),
+                                             theta3 = 5))
+
     opt_fn <- function(par) {
       se <- (Y - change_point(X,par[1],par[2],par[3],par[4]))^2
       return(mean(se / W))
@@ -200,13 +210,15 @@ for (item_name in names(bnpr_estimates)) {
     change_point_regression <- optim(
       par = c(linear_estimate$coefficients[1],
               linear_estimate$coefficients[2],
-              0,
+              1,
               mean(X)),
       method = "L-BFGS-B",
       upper = c(NA,NA,0,NA),
       fn = opt_fn)
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$linear_estimate <- linear_estimate
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$non_linear_estimate <- non_linear_estimate
+    bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$change_point_regression <- change_point_regression
+    bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$non_linear_estimate_vaf <- non_linear_estimate_vaf
   }
 }
 
@@ -386,6 +398,7 @@ for (curr_id in c("2259","500","3877")) {
     
     bnpr_x <- -clade$bnpr_estimate$summary$time + max_age
     bnpr_y <- clade$bnpr_estimate$summary$mean
+    cp <- clade$change_point_regression$par
     if (!grepl("Unknown driver",driver_id)) {
       tmp <- Parameters_Age %>% 
         subset(individual == as.numeric(curr_id) & site == driver_id)
@@ -691,6 +704,10 @@ for (curr_id in c("2259","500","3877")) {
         b_q05 = c(exp(b_05)-1,C$Estimate[2] - C$`Std. Error`[2]),
         b_q95 = c(exp(b_95)-1,C$Estimate[2] + C$`Std. Error`[2]),
         source = c("VAF","EPS"),
+        expected_late = c(NA,1/clade$non_linear_estimate_vaf$m$getPars()[2]),
+        b_early = c(NA,cp[2]),
+        b_late = c(NA,cp[3]),
+        midpoint = c(NA,cp[4]),
         age_mean = c(tmp$Mean,mean(mutation_timing$x)),
         age_q05 = c(tmp$Q05,mutation_timing$x[1]),
         age_q95 = c(tmp$Q95,mutation_timing$x[2]),
@@ -852,14 +869,17 @@ for (curr_id in c("2259","500","3877")) {
         b_q05 = c(C$Estimate[2] - C$`Std. Error`[2]),
         b_q95 = c(C$Estimate[2] + C$`Std. Error`[2]),
         source = c("EPS"),
+        expected_late = 1/c(clade$non_linear_estimate_vaf$m$getPars()[2]),
+        b_early = c(cp[2]),
+        b_late = c(cp[3]),
+        midpoint = c(cp[4]),
         age_mean = c(mean(mutation_timing$x)),
         age_q05 = c(mutation_timing$x[1]),
         age_q95 = c(mutation_timing$x[2]),
         gene = "",
         site = driver_id,
-        individual = curr_id
-      ) 
-      }
+        individual = curr_id) 
+    }
     plot_list[[curr_id]][[sprintf('%s',driver_id)]] <- trajectory_plot
     plot_list[[curr_id]][[sprintf('%s_age_coef',driver_id)]] <- coefficient_df
   }
@@ -868,6 +888,44 @@ for (curr_id in c("2259","500","3877")) {
 
 
 # finish and save plots ---------------------------------------------------
+
+all_trajectories <- list()
+
+for (individual in names(bnpr_estimates)) {
+  bnpr_estimate <- bnpr_estimates[[individual]]
+  for (clade in bnpr_estimate$clade_dynamics) {
+    tip_labels <- bnpr_estimate$tree_ultra$tip.label[clade$clade]
+    clone_idx <- which(names(clone_assignment[[individual]]) %in% tip_labels)
+    driver <- clone_assignment[[individual]][[clone_idx]]
+    all_trajectories[[length(all_trajectories) + 1]] <- data.frame(
+      X = ages[[individual]] - clade$bnpr_estimate$summary$time,
+      Y = clade$bnpr_estimate$summary$mean,
+      individual = individual,
+      driver = driver
+    )
+  }
+}
+
+all_trajectories_df <- all_trajectories %>% do.call(what = rbind)
+
+all_trajectories_df %>% 
+  group_by(driver,individual) %>% 
+  mutate(X = X - min(X)) %>% 
+  mutate(gene = str_match(driver,"[A-Z0-9]+")) %>%
+  ggplot(aes(x = X,y = Y,group = driver,colour = gene)) + 
+  geom_line(size = 0.25) + 
+  facet_wrap(~ individual,ncol = 2) + 
+  theme_gerstung(base_size = 6) + 
+  scale_y_continuous(trans = 'log10',expand = c(0,0),breaks = c(1e-2,1,1e2,1e4,1e6)) +
+  coord_cartesian(ylim = c(1e-2,1e7)) +
+  theme(strip.text = element_text(margin = margin(b = 0.5))) +
+  xlab("Time since first coal. (years)") +
+  ylab("EPS") +
+  scale_color_manual(values = c(U = "grey",gene_colours),
+                     guide = F) + 
+  ggsave("figures/model_ch/trees/tree_trajectories.pdf",
+         height = 1.5,
+         width = 1.8)
 
 coefficients_df <- plot_list %>%
   lapply(function(x) {
@@ -1062,3 +1120,5 @@ ggsave(plot = coefficient_age_comparison_plot + theme(axis.title = element_text(
        filename = sprintf("figures/%s/trees/coef_age_plot.pdf",model_id),
        width = 8.6 / 3,height = 2.7,
        useDingbats = F)
+
+write.csv(coefficients_df,"data_output/tree_bnpr_coefficients.csv",row.names = T)

@@ -527,7 +527,7 @@ $$
 
 ## Modelling clone growth as a product of genetic and unknown cause effects
 
-The model specified in `scripts/F2_clone_effect.R` was executed using `scripts/run_model_f2.R`. The model parameters are stored in `models/model_F2_full.RDS` and will be used for the remainder of this section.
+The model specified in `Scripts/bb_gene_site_clone_model.R` was executed using `Scripts/bb_gene_site_clone_model.R`. The model parameters are stored in `models/model_ch.RDS` and will be used for the remainder of this section.
 
 ```{r model_load_values}
 values_model <- readRDS(model_file_name)
@@ -683,7 +683,8 @@ r_values_full <- data.frame(
     u <- offset_samples[,clone_numeric]
     b <- b_gene + b_site + b_clone
     mu_val <- inv.logit(unlist((b) * (age - values_model$min_age) + u)) / 2
-    mu_val_genetic <- inv.logit(unlist((b_gene + b_site) * (age - values_model$min_age) + u)) / 2
+    mu_val_genetic <- inv.logit(
+      unlist((b_gene + b_site) * (age - values_model$min_age) + u)) / 2
     alpha_value <- (beta_samples * mu_val) / (1 - mu_val)
     Q <- extraDistr::rbbinom(n = 2500,
                              size = cov,
@@ -732,7 +733,7 @@ r_values_ <- r_values_full %>%
   ) 
 ```
 
-A simple analysis of the coefficients reveals to us that 67.7% of the variation that our model can explain is due to driver genetics. Looking at specific mutations, we have quite a varied picture in these regards - more than 90% of the variation of CBL and U2AF1 trajectories can be explained by genetics.
+A simple analysis of the coefficients reveals to us that 68.5% of the variation that our model can explain is due to driver genetics. Looking at specific mutations, we have quite a varied picture in these regards - more than 90% of the variation of CBL and U2AF1 trajectories can be explained by genetics.
 
 ```{r variation_explained_plot,fig.width = 1.5,fig.height = 2.5}
 explained_variance_total <- r_values_full %>%
@@ -760,7 +761,7 @@ variation_explained_plot <- r_values_full %>%
   scale_fill_manual(values = rev(pal_jama()(2)),name = NULL,breaks = c("Genetic","Unknown")) + 
   #rotate_x_text() + 
   xlab("Driver gene") + 
-  ylab("Fraction") + 
+  ylab("") + 
   facet_grid(~ model_name) + 
   theme(legend.position = "bottom",
         plot.title = element_text(hjust = 0.5),
@@ -2461,7 +2462,6 @@ characterise_age_samples <- function(age_samples) {
 
 sampling_idxs <- r_values_full %>%
   merge(select(statistic_full,site,sum_stat,individual)) %>% 
-  #subset(b_site_095 + b_gene_095 + b_clone_095 > 0) %>%
   group_by(
     individual,site,
     site_numeric,
@@ -2494,8 +2494,8 @@ sampling_idxs %>%
 
 list_of_age_sampling <- list()
 list_of_age_estimates <- list()
-for (gen_time in c(1,2,5,10)) {
-  for (pop_size in c(5e4,1e5,2e5)) {
+for (gen_time in c(1,2,5,10,13,20)) {
+  for (pop_size in c(10e3,5e4,1e5,2e5,600e3)) {
     tmp_samples <- sample_ages(sampling_idxs,pop_size,gen_time,2500)
     tmp_estimates <- characterise_age_samples(tmp_samples)
     colnames(tmp_estimates) <- c("Mean","Q05","Q10","Q16","Q50","Q84","Q90","Q95","MAP")
@@ -2750,7 +2750,7 @@ estimates_from_samples <- all_samples_for_age_estimation_gene %>%
         t1 <- y$t1[1]
         X <- y$age_distribution
         X <- X[!is.na(X)]
-        X <- ifelse(X < 0,0,X)
+        X <- ifelse(X < -1,-1,X)
         X <- ifelse(X > t1,t1,X)
         return(X)
       } 
@@ -2758,43 +2758,46 @@ estimates_from_samples <- all_samples_for_age_estimation_gene %>%
       unlist %>%
       as.vector
     gene <- x[[1]]$gene[1]
-    output <- c(mean(X),quantile(X,c(0.05,0.50,0.95)))
     data.frame(
-      labels = c("Mean","Q05","Q50","Q95"),
-      gene = rep(gene,4),
-      values = output,
+      gene = gene,
+      values = X,
       row.names = NULL,
       N = length(x)
     ) %>% 
       return
     }) %>% 
-  do.call(what = rbind) %>%
-  spread(key = labels,value = values)
+  do.call(what = rbind)
 
 stratified_srsf2_samples <- all_samples_for_age_estimation %>%
   lapply(function(x) {
     if (x$gene[1] == "SRSF2" & paste(x$site[1],x$individual[1]) %in% valid_trajectories) {
-      return(x)
+      x %>%
+        mutate(age_distribution = ifelse(age_distribution > t1,t1,age_distribution)) %>%
+        return()
     } else return(NULL)
     }) %>%
   do.call(what = rbind) %>%
   as.data.frame %>%
   mutate(strata = ifelse(site == "SRSF2-P95H","SRSF2-P95H","SRSF2-other")) %>%
-  mutate(age_distribution = ifelse(age_distribution < 0,0,age_distribution)) %>% 
+  mutate(age_distribution = ifelse(age_distribution < -1,-1,age_distribution)) %>% 
   group_by(strata) %>% 
-  summarise(N = length(unique(paste(individual,site))),
-            Mean = mean(age_distribution,na.rm = T),
-            Q05 = quantile(age_distribution,0.05,na.rm = T),
-            Q50 = quantile(age_distribution,0.50,na.rm = T),
-            Q95 = quantile(age_distribution,0.95,na.rm = T)) %>%
-  select(gene = strata,N,Mean,Q05,Q50,Q95)
+  mutate(N = length(unique(paste(individual,site)))) %>%
+  ungroup %>%
+  select(gene = strata,values = age_distribution,N)
 
 estimates_from_samples <- estimates_from_samples %>%
   subset(gene != "SRSF2") %>%
   rbind(stratified_srsf2_samples)
 
-gene_order <- estimates_from_samples %>%
-  arrange(Q05,Q95) %>%
+estimates_from_samples_parameters <- estimates_from_samples %>%
+  group_by(gene,N) %>%
+  summarise(Q05 = quantile(values,0.05,na.rm=T),
+            Q50 = quantile(values,0.5,na.rm=T),
+            Q95 = quantile(values,0.95,na.rm=T),
+            LowMass = sum(values <= 0,na.rm = T)/length(values))
+
+gene_order <- estimates_from_samples_parameters %>%
+  arrange(-LowMass) %>%
   select(gene) %>%
   unlist
 
@@ -2811,7 +2814,7 @@ max_growth_fitness_genes <- Parameters_Age %>%
     which(diff(trajectory_from_t0(age_at_detection,seq(0,110,by = 0.1),
                                   Growth,N=0.5e5,g = 2) > (0.5e5 * detection_threshold)) != 0)])) %>% 
   mutate(AgeAtSampling = age_at_detection) %>%
-  merge(estimates_from_samples,by = "gene") %>%
+  merge(estimates_from_samples_parameters,by = "gene") %>%
   mutate(MaxAgeAtDetection_plot = ifelse(MaxAgeAtDetection > Q95,
                                          Q95,
                                          MaxAgeAtDetection))
@@ -2865,7 +2868,7 @@ for (x in tmp$MaxGrowth) {
   which(diff(trajectory_from_t0(age_at_detection,seq(-10,2000,by = 0.1),tmp$MaxGrowth[1],N=0.5e5,g = 2) > (0.5e5 * detection_threshold)) != 0)
 }
 
-labs <- estimates_from_samples %>%
+labs <- estimates_from_samples_parameters %>%
   mutate(gene = factor(gene,levels = gene_order)) %>%
   arrange(gene) %>% 
   apply(
@@ -2875,32 +2878,36 @@ labs <- estimates_from_samples %>%
   do.call(what = c)
 
 estimates_from_samples %>% 
-  ggplot(aes(ymin = Q05,ymax = Q95,
-             x = factor(gene,levels = gene_order),
+  subset(!is.na(values)) %>%
+  group_by(gene) %>%
+  filter(values >= quantile(values,0.025) & values <= quantile(values,0.975)) %>%
+  ggplot(aes(x = factor(gene,levels = gene_order),
+             y = values,
              fill = gene)) +
-  geom_tile(aes(y = (90 + Q05)/2,width = 0.8,height = (90 - Q05)),
-            fill = "grey90") + 
-  geom_tile(aes(y = (Q95 + Q05)/2,width = 0.8,height = Q95 - Q05)) + 
+  geom_violin(#scale = "width",
+              size = 0.25) +
   geom_tile(aes(y = Threshold,
                 x = gene,
                 width = 0.8,height = 1),
             inherit.aes = F,
             data = max_growth_fitness,
             colour = "grey10",
-            size = 0.1,
+            size = 0.25,
             fill = "white") + 
-  geom_point(colour = "white",
+  geom_point(colour = "black",
+             alpha = 0.5,
              shape = 16,
-             size = 0.8,
+             size = 0.3,
+             position = position_jitter(width = 0.2),
              data = mutate(subset(Parameters_Age,sum_stat),
                            gene = ifelse(
                              gene == "SRSF2",
                              ifelse(site == "SRSF2-P95H","SRSF2-P95H","SRSF2-other"),
                              gene)),
-             aes(x = gene,y = Q50)) + 
+             aes(x = gene,y = Q50)) +
   theme_gerstung(base_size = 6) + 
   coord_flip() + 
-  ylab("Age at onset") + 
+  ylab("Projected age at onset") + 
   xlab("Gene") + 
   theme(axis.text.y = element_text(face = "italic")) + 
   scale_fill_manual(values = c(gene_colours,
@@ -2909,38 +2916,151 @@ estimates_from_samples %>%
                     guide = F) + 
   scale_y_continuous(#limits = c(0,90),
                      breaks = c(0,20,40,60,80),expand = c(0,0,0.01,0)) + 
-  scale_x_discrete(
-    labels = labs,
-    breaks = gene_order
-  ) + 
+  scale_x_discrete(labels = labs,breaks = gene_order) + 
   ggsave(useDingbats=FALSE,
-         sprintf("figures/%s/age_at_clone_foundation/age_at_onset_bars.pdf",model_id),width = 2.5,height = 2.3)
+         sprintf("figures/%s/age_at_clone_foundation/age_at_onset_violin.pdf",model_id),width = 2.5,height = 2.3)
+
+estimates_from_samples %>% 
+  subset(!is.na(values)) %>%
+  group_by(gene) %>%
+  summarise(Q025 = quantile(values,0.025),
+            Q975 = quantile(values,0.975)) %>%
+  ggplot(aes(x = factor(gene,levels = gene_order),
+             y = (Q975 + Q025)/2,
+             width = 0.8,
+             height = Q975 - Q025,
+             fill = gene)) +
+  geom_tile() +
+  geom_tile(aes(y = Threshold,
+                x = gene,
+                width = 0.8,height = 1),
+            inherit.aes = F,
+            data = max_growth_fitness,
+            colour = "grey10",
+            size = 0.25,
+            fill = "white") + 
+  geom_point(colour = "white",
+             inherit.aes = F,
+             alpha = 0.5,
+             shape = 16,
+             size = 0.3,
+             position = position_jitter(width = 0.2,height = 0),
+             data = mutate(subset(Parameters_Age,sum_stat),
+                           gene = ifelse(
+                             gene == "SRSF2",
+                             ifelse(site == "SRSF2-P95H","SRSF2-P95H","SRSF2-other"),
+                             gene)),
+             aes(x = gene,y = Q50)) +
+  theme_gerstung(base_size = 6) + 
+  coord_flip() + 
+  ylab("Corrected age at onset") + 
+  xlab("Gene") + 
+  theme(axis.text.y = element_text(face = "italic")) + 
+  scale_fill_manual(values = c(gene_colours,
+                               `SRSF2-P95H` = as.character(gene_colours["SRSF2"]),
+                               `SRSF2-other` = as.character(gene_colours["SRSF2"])),
+                    guide = F) + 
+  scale_y_continuous(#limits = c(0,90),
+                     breaks = c(0,20,40,60,80),expand = c(0,0,0.01,0)) + 
+  scale_x_discrete(labels = labs,breaks = gene_order) + 
+  ggsave(useDingbats=FALSE,
+         sprintf("figures/%s/age_at_clone_foundation/age_at_onset_bars.pdf",model_id),
+         width = 2.5,height = 2.3) +
+  ggsave(useDingbats=FALSE,
+         sprintf("figures/%s/age_at_clone_foundation/age_at_onset_bars_smaller.pdf",model_id),
+         width = 1.9,height = 1.7)
+```
+
+##### Clone size vs. growth rate
+
+```{r clone_size_vs_growth_rate, fig.height=3,fig.width=3}
+B <- function(n,f) {
+  return(log(n) + log(f))
+}
+
+expected <- data.frame(
+  x = seq(0.005,0.5,by = 0.005))
+expected$y_50e3 <- B(100e3,expected$x)
+
+Parameters_Age %>%
+  subset(!is.na(Q50) & sum_stat == T) %>% 
+  ggplot(aes(x = maxVAF,y = maxAge*(exp(b_genetic_mean + b_clone_mean)-1),
+             colour = Q50 <= -1)) + 
+  geom_point(size = 0.5) + 
+  geom_line(aes(x = x,y = y_50e3),size = 0.5,data = expected,inherit.aes = F) +
+  theme_gerstung(base_size = 6) + 
+  scale_colour_manual(values = c("lightblue","goldenrod"),labels = c("Feasible","Unfeasible"),name = NULL) + 
+  theme(legend.position = "bottom",legend.key.size = unit(0,"cm")) + 
+  xlab("VAF") + 
+  ylab("Age * Growth per year") + 
+  scale_x_continuous(trans = 'log10') +
+  ggsave(useDingbats=FALSE,
+         sprintf("figures/%s/age_at_clone_foundation/size_vs_growth.pdf",model_id),width = 2,height = 2)
 ```
 
 #### Assessing the technical determinants of the age at onset
 
-Here we inspect how a different number of generations per year affects our interval estimates.
+Here we inspect how different values for the number of generations per year and population size affects our interval estimates and begin by seeing the fraction of clones which cannot be explained.
 
-```{r compare_genes_plausibility,fig.height=2,fig.width=3}
-Parameters_Age %>%
-  group_by(gene) %>% 
-  summarise(N = sum(Q50 < 0),
-            Total = length(Q50)) %>%
-  mutate(Q05 = qbeta(0.05,N,Total-N),
-         Q95 = qbeta(0.95,N,Total-N)) %>%
-  ggplot(aes(x = reorder(gene,N/Total),y = N / Total,
-             ymin = Q05,ymax = Q95)) +
-  geom_bar(stat = "identity") +
-  geom_linerange() +
-  coord_flip() + 
-  scale_y_continuous(expand = c(0,0)) + 
+```{r,fig.height=2,fig.width=5}
+dff <- names(list_of_age_estimates) %>% 
+  lapply(function(x) {
+    population_gen_time <- strsplit(x,split = "_")
+    population <- as.numeric(population_gen_time[[1]][1])
+    gen_time <- as.numeric(population_gen_time[[1]][2])
+    O <- cbind(list_of_age_estimates[[x]],as.data.frame(sampling_idxs),
+               population = population,gen_time = gen_time) 
+    return(merge(O,Parameters,by = c("individual","site")))
+    }) %>%
+  do.call(what = rbind) %>%
+  subset(sum_stat == T) 
+
+dff <- dff %>%
+  mutate(age_at_onset_unadjusted = t0(alpha = (u_values_095 + u_values_005)/2,
+                                      beta = b_clone_mean + b_genetic_mean,
+                                      n = population))
+
+dff %>%
+  group_by(population,gen_time) %>%
+  summarise(UnfeasibleCorrected = sum(Q50 <= -1),
+            Unfeasible = sum(age_at_onset_unadjusted <= -1),
+            N = sum(!is.na(Q50)),
+            N_ = sum(!is.na(age_at_onset_unadjusted))) %>%
+  mutate(p05 = qbeta(0.05,UnfeasibleCorrected,N-UnfeasibleCorrected),
+         p95 = qbeta(0.95,UnfeasibleCorrected,N-UnfeasibleCorrected)) %>%
+  group_by(population) %>%
+  mutate(Unfeasible = c(Unfeasible[1],rep(NA,length(Unfeasible)-1))) %>%
+  ggplot(aes(x = as.factor(gen_time),y = UnfeasibleCorrected / N,fill = "A")) + 
+  geom_bar(stat = "identity") + 
+  geom_bar(aes(x = "E",y = Unfeasible / N_,fill = "B"),stat = "identity") +
+  geom_linerange(aes(ymin = qbeta(0.05,Unfeasible,N-Unfeasible),
+                     ymax = qbeta(0.95,Unfeasible,N-Unfeasible),x="E")) +
+  geom_linerange(aes(ymin = p05,ymax = p95)) +
+  facet_wrap(~ population,nrow = 1) + 
   theme_gerstung(base_size = 6) + 
-  xlab("Gene") + 
-  ylab("Proportion of biologically unfeasible clones") + 
-  theme(axis.text.y = element_text(face = "italic"))
+  xlab("Generation time") +
+  ylab("Fraction of unfeasible clones") + 
+  scale_y_continuous(expand = c(0,0,0.1,0)) +
+  scale_x_discrete(
+    breaks = c("E","1","2","5","10","13","20"),
+    limits = c("E","1","2","5","10","13","20")
+  ) + 
+  scale_fill_manual(values = c("grey40","grey80"),guide = F) +
+  ggsave(useDingbats=FALSE,
+         sprintf("figures/%s/age_at_clone_foundation/fraction_of_plausible_clones.pdf",model_id),width = 4.5,height = 2)
 ```
 
-```{r compare_gen_time_pop_size,fig.width=4.5,fig.height=6}
+```{r compare_gen_time_pop_size,fig.width=6,fig.height=6}
+all_age_estimates <- list_of_age_estimates %>% 
+  lapply(function(x) cbind(as.data.frame(sampling_idxs),as.data.frame(x))) %>%
+  do.call(what = rbind) 
+pop_gen <- rownames(all_age_estimates) %>%
+  str_match("[a-z+0-9]+_[0-9]+") %>% 
+  str_split("_") %>% 
+  do.call(what = rbind)
+all_age_estimates$population <- as.numeric(pop_gen[,1])
+all_age_estimates$gen_time <- as.numeric(pop_gen[,2])
+
 all_samples_for_age_estimation_gene_compare <- list()
 
 for (parameters in names(list_of_age_sampling)) {
@@ -2953,7 +3073,7 @@ for (parameters in names(list_of_age_sampling)) {
       else gene <- "SRSF2-other"
     }
     idx <- length(x[[gene]]) + 1
-    x[[gene]][[idx]] <- S$age_distribution
+    x[[gene]][[idx]] <- ifelse(S$age_distribution > S$t1,S$t1,S$age_distribution)
   }
   output <- x %>% lapply(function(y) {
     J <- do.call(c,y)
@@ -2972,29 +3092,188 @@ for (parameters in names(list_of_age_sampling)) {
   all_samples_for_age_estimation_gene_compare[[parameters]] <- output
 }
 
-all_samples_for_age_estimation_gene_compare %>%
+all_samples_for_age_estimation_gene_compare_df <- all_samples_for_age_estimation_gene_compare %>%
   do.call(what = rbind) %>%
   rowwise() %>%
   mutate(
     pop_size = as.numeric(str_split(parameters,'_')[[1]][1]),
     gen_time = as.numeric(str_split(parameters,'_')[[1]][2])
-  ) %>%
+  ) 
+
+all_samples_for_age_estimation_gene_compare_df %>%
   ggplot(aes(x = as.factor(pop_size),y = Q50,ymin = Q05,ymax = Q95,colour = as.factor(gen_time))) + 
-  geom_linerange(position = position_dodge(width = 0.5),
+  geom_linerange(position = position_dodge(width = 0.7),
                  size = 0.25) + 
-  geom_point(position = position_dodge(width = 0.5),
+  geom_point(position = position_dodge(width = 0.7),
              size = 0.5) + 
   facet_wrap(~ gene,scales = "free",ncol = 4) + 
   theme_gerstung(base_size = 6) + 
-  scale_y_continuous(limits = c(0,90),breaks = c(0,20,40,60,80)) + 
+  scale_y_continuous(limits = c(0,100),breaks = c(0,20,40,60,80)) + 
   xlab("Population size") + 
-  ylab("Age estimates") + 
-  scale_color_manual(values = pal_gsea(n = 4)(4),
+  ylab("Projected age at onset") + 
+  scale_color_manual(values = pal_gsea(n = 6)(6),
                      name = "Generations/year") +
   theme(legend.position = "bottom",
         legend.key.size = unit(0.1,"cm")) + 
   ggsave(useDingbats=FALSE,
-         sprintf("figures/%s/age_at_clone_foundation/estimate_variability.pdf",model_id),width = 4.5,height = 6)
+         sprintf("figures/%s/age_at_clone_foundation/estimate_variability.pdf",model_id),width = 6,height = 6)
+```
+
+```{r,fig.height=4,fig.width=7}
+ci_cut <- function(x,ci = 0.90) {
+  L <- length(x)
+  ci_2 <- (1 - ci)/2
+  lower_bound <- ci_2
+  upper_bound <- 1 - ci_2
+  a <- floor(L * lower_bound)
+  b <- floor(L * upper_bound)
+  o <- rep(F,L)
+  o[a:b] <- T
+  return(o)
+}
+
+all_samples_for_age_estimation_gene_specific <- list()
+
+for (parameters in c("50000_1","50000_2","50000_5","50000_13",
+                     "1e+05_1","1e+05_2","1e+05_5","1e+05_13",
+                     "2e+05_1","2e+05_2","2e+05_5","2e+05_13")) {
+  x <- list()
+
+  for (S in list_of_age_sampling[[parameters]]) {
+    gene <- as.character(S$gene[1])
+    if (gene == "SRSF2") {
+      if (S$site[1] == "SRSF2-P95H") gene <- "SRSF2-P95H"
+      else gene <- "SRSF2-other"
+    }
+    if (gene == "DNMT3A") {
+      if (S$site[1] %in% unique_site_multiple) gene <- "DNMT3A-hotspot"
+      else gene <- "DNMT3A-other"
+    }
+    idx <- length(x[[gene]]) + 1
+    x[[gene]][[idx]] <- ifelse(S$age_distribution > S$t1,S$t1,S$age_distribution)
+  }
+  output <- names(x) %>% lapply(function(n) {
+    y <- x[[n]]
+    J <- do.call(c,y)
+    J <- J[!is.na(J)]
+    J <- ifelse(J < -1,-1,J)
+    O <- data.frame(
+      age_dist = J,
+      gene = n
+    )
+    return(O)}) %>% 
+    do.call(what = rbind)
+  
+  output <- output %>%
+    group_by(gene) %>%
+    arrange(age_dist) %>% 
+    filter(ci_cut(age_dist,0.95)) %>%
+    summarise(
+      x = density(age_dist,bw = 1)$x,y = density(age_dist,bw = 1)$y
+    ) 
+  output$pop_size <- as.numeric(str_split(parameters,'_')[[1]][1])
+  output$gen_time <- as.numeric(str_split(parameters,'_')[[1]][2])
+  all_samples_for_age_estimation_gene_specific[[parameters]] <- output
+}
+
+all_samples_for_age_estimation_gene_specific_df <- all_samples_for_age_estimation_gene_specific %>%
+  do.call(what = rbind)
+
+all_samples_for_age_estimation_gene_specific_df %>%
+  mutate(shift = as.numeric(as.factor(pop_size))) %>% 
+  group_by(gene) %>%
+  mutate(y = y / max(y)) %>%
+  ggplot(aes(x = x,y = shift + y,group = paste(pop_size,gen_time),colour = factor(gen_time,levels = c(1,2,5,13)))) +
+  geom_line(size = 0.25,alpha = 0.7) + 
+  theme_gerstung(base_size = 6) +
+  facet_wrap(~ gene,scales = "free_y") + 
+  theme(legend.position = "bottom",
+        legend.key.height = unit(0.2,"cm"),
+        legend.key.width = unit(0.3,"cm")) + 
+  xlab("Projected age at onset") + 
+  ylab("Density") + 
+  scale_y_continuous(breaks = c(1,2,3),labels = c("50,000","100,000","200,000")) +
+  scale_colour_aaas(name = "Generations/year") + 
+  ggsave(useDingbats=FALSE,
+         sprintf("figures/%s/age_at_clone_foundation/variability_density.pdf",model_id),width = 7,height = 4)
+```
+
+```{r,fig.height=4,fig.width=6.5}
+hist_entropy <- function(x,M=100) {
+  x <- x[!is.na(x)]
+  D <- density(x,bw = M/10)
+  x <- data.frame(dx = D$x,dy = D$y) %>%
+    mutate(groups = cut(dx,seq(-1,M,length.out = 10))) %>%
+    group_by(groups) %>%
+    summarise(S = sum(dy))
+  x <- x$S
+  x <- x / sum(x)
+  x <- x[x > 0]
+  return(-sum(x * log(x)))
+}
+
+uniformity <- all_age_estimates %>% 
+  mutate(Gene = str_match(site,"[A-Z0-9]+")) %>% 
+  mutate(
+    Gene = ifelse(Gene == "SRSF2",
+                  ifelse(site == "SRSF2-P95H",
+                         "SRSF2-P95H",
+                         "SRSF2-other"),
+                  Gene)
+  ) %>% 
+  group_by(Gene,population,gen_time) %>%
+  arrange(Q50) %>%
+  mutate(DistToPrevious = c(NA,diff(Q50))) %>%
+  mutate(DistToPrevious_ = DistToPrevious/max(DistToPrevious)) %>%
+  mutate(Q50_ = Q50 / max(Q50,na.rm = T)) %>% 
+  summarise(D = suppressWarnings(ks.test(Q50_,"punif",0,1)$statistic),
+            entropy = hist_entropy(Q50_,1))
+
+uniformity %>% 
+  group_by(Gene) %>% 
+  mutate(R = rank(-entropy,ties.method = "min")) %>% 
+  mutate(R = ifelse(R <= 3,R,NA)) %>% 
+  ggplot(aes(x = as.factor(population),y = as.factor(gen_time),fill = entropy)) + 
+  geom_tile() + 
+  geom_text(aes(label = R),size = 2, colour = "white") + 
+  facet_wrap(~ Gene,ncol = 4) + 
+  theme_gerstung(base_size = 6) + 
+  ylab("Generations/year") + 
+  xlab("Population size") + 
+  theme(legend.key.width = unit(0.2,"cm")) +
+  scale_fill_material(palette = "deep-purple",reverse = T) + 
+  ggsave(useDingbats=FALSE,
+         sprintf("figures/%s/age_at_clone_foundation/variability_entropy.pdf",model_id),width = 6.5,height = 4)
+
+uniformity %>% 
+  group_by(Gene) %>% 
+  mutate(R = rank(D,ties.method = "min")) %>% 
+  mutate(R = ifelse(R <= 3,R,NA)) %>% 
+  ggplot(aes(x = as.factor(population),y = as.factor(gen_time),fill = D)) + 
+  geom_tile() + 
+  geom_text(aes(label = R),size = 2, colour = "white") + 
+  facet_wrap(~ Gene,ncol = 4) + 
+  theme_gerstung(base_size = 6) + 
+  ylab("Generations/year") + 
+  xlab("Population size") + 
+  theme(legend.key.width = unit(0.2,"cm")) +
+  scale_fill_material(palette = "deep-purple",reverse = T) + 
+  ggsave(useDingbats=FALSE,
+         sprintf("figures/%s/age_at_clone_foundation/variability_ks.pdf",model_id),width = 6.5,height = 4)
+
+uniformity %>%
+  arrange(gen_time,population) %>% 
+  #subset(Gene %in% c("BRCC3","DNMT3A","TET2","U2AF1")) %>%
+  ggplot(aes(x = D,y = entropy,colour = gen_time,size = population)) +
+  geom_point(alpha = 0.5) + 
+  facet_wrap(~ Gene) +
+  theme_gerstung(base_size = 6) + 
+  scale_size(range = c(0.5,2)) + 
+  theme(legend.key.size = unit(0.3,"cm")) + 
+  xlab("KS statistic") + 
+  ylab("Entropy") +
+  ggsave(useDingbats=FALSE,
+         sprintf("figures/%s/age_at_clone_foundation/variability_ks_vs_entropy.pdf",model_id),width = 6.5,height = 4)
 ```
 
 #### Smoking and age at onset
@@ -3513,18 +3792,24 @@ statistics_data_bars_simplified <- statistics_data_bars_simplified %>%
     gene = factor(gene,rev(gene_order_explained_simp),ordered = T)
   )
 
+statistics_data_bars_good <- statistics_data_bars %>%
+  subset(key == "good") %>%
+  mutate(gene = factor(gene,levels = gene_order_explained))
 statistics_data_bars %>% 
-  ggplot(aes(x = gene,y = Proportion,fill = key)) + 
-  geom_bar(stat = 'identity',color='black',size = 0.1,
-           width = 0.8) +
+  mutate(gene = factor(gene,levels = gene_order_explained)) %>%
+  ggplot(aes(x = gene,y = Proportion)) + 
+  geom_bar(data = statistics_data_bars_good,
+           aes(y = 1),stat = "identity",fill = "grey95",width = 0.8) +
+  geom_bar(data = statistics_data_bars_good,
+           aes(fill = gene),
+           stat="identity",width = 0.8) +
   geom_linerange(aes(ymin = Proportion005-0.0005,ymax = Proportion095+0.0005),
-                 colour = "black",size = 1.5) +
-  geom_linerange(aes(ymin = Proportion,ymax = Proportion095),
-                 colour = "black",
-                 size = 1) + 
+                 colour = "black",size = 0.75) +
+  geom_linerange(aes(ymin = Proportion,ymax = Proportion095,colour = gene),
+                 size = 0.5) + 
   geom_linerange(aes(ymin = Proportion,ymax = Proportion005),
-                 colour = "grey80",
-                 size = 1) + 
+                 colour = "grey95",
+                 size = 0.5) + 
   theme_gerstung(base_size = 6) +
   facet_grid(~ model_label) + 
   #rotate_x_text() + 
@@ -3535,21 +3820,21 @@ statistics_data_bars %>%
     expand = c(0.003,0.003)
   ) +
   scale_fill_manual(name = NULL,
-                    values = c("black","grey80"),
-                    breaks = c("good","not_good"),
-                    labels = c("Good fit","Poor fit")) +
+                    values = gene_colours,
+                    guide = F) +
+  scale_colour_manual(name = NULL,
+                      values = gene_colours,
+                      guide = F) +
   theme(legend.position = "bottom",
         axis.text.y = element_text(face = 'italic'),
         legend.margin=margin(0,0,0,0),
         legend.box.margin=margin(0,0,0,0),
         legend.key.size = unit(0.25,"cm")) + 
-  guides(fill=guide_legend(nrow=2,byrow=TRUE)) +
   xlab("Driver gene") + 
-  ylab("Fraction of\ntrajectories") + 
+  ylab("Fraction of clones growing\nat constant rate") + 
   coord_flip() +
-  guides(fill = guide_legend(direction = "horizontal")) +
-  ggsave(useDingbats=FALSE,sprintf("figures/%s/statistical_analysis/statsitcs_barplot.pdf",model_id),
-         height = 3.3,width = 2) 
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/statistical_analysis/statistics_barplot.pdf",model_id),
+         height = 2.4,width = 1.9) 
 
 statistics_data_bars_simplified %>% 
   mutate(

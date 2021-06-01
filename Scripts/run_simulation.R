@@ -12,7 +12,7 @@ all_files <- list.files(path = "hsc_output/",
 
 min_age_data <- full_data %>%
   select(SardID,Age) %>%
-  distinct %>% 
+  distinct %>%
   group_by(SardID) %>%
   filter(Age == min(Age)) %>%
   ungroup %>%
@@ -47,8 +47,7 @@ sample_coverage <- function(n) {
 
 # Sample ------------------------------------------------------------------
 
-set.seed(4242)
-N_DRIVERS <- 20
+N_DRIVERS <- 50
 gen_per_year <- 13
 
 sample_lists <- list()
@@ -58,10 +57,10 @@ dispersion_sd <- beta_values[2,1]
 
 clone_counts <- list()
 
+pb <- progress::progress_bar$new(total = length(all_files))
+
 for (i in 1:length(all_files)) {
-  if (i %% 500 == 0) {
-    print(i)
-  }
+  pb$tick()
   file <- all_files[i]
   split_file <- str_split(file,pattern = '/')[[1]]
   root <- split_file[length(split_file)-1]
@@ -151,17 +150,19 @@ simulated_samples <- simulated_samples %>%
 clone_count_df <- clone_counts %>%
   do.call(what = rbind)
 
-Data <- simulated_samples %>%
+Data_Full <- simulated_samples %>%
   ungroup() %>% 
   group_by(Individual) %>% 
-  filter(all(sample/coverage < 0.48)) %>%
+  filter(all(sample/coverage < 0.45)) %>%
   filter(!(max(sample/coverage) > 0.1 & 
-             abs(sample[which.max(Gen)]/coverage[which.max(Gen)] - sample[which.min(Gen)]/coverage[which.min(Gen)]) < 0.05 & 
-             max(sample/coverage) < 0.45)) %>% 
-  group_by(fitness) %>%
+             abs(sample[which.max(Gen)]/coverage[which.max(Gen)] - sample[which.min(Gen)]/coverage[which.min(Gen)]) < 0.05 &
+             max(sample/coverage) < 0.48)) %>% 
+  group_by(fitness)
+  
+Data <- Data_Full %>%
   filter(Individual %in% sample(
     x = Individual,
-    size = min(length(Individual),25),
+    size = min(length(Individual),30),
     replace = F))
 
 
@@ -206,7 +207,7 @@ m <- model(genetic_coef,
 
 draws <- mcmc(m,
               warmup = 1e3,
-              sampler = hmc(Lmin = 200,Lmax = 300),
+              sampler = hmc(Lmin = 100,Lmax = 200),
               n_samples = 1e3,
               n_cores = 4)
 

@@ -1,0 +1,17 @@
+**/data
+**/models
+**/logs
+**/summaries
+**/hsc_output*
+**/data_output
+**/scripts
+**/Scripts_
+.Rhistory
+.DS_Store
+*csv
+*pdf
+*svg
+.Rproj.user
+vaf*Rmd
+Notebook_Emily_SimulatedTrees.Rmd
+trees.Rmd

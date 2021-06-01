@@ -1,0 +1,578 @@
+---
+title: "Trees in Emily's data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# setup
+
+```{r,echo=F,collapse=T}
+tm <- 0.352777778
+pop_size <- 1e5
+source("Scripts/vaf_dynamics_functions.R")
+library(phylodyn)
+library(parallel)
+INLA:::inla.dynload.workaround()
+set.seed(42)
+source("Scripts/prepare_data.R")
+
+change_point <- function(x, b0, m1, m2, delta) { 
+  b0 + (x*m1) + (sapply(x-delta, function (t) max(0, t)) * m2)
+}
+
+expand_edge <- function(tree,edge_id) {
+  # takes an edge_id and retrieves the tips which are common to this edge
+  #edge_id = 342
+  n_tips <- length(tree$tip.label)
+  edge_ids <- c(edge_id)
+  done <- F
+  while (done == F) {
+    new_edge <- tree$edge[,2][tree$edge[,1] %in% edge_id]
+    edge_ids <- c(edge_ids,new_edge)
+    edge_id <- new_edge
+    if (length(edge_id) == 0) {
+      done <- T
+    }
+  }
+  edge_ids <- unique(edge_ids)
+  edge_ids <- edge_ids[edge_ids <= n_tips]
+  return(edge_ids)
+}
+
+trim_tree <- function(tree,l) {
+  n_tips <- length(tree$tip.label)
+  tree$edge.length <- ifelse(
+    tree$edge[,2] <= n_tips,
+    tree$edge.length - l,
+    tree$edge.length
+  )
+  return(tree)
+}
+
+expanded_clade_reader <- function(path) {
+  # convenience function to read expanded clade csv
+  read.csv(path) %>%
+    mutate(HasDriver = !grepl("Clade",variant_ID)) %>% 
+    mutate(CladeNo = as.numeric(ifelse(!HasDriver,str_match(variant_ID,"[0-9]+"),NA))) %>% 
+    arrange(HasDriver,CladeNo) %>%
+    mutate(variant_ID = gsub(" p.","-",variant_ID)) %>% 
+    mutate(variant_ID = gsub("_p.","-",variant_ID)) %>% 
+    mutate(variant_ID = gsub("_","-",variant_ID)) %>% 
+    mutate(variant_ID = gsub(" ","",variant_ID)) %>% 
+    return
+}
+
+colours <- c(
+  RColorBrewer::brewer.pal(9, "Set1"),
+  RColorBrewer::brewer.pal(8, "Set2"),
+  RColorBrewer::brewer.pal(8, "Set3"))
+
+ages <- list(KX003 = 81,KX004 = 77,
+             KX007 = 75,KX008 = 76)
+
+trees <- list(
+  KX003 = read.tree("data/Trees_emily/KX003_5_ultra.tree"),
+  KX004 = read.tree("data/Trees_emily/KX004_4_ultra.tree"),
+  KX007 = read.tree("data/Trees_emily/KX007_2_ultra.tree"),
+  KX008 = read.tree("data/Trees_emily/KX008_2_ultra.tree")
+)
+
+clade_identification <- list(
+  KX003 = expanded_clade_reader("data/Trees_emily/KX003_5_expanded_clades.csv"),
+  KX004 = expanded_clade_reader("data/Trees_emily/KX004_4_expanded_clades.csv"),
+  KX007 = expanded_clade_reader("data/Trees_emily/KX007_2_expanded_clades.csv"),
+  KX008 = expanded_clade_reader("data/Trees_emily/KX008_2_expanded_clades.csv")
+)
+```
+
+# bnpr estimates
+
+```{r,echo=F,collapse=T}
+file_name <- "data_output/michell_bnpr_estimates.R"
+if (file.exists(file_name) == T) {
+  tmp_obj <- readRDS(file_name)
+  clades <- tmp_obj[[1]]
+  clade_ids <- tmp_obj[[2]]
+  bnpr_estimates <- tmp_obj[[3]]
+  bnpr_estimates_trimmed <- tmp_obj[[4]]
+  individual_bnpr_estimates <- tmp_obj[[5]]
+  individual_bnpr_estimates_trimmed <- tmp_obj[[6]]
+} else {
+  clades <- list()
+  clade_ids <- list()
+  bnpr_estimates <- list()
+  bnpr_estimates_trimmed <- list()
+  individual_bnpr_estimates <- list()
+  individual_bnpr_estimates_trimmed <- list()
+  
+  for (x in c("KX003","KX004","KX007","KX008")) {
+    tr <- trees[[x]]
+    bnpr_estimates[[x]] <- list()
+    clades[[x]] <- clade_identification[[x]]$node %>%
+      lapply(expand_edge,tree = tr)
+    clade_ids[[x]] <- clade_identification[[x]]$variant_ID
+    color_vector <- rep("black",length(tr$tip.label)) 
+    for (i in 1:length(clades[[x]])) {
+      clade <- clades[[x]][[i]]
+      color_vector[clade] <- colours[i]
+    }
+    tree_groups <- groupOTU(tr,clades[[x]])
+    ggtree(tree_groups,
+           aes(colour = group)) +
+      scale_color_manual(breaks = c(0:length(clades[[x]])),
+                         values = c("black",colours[1:length(clades[[x]])]))
+    X <- mclapply(list(tr,trim_tree(tr,5/ages[[x]])),BNPR,mc.cores = 2)
+    individual_bnpr_estimates[[x]] <- X[[1]]
+    # bnpr for tree trimmed by 5 years
+    individual_bnpr_estimates_trimmed[[x]] <- X[[2]]
+    for (i in 1:length(clades[[x]])) {
+      clade <- clades[[x]][[i]]
+      tree_subset <- keep.tip(tr,clade)
+      tree_subset <- multi2di(tree_subset)
+      X <- mclapply(list(tree_subset,trim_tree(tree_subset,5/ages[[x]])),BNPR,mc.cores = 2)
+      bnpr_estimates[[x]][[i]] <- X[[1]]
+      # bnpr for tree subsets trimmed by 5 years
+      bnpr_estimates_trimmed[[x]][[i]] <- X[[2]]
+    }
+  }
+  saveRDS(
+    list(clades,clade_ids,bnpr_estimates,bnpr_estimates_trimmed,individual_bnpr_estimates,individual_bnpr_estimates_trimmed),
+    file_name)
+}
+```
+
+# plotting estimates
+
+## making plots for non-trimmed data
+
+```{r,echo=F,collapse=T}
+all_plots <- list()
+all_growth_estimates <- list()
+
+for (x in names(clades)) {
+  all_estimates <- list()
+  all_growth_estimates[[x]] <- list()
+  max_pop <- max(individual_bnpr_estimates[[x]]$summary$quant0.975) 
+  tr <- trees[[x]]
+  total_size <- length(tr$tip.label)
+  for (i in 1:length(clades[[x]])) {
+    clade_size <- clade_identification[[x]]$number_samples[i]
+    vaf_from_clade <- clade_size / total_size
+    dff <- bnpr_estimates[[x]][[i]]$summary
+    dff$clade <- i
+    all_estimates[[i]] <- dff
+    X <- (1 - dff$time) * ages[[x]]
+    Y <- log(dff$quant0.5)
+    not_valid <- is.infinite(Y) | is.na(Y)
+    Y <- Y[!not_valid]
+    X <- X[!not_valid]
+    Y_exp <- exp(Y)
+    Y975 <- dff$quant0.975[!not_valid]
+    Y025 <- dff$quant0.025[!not_valid]
+    W <- (log(Y975) - log(Y025))^2/16
+    # M fixes some problems regarding initialization for the nonlinear fit
+    M <- 0
+    M <- ifelse(x == "KX007" & i == 16,10,M)
+    Y_exp_vaf <- Y_exp / Y_exp[1] * vaf_from_clade
+    nonlinear <- nls(Y_exp ~ SSlogis(X, Asym, b2, b3),
+                     start = list(Asym = max(Y_exp) + 100,b2 = max(X),b3 = 10),
+                     control = nls.control(maxiter = 1000,warnOnly = T),
+                     data = data.frame(X, Y_exp),
+                     upper = list(Asym = max_pop,b2 = max(X),b3 = 1000),
+                     algorithm = "port",
+                     weights = 1/W)
+    nonlinear_vaf <- nls(Y_exp_vaf ~ SSlogis(X, 1, b2, b3),
+                         start = list(b2 = max(X),b3 = 10),
+                         control = nls.control(maxiter = 1000,warnOnly = T),
+                         data = data.frame(X, Y_exp_vaf),
+                         upper = list(Asym = max_pop,b2 = max(X),b3 = 1000),
+                         algorithm = "port",
+                         weights = 1/W)
+
+    linear <- lm(Y ~ X,weights = 1/W)
+    opt_fn <- function(par) {
+      se <- (Y - change_point(X,par[1],par[2],par[3],par[4]))^2
+      return(mean(se / W))
+    }
+    change_point_regression <- optim(
+      par = c(linear$coefficients[1],
+              linear$coefficients[2],
+              0,
+              mean(X)),
+      method = "L-BFGS-B",
+      lower = c(NA,0,NA,0),
+      upper = c(NA,NA,NA,800),
+      fn = opt_fn)
+
+    if (length(X) > 50) {
+      linear_early <- lm(Y ~ X,data = data.frame(X, Y)[81:100,],weights = 1/W[81:100])
+      linear_late <- lm(Y ~ X,data = data.frame(X, Y)[1:20,],weights = 1/W[1:20])
+    } else {
+      linear_early <- list(coefficients=NA)
+      linear_late <- list(coefficients=NA)
+    }
+    
+    pred_nl <- predict(nonlinear)
+    pred_l <- predict(linear)
+    n_samples <- clade_identification[[x]]$number_samples[i]
+    clade_id <- clade_identification[[x]]$variant_ID[i]
+    all_estimates[[i]]$n_samples <- n_samples
+    all_estimates[[i]]$clade_id <- clade_id
+    all_growth_estimates[[x]][[i]] <- list(
+      linear = linear,
+      nonlinear = nonlinear,
+      linear_early = linear_early,
+      linear_late = linear_late,
+      change_point_regression = change_point_regression,
+      nonlinear_vaf = nonlinear_vaf,
+      data = data.frame(
+        X,Y,Y025,Y975,Y_exp,pred_l,pred_nl,
+        clade = i,clade_id = clade_id,id = x,n_samples = n_samples))
+  }
+  all_estimates <- do.call(rbind,all_estimates)
+  # plotting the tree
+  tree_groups <- groupOTU(trees[[x]],clades[[x]])
+  mrca <- c()
+  mrca_names <- c()
+  for (C in 1:length(clades[[x]])) {
+    clade <- clades[[x]][[C]]
+    mrca[C] <- MRCA(trees[[x]],clade)
+    mrca_names[C] <- C
+  }
+  edge_labels <- data.frame(trees[[x]]$edge)
+  edge_labels$LL <- trees[[x]]$edge %>%
+    apply(1,function(x) {
+      ix <- which(mrca %in% x[2])
+      if (length(ix) > 0) {
+        return(mrca_names[ix])
+      } else {
+        return(NA)
+      }
+    }) 
+  colnames(edge_labels) <- c("parent", "node", "edge_num")
+  edge_labels$edge_num <- clade_identification[[x]]$variant_ID[edge_labels$edge_num]
+  tree_plot <- ggtree(tree_groups,aes(colour = group,size = group == 0)) +
+    scale_color_manual(breaks = c(0:length(clades[[x]])),
+                       values = c("grey80",colours[1:length(clades[[x]])]),
+                       guide = F) + 
+    scale_size_discrete(breaks = c(F,T),range = c(0.25,0.1),guide = F) +
+    ggtitle(x) + 
+    geom_text(aes(label = 1)) + 
+    theme_gerstung(base_size = 6) + 
+    theme(axis.line.y = element_blank(),axis.ticks.y = element_blank(),axis.text.y = element_blank()) + 
+    scale_x_continuous(breaks = c(0,1),labels = c(0,ages[[x]]),expand = c(0,0))
+  tree_plot <- tree_plot %<+% edge_labels + 
+    geom_label_repel(aes(x=branch, label=edge_num),
+                     alpha = 0.8,
+                     size = 2.2,
+                     vjust = 0.6,
+                     min.segment.length = 0.01,
+                     segment.size = 0.25,
+                     label.padding = unit(0,"cm"),
+                     label.r = unit(0,"cm"),
+                     label.size = unit(0,"cm"),
+                     colour = "black")
+  
+  # plotting the trajectories
+  bnpr_plot <- all_estimates %>%
+    subset(n_samples >= 5) %>% 
+    mutate(clade_id = factor(clade_id,levels = clade_identification[[x]]$variant_ID)) %>%
+    ggplot(aes(x = (1-time)*ages[[x]],y = quant0.5,
+               color = as.factor(clade),
+               fill = as.factor(clade))) + 
+    geom_ribbon(aes(ymin = quant0.025,ymax = quant0.975),color = NA,alpha = 0.1) +
+    geom_line(size = 0.25) + 
+    scale_y_continuous(trans = 'log10') + 
+    theme_gerstung(base_size = 6) + 
+    ylab("Effective population size") + 
+    xlab("Age") +
+    facet_wrap(~ clade_id) +
+    scale_color_manual(breaks = c(0:length(colours)),
+                       values = c("black",colours),
+                       guide = F) +
+    scale_fill_manual(breaks = c(0:length(colours)),
+                      values = c("black",colours),
+                      guide = F) + 
+    theme(strip.text = element_text(margin = margin(0)),
+          strip.placement = "inside") + 
+    coord_cartesian(xlim = c(0,ages[[x]]),
+                    ylim = c(NA,1e6)) + 
+    scale_x_continuous(breaks = c(0,30,60,90))
+  all_plots[[x]] <- list(
+    tree = tree_plot,
+    bnpr = bnpr_plot
+  )
+}
+```
+
+```{r}
+all_growth_estimates_df <- do.call(
+  rbind,
+  lapply(
+    c("KX003","KX004","KX007","KX008"),
+    function(x) do.call(rbind,lapply(all_growth_estimates[[x]],function(x) x$data))
+  )
+)
+
+final_pop_size <- all_growth_estimates_df %>%
+  group_by(clade,id,clade_id) %>%
+  summarise(N = Y[which.max(X)],N025 = log(Y025[which.max(X)]),N975 = log(Y975[which.max(X)]),
+            n_samples = n_samples[1]) %>%
+  as.data.frame %>% 
+  rbind(
+    data.frame(
+      clade = rep(NA,4),
+      id = c("KX003","KX004","KX007","KX008"),
+      clade_id = rep("Total",4),
+      N = sapply(individual_bnpr_estimates,function(x) log(x$summary$quant0.5[1])),
+      N025 = sapply(individual_bnpr_estimates,function(x) log(x$summary$quant0.025[1])),
+      N975 = sapply(individual_bnpr_estimates,function(x) log(x$summary$quant0.975[1])),
+      n_samples = sapply(trees,function(x) length(x$tip.label))
+    )
+  )
+
+all_growth_estimates_values_df <- lapply(
+  c("KX003","KX004","KX007","KX008"),
+  function(x) data.frame(
+    linear = unlist(lapply(all_growth_estimates[[x]],function(x) x$linear$coefficients[2])),
+    linear_se = unlist(lapply(all_growth_estimates[[x]],function(x) summary(x$linear)$coefficients[2,2])),
+    nonlinear = unlist(lapply(all_growth_estimates[[x]],function(x) 1/x$nonlinear$m$getPars()[3])),
+    nonlinear_vaf = unlist(lapply(all_growth_estimates[[x]],function(x) 1/x$nonlinear_vaf$m$getPars()[2])),
+    linear_early = unlist(lapply(all_growth_estimates[[x]],function(x) x$linear_early$coefficients[2])),
+    linear_late = unlist(lapply(all_growth_estimates[[x]],function(x) x$linear_late$coefficients[2])),
+    cp_1 = unlist(lapply(all_growth_estimates[[x]],function(x) x$change_point_regression$par[2])),
+    cp_2 = unlist(
+      lapply(
+        all_growth_estimates[[x]],function(x) sum(x$change_point_regression$par[c(3,2)]))),
+    id = x,
+    clade = clade_identification[[x]]$variant_ID[c(1:length(all_growth_estimates[[x]]))],
+    N_samples = clade_identification[[x]]$number_samples[c(1:length(all_growth_estimates[[x]]))]
+  )
+) %>% 
+  do.call(what = rbind)
+
+size_estimates_df <- lapply(
+  c("KX003","KX004","KX007","KX008"),
+  function(x) data.frame(
+    no_cap = unlist(lapply(all_growth_estimates[[x]],function(x) x$nonlinear$m$getPars()[1])),
+    id = x,
+    clade = clade_identification[[x]]$variant_ID[c(1:length(all_growth_estimates[[x]]))],
+    N_samples = clade_identification[[x]]$number_samples[c(1:length(all_growth_estimates[[x]]))]
+  )
+) %>% 
+  do.call(what = rbind)
+```
+
+## Population size estimates at last timepoint
+
+```{r,echo=F,collapse=T}
+final_pop_size %>%
+  subset(n_samples >= 5) %>%
+  ggplot(aes(x = clade_id,y = exp(N),ymin = exp(N025),ymax = exp(N975),color = ifelse(clade_id == "Total","Total","NotTotal"))) + 
+  geom_point() + 
+  geom_linerange() + 
+  facet_wrap(~ id,scales = "free") + 
+  coord_cartesian(ylim = c(NA,1e10)) + 
+  xlab("Clade") + 
+  ylab("EPS for final timepoint") + 
+  theme_gerstung(base_size = 6) + 
+  rotate_x_text(angle = 30) + 
+  scale_y_continuous(trans = 'log10') + 
+  scale_color_manual(values = c(Total = "grey",NotTotal = "black"),guide = F) 
+
+final_pop_size %>%
+  subset(n_samples >= 5) %>%
+  ggplot(aes(x = n_samples,y = exp(N),ymin = exp(N025),ymax = exp(N975),color = ifelse(clade_id == "Total","Total","NotTotal"))) + 
+  geom_point() + 
+  geom_linerange() + 
+  xlab("Number of samples in clade") + 
+  ylab("EPS for final timepoint") + 
+  theme_gerstung(base_size = 6) + 
+  rotate_x_text(angle = 30) + 
+  scale_x_continuous(trans = 'log10') +
+  scale_y_continuous(trans = 'log10') + 
+  coord_cartesian(ylim = c(NA,1e20)) + 
+  scale_color_manual(values = c(Total = "grey",NotTotal = "black"),guide = F) 
+```
+
+## plotting coefficients for linear and sigmoidal fits
+
+```{r,fig.height=2.5,fig.width=6}
+all_growth_estimates_values_df %>%
+  group_by(id) %>%
+  mutate(clade = factor(clade,levels = clade_identification[[id[1]]]$variant_ID)) %>% 
+  mutate(clade_N = seq(1,length(clade))) %>%
+  mutate(Color = grepl("DNMT3A",clade)) %>% 
+  subset(N_samples >= 5) %>% 
+  ggplot(aes(x = clade,y = linear,
+             ymin = linear - linear_se,ymax = linear + linear_se,
+             colour = Color)) + 
+  geom_hline(yintercept = 0.1,size = 0.25) +
+  geom_hline(yintercept = 0.3,size = 0.25) +
+  geom_linerange(size = 0.25) +
+  geom_point(size = 0.25,shape = 3) + 
+  facet_grid(~ id,scales = "free_x",space = "free_x") + 
+  scale_color_manual(breaks = c(F,T),
+                     values = colours[1:2],
+                     guide = F) +
+  theme_gerstung(base_size = 6) + 
+  coord_cartesian(ylim = c(0,NA)) +
+  ylab("Annual growth") + 
+  xlab("Clade") + 
+  rotate_x_text(angle = 45) + 
+  ggtitle("Plotting coefficients for linear fit") +
+  ggsave("figures/model_ch/trees/mitchell_coefficients_linear.pdf",
+         height = 2,
+         width = 4)
+
+all_growth_estimates_values_df %>%
+  group_by(id) %>%
+  mutate(clade = factor(clade,levels = clade_identification[[id[1]]]$variant_ID)) %>% 
+  mutate(clade_N = seq(1,length(clade))) %>%
+  mutate(Color = grepl("DNMT3A",clade)) %>% 
+  subset(N_samples >= 5) %>% 
+  ggplot(aes(x = clade,y = nonlinear,
+             colour = as.factor(Color))) + 
+  geom_hline(yintercept = 0.1,size = 0.25) +
+  geom_hline(yintercept = 0.3,size = 0.25) +
+  geom_point(size = 0.25,shape = 3) + 
+  facet_grid(~ id,scales = "free_x",space = "free_x") + 
+  scale_color_manual(breaks = c(F,T),
+                     values = colours[1:2],
+                     guide = F) +
+  theme_gerstung(base_size = 6) + 
+  coord_cartesian(ylim = c(0,NA)) +
+  ylab("Annual growth") + 
+  xlab("Clade") + 
+  rotate_x_text(angle = 45) + 
+  ggtitle("Plotting coefficients for sigmoidal fit") +
+  ggsave("figures/model_ch/trees/mitchell_coefficients_nonlinear.pdf",
+         height = 2,
+         width = 4)
+```
+
+## Growth rates when using first (early) or last (late) 20% of the data
+
+```{r,fig.height=2,fig.width=2}
+all_growth_estimates_values_df %>%
+  subset(N_samples >= 5) %>% 
+  gather(key = "key",value = "value",cp_1,cp_2) %>%
+  mutate(key = ifelse(key == "cp_1","Early","Late")) %>% 
+  ggplot(aes(x = key,y = exp(value) - 1)) + 
+  geom_point(size = 0.5) +
+  geom_line(aes(group = paste(id,clade)),alpha = 0.4,size = 0.25) + 
+  geom_boxplot(size = 0.25,outlier.colour = NA) + 
+  theme_gerstung(base_size = 6) + 
+  coord_cartesian(ylim = c(0,1.1)) + 
+  ylab("Annual growth rate") + 
+  xlab("") + 
+  ggtitle("Comparing growth rates estimates when\nconsidering early and late growth rates") +
+  ggsave("figures/model_ch/trees/mitchell_coefficients_early_late.pdf",
+         height = 2.5,
+         width = 2)
+```
+
+## Trajectories for different types of fit 
+
+```{r,fig.height=2,fig.width=3}
+min_clades <- 5
+all_growth_estimates_df %>% 
+  group_by(clade,id) %>% 
+  mutate(X = X - min(X)) %>% 
+  subset(n_samples >= min_clades) %>%
+  mutate(col = ifelse(grepl("DNMT3A",clade_id),"DNMT3A",
+                      ifelse(grepl("Clade",clade_id),"No known driver","Other driver"))) %>% 
+  ggplot(aes(x = X,y = exp(Y),colour = col,group = clade)) + 
+  geom_line(size = 0.25) + 
+  facet_wrap(~ id) + 
+  scale_color_manual(values = c(DNMT3A = "#BE0032",
+                                `Other driver` = "#18A558",
+                                `No known driver` = "grey50"),
+                     guide = F) + 
+  scale_y_continuous(trans = 'log10',expand = c(0,0),breaks = c(1e-2,1,1e2,1e4,1e6)) +
+  coord_cartesian(ylim = c(1e-2,1e7)) +
+  theme_gerstung(base_size = 6) + 
+  xlab("Time since first coal. (years)") +
+  ylab("EPS") +
+  theme(strip.text = element_text(margin = margin(b = 0.5))) +
+  ggsave("figures/model_ch/trees/mitchell_trajectories.pdf",
+         height = 1.5,
+         width = 1.8)
+
+all_growth_estimates_df %>% 
+  group_by(clade,id) %>% 
+  mutate(X = X - min(X)) %>% 
+  subset(n_samples >= min_clades) %>%
+  ggplot(aes(x = X,y = pred_l,colour = as.factor(clade))) + 
+  geom_line(aes(y = Y),size = 0.25) + 
+  geom_line(size = 0.25,linetype = 2) + 
+  facet_wrap(~ id) + 
+  scale_color_manual(breaks = c(1:18),
+                     values = c(colours[1:18]),
+                     guide = F) + 
+  scale_y_continuous(breaks = seq(-21,21,by = 3),labels = 10^seq(-21,21,by = 3)) + 
+  theme_gerstung(base_size = 6) + 
+  xlab("Time since first coalescence (years)") +
+  ylab("Effective population size") +
+  ggtitle("Linear fit") +
+  ggsave("figures/model_ch/trees/mitchell_trajectories_predicted.pdf",
+         height = 2,
+         width = 3)
+
+all_growth_estimates_df %>% 
+  group_by(clade,id) %>% 
+  mutate(X = X - min(X)) %>% 
+  subset(n_samples >= min_clades) %>%
+  ggplot(aes(x = X,y = pred_nl,colour = as.factor(clade))) + 
+  geom_line(aes(y = exp(Y)),size = 0.25) + 
+  geom_line(size = 0.25,linetype = 2) + 
+  facet_wrap(~ id) + 
+  scale_color_manual(breaks = c(1:18),
+                     values = c(colours[1:18]),
+                     guide = F) + 
+  scale_y_continuous(trans = 'log10') + 
+  theme_gerstung(base_size = 6) + 
+  xlab("Time since first coalescence (years)") +
+  ylab("Effective population size") +
+  ggtitle("Sigmoidal fit") +
+  ggsave("figures/model_ch/trees/mitchell_trajectories_predicted_nl.pdf",
+         height = 2,
+         width = 3)
+
+nl_sc_pop_size <- data.frame(
+  clade = rep(NA,4),
+  id = c("KX003","KX004","KX007","KX008"),
+  clade_id = rep("Total",4),
+  N = sapply(individual_bnpr_estimates,function(x) log(x$summary$quant0.5[1])),
+  N025 = sapply(individual_bnpr_estimates,function(x) log(x$summary$quant0.025[1])),
+  N975 = sapply(individual_bnpr_estimates,function(x) log(x$summary$quant0.975[1])),
+  n_samples = sapply(trees,function(x) length(x$tip.label))
+)
+```
+
+## Trees and trajectories
+
+```{r}
+plot_grid(
+  plot_grid(all_plots$KX003$tree,all_plots$KX003$bnpr,ncol = 1,rel_heights = c(1,0.5)),
+  plot_grid(all_plots$KX004$tree,all_plots$KX004$bnpr,ncol = 1,rel_heights = c(1,0.5)),
+  nrow = 1
+) + 
+  ggsave("figures/model_ch/trees/mitchell_1.pdf",
+         height = 6,
+         width = 7)
+
+plot_grid(
+  plot_grid(all_plots$KX007$tree,all_plots$KX007$bnpr,ncol = 1,rel_heights = c(1,0.5)),
+  plot_grid(all_plots$KX008$tree,all_plots$KX008$bnpr,ncol = 1,rel_heights = c(1,0.5)),
+  nrow = 1
+) + 
+  ggsave("figures/model_ch/trees/mitchell_2.pdf",
+         height = 6,
+         width = 7)
+
+write.csv(all_growth_estimates_values_df,"data_output/mitchell_bnpr_coefficients.csv",row.names = T)
+```

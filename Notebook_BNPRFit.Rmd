@@ -1,0 +1,1473 @@
+---
+title: "The Natural History of Clonal Haematopoiesis"
+subtitle: "Investigating fit to BNPR"
+author: 
+    - José Guilherme de Almeida
+    - Moritz Gerstung
+output: 
+  html_document:
+    theme: lumen
+    highlight: tango
+    code_folding: hide
+    df_print: paged
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 4
+    number_sections: true
+---
+
+In this notebook we inspect how we can use the BNPR fits from `phylodyn` to model annual growth.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Setup
+
+```{r}
+source("Scripts/vaf_dynamics_functions.R")
+source("Scripts/make_ultrametric.R")
+
+library(parallel)
+library(Matrix)
+library(castor)
+library(phangorn)
+library(phylodyn)
+library(minpack.lm)
+INLA:::inla.dynload.workaround()
+
+change_point <- function(x, b0, m1, m2, delta) { 
+  b0 + (x*m1) + (sapply(x-delta, function (t) max(0, t)) * m2)
+}
+
+plot_tree <- function(obj) { 
+  tree_ultra <- obj$tree_ultra
+  tree_ultra$edge.length[is.infinite(tree_ultra$edge.length)] <- 0
+  tree_ultra$tip.label <- obj$tree$S
+  driver_list <- Filter(function(x) length(x) > 5,obj$driver_list)
+  if (length(driver_list) > 1) {
+    colours <- RColorBrewer::brewer.pal(length(driver_list),"Set3")
+  } else {
+    colours <- c("black")
+  }
+  colour_code <- rep("black",length(tree_ultra$tip.label))
+  R <- 1:length(driver_list)
+  if (length(driver_list) == 0) {
+    R <- numeric(0)
+  } 
+  for (i in R) {
+    D <- driver_list[[i]]
+    colour_code[tree_ultra$tip.label %in% unique(D)] <- colours[i]
+  }
+  plot(tree_ultra,tip.color = colour_code)
+}
+
+clade_from_mrca <- function(tree,mrca) {
+  edge_idx <- which(tree$edge[,1] == mrca)
+  continue <- T
+  output <- c(which(tree$edge[,2] == mrca))
+  while (continue == T) {
+    if (length(edge_idx) > 0) {
+      output <- c(output,edge_idx)
+      new_edge_idx <- c()
+      for (idx in edge_idx) {
+        nodes <- tree$edge[idx,2]
+        new_idxs <- which(tree$edge[,1] == nodes)
+        new_edge_idx <- c(new_edge_idx,new_idxs)
+      }
+      edge_idx <- new_edge_idx
+    } else {
+      continue <- F
+    }
+  }
+  return(output)
+}
+
+build_tree <- function(sub_data,subsample_size=100,
+                       detection_threshold=0) {
+  sub_af <- sub_data %>% 
+    group_by(CloneID) %>% 
+    summarise(N = max(NClones),.groups = "drop") %>%
+    arrange(CloneID)
+  MaxClone <- max(sub_data$CloneID)
+  MaxMut <- max(sub_data$MutID)
+  sub_af_sparse <- rep(0,MaxClone)
+  sub_af_sparse[sub_af$CloneID] <- sub_af$N 
+  
+  Presence <- sparseMatrix(i = sub_data$CloneID,
+                           j = sub_data$MutID,
+                           dims = c(MaxClone,MaxMut))
+  Presence[cbind(sub_data$CloneID,sub_data$MutID)] <- 1
+
+  if (sum(as.logical(sub_af_sparse)) < subsample_size) {
+    sub_af_sparse <- rep(1,length(sub_af_sparse))
+  }
+  
+  S <- sample(MaxClone,subsample_size,replace = F,prob = sub_af_sparse)
+  af <- sub_af_sparse[S]
+  Presence <- Presence[S,]
+  Presence <- as.matrix(rbind(Presence,wt=0))
+  Presence <- Presence[,colSums(Presence) > 0]
+  
+  dst <- as.matrix(dist(Presence > 0,method = "manhattan"))
+  tree <- root(njs(dst),
+               outgroup = "wt",
+               resolve.root = T,
+               edgelabel = T) 
+  tree <- drop.tip(tree,"wt")
+  return(list(tree = tree,S = S,af = af))
+}
+
+read_clonex <- function(path,d = 1000) {
+  x <- read_tsv(path,
+                col_names = c("Gen","NClones","CloneID","MutID"),
+                col_types = c(col_integer(),col_integer(),col_integer(),col_integer()),
+                progress = F) %>%
+    mutate(Driver = MutID <= d)
+  return(x)
+}
+
+trajectory_from_td <- function(x=0:1000, td=0, s=0.01, N=2e5, g=1){
+  s <- s/g
+  t0 <- td - 1/(s)
+  t <- x-t0
+  t <- t*g
+  y <- pmax(0,t)
+  if (s==0)
+    return(y)
+  td <- 1/(s)
+  te <- log(N*s -1)/s + td
+  y[t>td] <- N/(1+exp(-(s*(t[t>td]-te))))
+  return(y)
+}
+
+trajectory_from_t0 <- function(x=0:1000, t0=0, s=0.01, N=2e5, g=1){
+  s <- s/g
+  t <- x-t0
+  t <- t*g
+  y <- pmax(0,t)
+  if (s==0)
+    return(y)
+  td <- 1/(s)
+  te <- log(N*s -1)/s + td
+  y[t>td] <- N/(1+exp(-(s*(t[t>td]-te))))
+  return(y)
+}
+```
+
+# BNPR
+
+In this section we calculate/load all BNPR trajectories for the trees inferred from Wright-Fisher (WF) simulations. These simulations are done for 6 different fitness levels - 0.005, 0.010, 0.015, 0.020, 0.025 and 0.030 - over 800 generations and with a fixed population size (200,000).
+
+## Loading data and inferring trees
+
+The first step is to build the trees, which we then display. One can immediately see that expansions become increasingly prevalent for higher fitness effects, with quite a few cases of a single clone sweeping all of the population.
+
+```{r}
+N <- 2e5
+N_DRIVERS <- 20
+all_file_paths <- list.files(
+  "hsc_output_bnpr_complete",pattern = "last_generation",
+  full.names = T,recursive = T)
+all_driver_file_paths <- list.files(
+  "hsc_output_bnpr_complete",pattern = "driver",
+  full.names = T,recursive = T)
+
+file_name <- "data_output/simulated_trees_trajectories.RDS"
+if (file.exists(file_name) == T) {
+  tree_traj <- readRDS(file_name)
+  trees <- tree_traj[[1]]
+  all_driver_trajectories <- tree_traj[[2]]
+} else {
+  all_driver_trajectories <- all_driver_file_paths %>%
+    lapply(function(x) {
+      read.csv(x,header = F) %>%
+        arrange(V1,V2) %>%
+        select(Gen = V1,MutID = V2,Count = V3)})
+  
+  trees <- mclapply(
+    all_file_paths,
+    mc.cores = 6,
+    mc.cleanup = T,
+    function(path) {
+      s <- str_match(path,"hsc_[0-9.]+") %>%
+        gsub(pattern = "hsc_",replacement = "") %>%
+        as.numeric()
+      system(sprintf('echo "%s"', path)) # prints during mclapply by using bash
+      x <- read_clonex(path,d = N_DRIVERS) %>%
+        subset(Gen == 800) %>%
+        subset(MutID != 0)
+      x$R <- as.numeric(str_match(path,"[0-9.]+$"))
+      x$s <- s
+      x$drift_threshold <- 1 / (N * (s))
+      
+      driver_list <- x %>% 
+        subset(Driver == T) %>% 
+        select(CloneID,MutID) 
+      driver_list_out <- list()
+      for (driver_id in unique(driver_list$MutID)) {
+        tmp <- driver_list %>%
+          subset(MutID == driver_id) %>%
+          select(CloneID) %>%
+          unlist
+        driver_list_out[[as.character(driver_id)]] <- tmp
+      }
+      tree <- x %>%
+        build_tree()
+      ultrametric_tree <- make.ultrametric.tree(tree$tree)
+      gc()
+      list(
+        tree = tree,
+        tree_ultra = ultrametric_tree,
+        driver_list = driver_list_out,
+        path = path
+      ) %>%
+        return
+    }
+  )
+  
+  names(trees) <- gsub('/last_generation','',all_file_paths)
+  names(all_driver_trajectories) <- gsub('/driver_trajectory','',all_driver_file_paths)
+  saveRDS(object = list(trees,all_driver_trajectories),file = file_name)
+}
+```
+
+```{r}
+par(mfrow = c(4,5),mar = c(2,0.5,1,0.5))
+for (tree_name in names(trees)) {
+  tree <- trees[[tree_name]]
+  fitness <- str_match(tree_name,"[0-9.]+")
+  plot(tree$tree_ultra,main = fitness)
+}
+```
+
+## Calculating BNPR trajectories for the whole trees
+
+Here we calculate the actual EPS trajectories using BNPR and display them.
+
+```{r}
+file_name <- "data_output/simulated_bnpr_trees.RDS"
+if (file.exists(file_name) == T) {
+  all_estimates_trees <- readRDS(file_name)
+} else {
+  all_estimates_trees <- mclapply(
+    trees,
+    mc.cores = 2, # do not go over 2 cores here, may lead to OOM errors
+    mc.cleanup = T,
+    function(x) {
+      system(sprintf('echo "%s"', x$path)) # prints during mclapply by using bash
+      BNPR(x$tree_ultra) %>%
+        return
+      }
+    )
+  saveRDS(all_estimates_trees,file_name)
+}
+```
+
+## Calculating `mcmc.popsize` and skyline trajectories for the whole trees
+
+We accompany our BNPR estimates with those obtained through `mcmc.popsize` and skyline estimations to prove that what we are observing are not artefacts specific to BNPR. Interestingly, `mcmc.popsize` appears to suffer from its own bias - in some trajectories a very large initial EPS followed by a dip is observable. This holds for both possible priors - constant population size and a skyline-process population size, with the latter ameliorating this effect slightly.
+
+```{r}
+all_estimates_trees_skyline <- mclapply(
+    trees,
+    mc.cores = 2,
+    mc.cleanup = T,
+    function(x) skyline(x$tree_ultra,epsilon = 0.01)
+    )
+
+all_estimates_trees_skyline_wide <- mclapply(
+    trees,
+    mc.cores = 2,
+    mc.cleanup = T,
+    function(x) skyline(x$tree_ultra,epsilon = 0.05)
+    )
+
+all_estimates_trees_mcmc <- mclapply(
+    trees,
+    mc.cores = 2, 
+    mc.cleanup = T,
+    function(x) mcmc.popsize(x$tree_ultra,nstep=10000,thinning = 100,
+                             progress.bar = F,
+                             burn.in = 1000,lambda = 0.1,
+                             method.prior.heights = "constant")
+    )
+
+all_estimates_trees_mcmc_skyline <- mclapply(
+    trees,
+    mc.cores = 2, 
+    mc.cleanup = T,
+    function(x) mcmc.popsize(x$tree_ultra,nstep=10000,thinning = 100,
+                             progress.bar = F,
+                             burn.in = 1000,lambda = 0.1,
+                             method.prior.heights = "skyline")
+    )
+```
+
+```{r}
+par(mfrow = c(4,5),mar = c(1.5,2,2,1))
+for (name in names(all_estimates_trees)) {
+  plot_BNPR(all_estimates_trees[[name]])
+  lines(all_estimates_trees_skyline[[name]],col = "green")
+  lines(all_estimates_trees_skyline_wide[[name]],col = "#026440")
+  lines(extract.popsize(all_estimates_trees_mcmc[[name]]),col = "red")
+  lines(extract.popsize(all_estimates_trees_mcmc_skyline[[name]]),col = "purple")
+}
+```
+
+## Calculating BNPR trajectories for each clade
+
+```{r}
+file_name <- "data_output/simulated_bnpr_clades.RDS"
+if (file.exists(file_name) == T) {
+  all_estimates <- readRDS(file_name)
+} else {
+  all_estimates <- list()
+  i <- 1
+  for (obj_name in names(trees)) {
+    obj <- trees[[obj_name]]
+    print(obj_name)
+    s <- str_match(obj_name,"[0-9.]+") %>%
+      as.numeric
+    Tree <- list(tree = obj$tree_ultra)
+    Tree$tree$tip.label <- obj$tree$S
+    Tree$tree$edge.length[is.infinite(Tree$tree$edge.length)] <- 0
+    tree <- Tree$tree
+    driver_id_list <- Filter(function(x) length(x) > 5,obj$driver_list)
+    all_drivers <- do.call(c,driver_id_list)
+    clades <- cut_tree(tree = tree,depth = 0.1) %>%
+      Filter(f = function(x) length(x) >= 5)
+    clades_ <- list()
+    for (clade in clades) {
+      clade_tips <- tree$tip.label[clade]
+      for (driver in names(driver_id_list)) {
+        if (any(clade_tips %in% driver_id_list[[driver]])) {
+          clades_[[length(clades_)+1]] <- list(
+            clade = clade,
+            driver = driver
+          )
+        }
+      }
+    }
+    clades <- clades_
+    
+    if (!(obj_name %in% names(all_estimates))) {
+      bnpr_estimates <- mclapply(
+        clades,
+        mc.cores = 2,
+        mc.cleanup = T,
+        function(clad) {
+          #tip_in_clade <- which(Tree$tree$tip.label %in% clad)
+          tip_in_clade <- clad$clade
+          if (length(tip_in_clade) > 4) {
+            sub_tree <- keep.tip(Tree$tree,tip_in_clade) %>%
+              multi2di()
+            if (!is.null(sub_tree)) {
+              bnpr_estimates <- NULL
+              bnpr_estimate <- BNPR(sub_tree)
+              if (!is.null(bnpr_estimate)) {
+                list(
+                  tree = tree,
+                  bnpr = bnpr_estimate,
+                  clade = clad$clade,
+                  tree = sub_tree,
+                  driver = clad$driver) %>%
+                  return
+              }
+            }
+          }
+        }
+      ) %>%
+        Filter(f = function(x) !is.null(x))
+      all_estimates[[obj_name]] <- bnpr_estimates
+    }
+    gc()
+  }
+  saveRDS(all_estimates,file_name)
+}
+```
+
+## Calculating `mcmc.popsize` trajectories for each clade
+
+```{r}
+all_estimates_mcmc <- list()
+i <- 1
+par(mfrow = c(4,5),mar=c(1,2,2,1))
+for (obj_name in names(all_estimates)) {
+  print(obj_name)
+  if (!(obj_name %in% names(all_estimates_mcmc))) {
+    obj <- all_estimates[[obj_name]]
+    estimates <- list()
+    for (child_obj in obj) {
+      Tr <- child_obj$tree %>%
+        keep.tip(child_obj$clade) %>%
+        multi2di()
+      pr <- ifelse(length(child_obj$tree$tip.labels) > 10,"skyline","constant")
+      pop_size_eps <- mcmc.popsize(Tr,10000,100,1000,
+                                   lambda = 0.1,
+                                   progress.bar = F,
+                                   method.prior.heights = pr)
+      estimates[[length(estimates)+1]] <- list(pop_size_eps = pop_size_eps)
+    }
+    estimates <- estimates %>%
+     Filter(f = function(x) !is.null(x))
+    all_estimates_mcmc[[obj_name]] <- estimates
+  }
+  gc()
+}
+```
+
+## Calculating skyline trajectories for each clade
+
+```{r}
+all_estimates_skyline <- list()
+names_done <- names(all_estimates_skyline)
+i <- 1
+par(mfrow = c(4,5),mar=c(1,2,2,1))
+for (obj_name in names(all_estimates)) {
+  print(obj_name)
+  if (!(obj_name %in% names_done)) {
+    obj <- all_estimates[[obj_name]]
+    estimates <- list()
+    for (child_obj in obj) {
+      Tr <- child_obj$tree %>%
+        keep.tip(child_obj$clade) %>%
+        multi2di()
+      sk <- skyline(Tr,epsilon = 0.02)
+      estimates[[length(estimates)+1]] <- list(skyline = sk)
+    }
+    estimates <- estimates %>% 
+      Filter(f = function(x) !is.null(x))
+    all_estimates_skyline[[obj_name]] <- estimates
+  }
+  gc()
+}
+```
+
+## Comparing BNPR, `mcmc.popsize` and skyline trajectories
+
+### For clades with 10 or fewer tips
+
+```{r}
+# fewer than 10 tips per clade
+par(mfrow = c(4,5),mar = c(1,1,1,1))
+for (name in names(all_estimates)) {
+  obj <- all_estimates[[name]]
+  obj_mcmc <- all_estimates_mcmc[[name]]
+  obj_skyl <- all_estimates_skyline[[name]]
+  
+  if (length(obj) > 0) {
+    for (i in 1:length(obj)) {
+      if (length(obj[[i]]$clade) <= 10) {
+        bnpr_traj <- obj[[i]]$bnpr
+        mcmc_traj <- obj_mcmc[[i]]$pop_size_eps
+        skyl_traj <- obj_skyl[[i]]$skyline
+        
+        plot_BNPR(bnpr_traj)
+        try(lines(extract.popsize(mcmc_traj),col = "red"))
+        lines(skyl_traj,col = "green")
+      }
+    }
+  }
+}
+```
+
+### For clades with 10-50 tips
+
+```{r}
+# 10-50 tips
+par(mfrow = c(4,5),mar = c(1,1,1,1))
+for (name in names(all_estimates)) {
+  obj <- all_estimates[[name]]
+  obj_mcmc <- all_estimates_mcmc[[name]]
+  obj_skyl <- all_estimates_skyline[[name]]
+  
+  if (length(obj) > 0) {
+    for (i in 1:length(obj)) {
+      if (length(obj[[i]]$clade) < 50 & length(obj[[i]]$clade) > 10) {
+        bnpr_traj <- obj[[i]]$bnpr
+        mcmc_traj <- obj_mcmc[[i]]$pop_size_eps
+        skyl_traj <- obj_skyl[[i]]$skyline
+        
+        plot_BNPR(bnpr_traj)
+        try(lines(extract.popsize(mcmc_traj),col = "red"))
+        lines(skyl_traj,col = "green")
+      }
+    }
+  }
+}
+```
+
+### For clades with 50+ tips
+
+```{r}
+# 50-100 clades
+par(mfrow = c(4,5),mar = c(1,1,1,1))
+for (name in names(all_estimates)) {
+  obj <- all_estimates[[name]]
+  obj_mcmc <- all_estimates_mcmc[[name]]
+  obj_skyl <- all_estimates_skyline[[name]]
+  
+  if (length(obj) > 0) {
+    for (i in 1:length(obj)) {
+      if (length(obj[[i]]$clade) >= 50) {
+        bnpr_traj <- obj[[i]]$bnpr
+        mcmc_traj <- obj_mcmc[[i]]$pop_size_eps
+        skyl_traj <- obj_skyl[[i]]$skyline
+        
+        plot_BNPR(bnpr_traj)
+        try(lines(extract.popsize(mcmc_traj),col = "red"))
+        # extracting population size fails for a few cases
+        lines(skyl_traj,col = "green")
+      }
+    }
+  }
+}
+```
+
+### Comparing fits derived from BNPR, `mcmc.popsize` and skyline
+
+There is quite good agreement between log-linear trajectories fitted to skyline estimation and BNPR. This does not hold as well when comparing `mcmc.popsize` and BNPR - probably due to the initial dip in population size, the EPS estimates derived from `mcmc.popsize` lead to a slight underestimation of log-linear growth trajectories. As for early/late growth rate comparisons we observe little agreement between BNPR and `mcmc.popsize` or skyline estimation.
+
+```{r,fig.height=4,fig.width=6}
+linear_estimates <- list()
+early_late_estimates <- list()
+idx <- 1
+for (x in names(all_estimates)) {
+  obj <- all_estimates[[x]]
+  obj_mcmc <- all_estimates_mcmc[[x]]
+  obj_skyl <- all_estimates_skyline[[x]]
+  linear_estimates[[x]] <- list()
+  early_late_estimates[[x]] <- list()
+  if (length(obj) > 0){
+    for (i in 1:length(obj)) {
+      try(
+        {
+          bnpr_data <- data.frame(
+            X = (1 - obj[[i]]$bnpr$summary$time)*800,
+            Y = log(obj[[i]]$bnpr$summary$quant0.5))
+          ps <- extract.popsize(obj_mcmc[[i]]$pop_size_eps)
+          X_ <- seq(min(obj_skyl[[i]]$skyline$time),max(obj_skyl[[i]]$skyline$time),length.out = 100)
+          sk_Y <- obj_skyl[[i]]$skyline$population.size[as.numeric(cut(X_,c(0,obj_skyl[[i]]$skyline$time)))]
+          skyl_data <- data.frame(
+            X = (1 - X_)*800,
+            Y = log(sk_Y)
+            ) %>% 
+            na.omit
+          mcmc_data <- data.frame(
+            X = (1 - ps[,1])*800,
+            Y = log(ps[,3])) %>%
+            na.omit
+          linear_estimates[[x]][[i]] <- list(
+            id = idx,
+            bnpr = lm(Y ~ X,data = bnpr_data),
+            skyl = lm(Y ~ X,data = skyl_data),
+            mcmc = lm(Y ~ X,data = mcmc_data)
+          )
+          early_late_estimates[[x]][[i]] <- list(
+            id = idx,
+            bnpr = list(
+              late = lm(Y ~ X,data = bnpr_data[1:20,]),
+              early = lm(Y ~ X,data = bnpr_data[nrow(bnpr_data) - c(19:0),])),
+            skyl = list(
+              late = lm(Y ~ X,data = skyl_data[1:20,]),
+              early = lm(Y ~ X,data = skyl_data[nrow(skyl_data) - c(19:0),])),
+            mcmc = list(
+              late = lm(Y ~ X,data = mcmc_data[1:40,]),
+              early = lm(Y ~ X,data = mcmc_data[nrow(mcmc_data) - c(39:0),]))
+            )
+          }
+      )
+    }
+  }
+  idx <- idx + 1
+}
+
+linear_estimates_bnpr_mcmc_skyl <- linear_estimates %>% 
+    lapply(function(x) do.call(rbind,
+                               lapply(x, function(y) c(y$id,
+                                                       y$bnpr$coefficient[2],
+                                                       y$mcmc$coefficient[2],
+                                                       y$skyl$coefficient[2])))) %>%
+  do.call(what = rbind) %>%
+  as.data.frame()
+colnames(linear_estimates_bnpr_mcmc_skyl) <- c("id","BNPR","mcmc.popsize","Skyline")
+linear_estimates_bnpr_mcmc_skyl$id <- names(all_estimates)[linear_estimates_bnpr_mcmc_skyl$id]
+linear_estimates_bnpr_mcmc_skyl$fitness <- linear_estimates_bnpr_mcmc_skyl$id %>%
+  str_match("[0-9.]+") %>% 
+  as.numeric
+
+early_estimates_bnpr_mcmc_skyl <- early_late_estimates %>% 
+    lapply(function(x) do.call(rbind,
+                               lapply(x, function(y) c(y$id,
+                                                       y$bnpr$early$coefficient[2],
+                                                       y$mcmc$early$coefficient[2],
+                                                       y$skyl$early$coefficient[2])))) %>%
+  do.call(what = rbind) %>%
+  as.data.frame()
+colnames(early_estimates_bnpr_mcmc_skyl) <- c("id","BNPR","mcmc.popsize","Skyline")
+early_estimates_bnpr_mcmc_skyl$id <- names(all_estimates)[early_estimates_bnpr_mcmc_skyl$id]
+early_estimates_bnpr_mcmc_skyl$fitness <- early_estimates_bnpr_mcmc_skyl$id %>%
+  str_match("[0-9.]+") %>% 
+  as.numeric
+
+late_estimates_bnpr_mcmc_skyl <- early_late_estimates %>% 
+  Filter(f = function(f) !is.null(x)) %>% 
+  lapply(function(x) do.call(rbind,
+                             lapply(x, function(y) c(y$id,
+                                                     y$bnpr$late$coefficient[2],
+                                                     ifelse(!is.null(y$bnpr$late),summary(y$bnpr$late)$coefficients[2,2],NA),
+                                                     y$mcmc$late$coefficient[2],
+                                                     y$skyl$late$coefficient[2])))) %>%
+  do.call(what = rbind) %>%
+  as.data.frame()
+colnames(late_estimates_bnpr_mcmc_skyl) <- c("id","BNPR","BNPR_se","mcmc.popsize","Skyline")
+late_estimates_bnpr_mcmc_skyl$id <- names(all_estimates)[late_estimates_bnpr_mcmc_skyl$id]
+late_estimates_bnpr_mcmc_skyl$fitness <- late_estimates_bnpr_mcmc_skyl$id %>%
+  str_match("[0-9.]+") %>% 
+  as.numeric
+
+A <- linear_estimates_bnpr_mcmc_skyl %>%
+  ggplot() +
+  geom_point(aes(x = Skyline,y = BNPR),size = 0.5) + 
+  geom_abline(slope = 1,linetype = 2,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  coord_cartesian(xlim = c(-0.1,0.1),
+                  ylim = c(-0.1,0.1))
+
+B <- early_estimates_bnpr_mcmc_skyl %>%
+  ggplot() +
+  geom_point(aes(x = Skyline,y = BNPR),size = 0.5) + 
+  geom_abline(slope = 1,linetype = 2,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  coord_cartesian(xlim = c(-0.1,0.1),
+                  ylim = c(-0.1,0.1))
+
+C <- late_estimates_bnpr_mcmc_skyl %>%
+  ggplot() +
+  geom_point(aes(x = Skyline,y = BNPR),size = 0.5) + 
+  geom_abline(slope = 1,linetype = 2,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  coord_cartesian(xlim = c(-0.1,0.1),
+                  ylim = c(-0.1,0.1))
+
+D <- linear_estimates_bnpr_mcmc_skyl %>%
+  ggplot() +
+  geom_point(aes(x = mcmc.popsize,y = BNPR),size = 0.5) + 
+  geom_abline(slope = 1,linetype = 2,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  coord_cartesian(xlim = c(-0.1,0.1),
+                  ylim = c(-0.1,0.1))
+
+E <- early_estimates_bnpr_mcmc_skyl %>%
+  ggplot() +
+  geom_point(aes(x = mcmc.popsize,y = BNPR),size = 0.5) + 
+  geom_abline(slope = 1,linetype = 2,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  coord_cartesian(xlim = c(-0.1,0.1),
+                  ylim = c(-0.1,0.1))
+
+FF <- late_estimates_bnpr_mcmc_skyl %>%
+  ggplot() +
+  geom_point(aes(x = mcmc.popsize,y = BNPR),size = 0.5) + 
+  geom_abline(slope = 1,linetype = 2,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  coord_cartesian(xlim = c(-0.1,0.1),
+                  ylim = c(-0.1,0.1))
+
+plot_grid(A,B,C,D,E,FF,nrow = 2)
+
+data.frame(
+  BNPR = c(cor(linear_estimates_bnpr_mcmc_skyl$fitness,linear_estimates_bnpr_mcmc_skyl$BNPR),
+           cor(early_estimates_bnpr_mcmc_skyl$fitness,early_estimates_bnpr_mcmc_skyl$BNPR))^2,
+  Skyline = c(cor(linear_estimates_bnpr_mcmc_skyl$fitness,linear_estimates_bnpr_mcmc_skyl$Skyline),
+              cor(early_estimates_bnpr_mcmc_skyl$fitness,early_estimates_bnpr_mcmc_skyl$Skyline))^2,
+  mcmc.popsize = c(cor(linear_estimates_bnpr_mcmc_skyl$fitness,linear_estimates_bnpr_mcmc_skyl$mcmc.popsize),
+                   cor(early_estimates_bnpr_mcmc_skyl$fitness,early_estimates_bnpr_mcmc_skyl$mcmc.popsize))^2,
+  fit = c("Log-linear","Early log-linear"))
+```
+
+## Timing clones from trees
+
+```{r}
+for (x in names(all_estimates)) {
+  estimate <- all_estimates[[x]]
+  if (length(estimate) > 0) {
+    for (y in 1:length(estimate)) {
+      m <- MRCA(estimate[[y]]$tree,estimate[[y]]$clade)
+      estimate[[y]]$mutation_timing <- time_mutation(
+        estimate[[y]]$tree,m)
+      all_estimates[[x]][[y]]$mutation_timing <- estimate[[y]]$mutation_timing
+    }
+  }
+}
+```
+
+# Modelling BNPR trajectories
+
+Here we model the EPS trajectories using different types of models, namely:
+
+* A log-linear model
+* A scaled and shifted sigmoidal curve
+* A log-linear model with one changepoint (captures the earlier and later phases of growth)
+
+We also fit the same models to the original WF trajectories one gets for each individual driver. By doing so, we can more accurately verify whether we are able to recapitulate the clonal growth as it is happening with the BNPR trajectories.
+
+## Fitting different models to BNPR trajectory
+
+```{r}
+all_fits <- list()
+par(mfrow = c(4,5),mar = c(3,1,1,1))
+for (obj_name in names(all_estimates)) {
+  bnpr_estimates <- all_estimates[[obj_name]] %>%
+    Filter(f = function(x) class(x$bnpr) != "try-error")
+  new_bnpr_estimates <- list()
+  for (x in bnpr_estimates) {
+    bnpr_estimate <- x$bnpr
+    Y <- log(bnpr_estimate$summary$mean)
+    Y_ <- Y - min(Y,na.rm = T) + 1e-8
+    Y025 <- log(bnpr_estimate$summary$quant0.025)
+    Y975 <- log(bnpr_estimate$summary$quant0.975)
+    X <- (1-bnpr_estimate$summary$time) * 800
+    tmp_df <- data.frame(
+      X = X,Y = Y,Y_ = Y_,
+      Y025 = Y025,Y975 = Y975,
+      W = (Y975 - Y025)^2/16
+    ) %>% 
+      na.omit()
+    tmp_df <- tmp_df[!is.infinite(tmp_df$Y),]
+    tmp_df$Y_exp <- exp(tmp_df$Y)
+    
+    tmp_df$W[is.infinite(tmp_df$W)] <- max(tmp_df$W[!is.infinite(tmp_df$W)])
+    linear_estimate <- lm(Y ~ X,w = 1 / tmp_df$W,data = tmp_df)
+    m <- linear_estimate$coefficients[2]
+    linear_estimate_no_weights <- lm(Y ~ X,data = tmp_df)
+    
+    if (nrow(tmp_df) >= 10 & max(tmp_df$Y_exp) < 1e100) {
+      non_linear_estimate <- nlsLM(
+        Y_exp ~ SSlogis(X, Asym, b2, b3),
+        start = list(Asym = max(tmp_df$Y_exp),b2 = mean(tmp_df$X),b3 = 10),
+        control = nls.control(maxiter = 1000,warnOnly = T),
+        data = tmp_df,
+        algorithm = "port",
+        weights = 1/tmp_df$W)
+      x_earliest <- seq(min(tmp_df$X),min(tmp_df$X) + 50,length.out = 20)
+      y_earliest <- approx(tmp_df$X,tmp_df$Y,xout = x_earliest)$y
+      
+      x_latest <- seq(max(tmp_df$X) - 50,max(tmp_df$X),length.out = 20)
+      y_latest <- approx(tmp_df$X,tmp_df$Y,xout = x_latest)$y
+      
+      latest <- lm(y_latest ~ x_latest)
+      earliest <- lm(y_earliest ~ x_earliest)
+
+      if (class(non_linear_estimate) == "try-error") {
+        non_linear_estimate <- try(nlsLM(
+          Y_exp ~ SSlogis(X, Asym, b2, b3),
+          start = list(Asym = max(tmp_df$Y_exp),b2 = max(tmp_df$X),b3 = 10),
+          control = nls.control(maxiter = 1000,warnOnly = T),
+          data = tmp_df,
+          algorithm = "port",
+          weights = 1/tmp_df$W))
+      }
+    } else {
+      non_linear_estimate <- NULL
+      earliest <- NULL
+      latest <- NULL
+    }
+    
+    opt_fn <- function(par) {
+      se <- (tmp_df$Y - change_point(tmp_df$X,par[1],par[2],par[3],par[4]))^2
+      return(mean(se / tmp_df$W))
+    }
+    change_point_regression <- optim(
+      par = c(linear_estimate$coefficients[1],
+              linear_estimate$coefficients[2],
+              0,
+              mean(X)),
+      method = "L-BFGS-B",
+      lower = c(NA,0,NA,0),
+      upper = c(NA,NA,NA,800),
+      fn = opt_fn)
+    x$linear_estimate <- linear_estimate
+    x$linear_estimate_no_weights <- linear_estimate_no_weights
+    x$change_point_regression <- change_point_regression
+    x$non_linear_estimate <- non_linear_estimate
+    x$data <- tmp_df
+    x$earliest_growth <- earliest
+    x$latest_growth <- latest
+    new_bnpr_estimates[[length(new_bnpr_estimates) + 1]] <- x
+  }
+  
+  bnpr_estimates <- new_bnpr_estimates %>%
+    Filter(f = function(x) !is.null(x))
+  
+  all_estimates[[obj_name]] <- bnpr_estimates
+  for (bnpr in bnpr_estimates) {
+    cpr <- bnpr$change_point_regression
+    all_fits[[length(all_fits)+1]] <- data.frame(
+      x = bnpr$data$X,y = exp(bnpr$data$Y),
+      obj_name,n = length(all_fits)+1,
+      clade_size = length(bnpr$clade))
+
+    if ((cpr$par[2] + cpr$par[3]) < 0) {
+        # plot_BNPR(bnpr$bnpr,main = sprintf("%s",length(bnpr$clade)))
+        # plot(bnpr$data$X,exp(bnpr$data$Y),col = "black")
+        # if (!is.null(bnpr$non_linear_estimate)) {
+        #   lines(bnpr$data$X,predict(
+        #     bnpr$non_linear_estimate,newdata = data.frame(X = bnpr$data$X)),
+        #     col = "red")
+        # }
+        # lines(1-bnpr$data$X/800,
+        #       exp(change_point(bnpr$data$X,cpr$par[1],cpr$par[2],cpr$par[3],cpr$par[4])),
+        #       col="red")
+      }
+    }
+}
+```
+
+## Fitting different models to driver trajectories from the original WF simulations
+
+```{r}
+all_driver_fits <- list()
+par(mfrow = c(4,5),mar = c(1.5,2.5,2.5,1))
+for (x in names(all_driver_trajectories)) {
+  driver_trajectories <- all_driver_trajectories[[x]]
+  driver_trajectories <- driver_trajectories %>%
+    arrange(MutID,Gen) %>%
+    group_by(MutID) %>%
+    mutate(Break = c(T,diff(Gen) != 20)) %>%
+    mutate(Component = cumsum(Break)) %>%
+    mutate(MutID_C = sprintf("%s_%s",MutID,Component))
+  drivers <- unique(driver_trajectories$MutID_C)
+  all_driver_fits[[x]] <- list()
+  for (driver in drivers) {
+    tmp_df <- driver_trajectories %>%
+      subset(MutID_C == driver)
+    driver <- tmp_df$MutID[1]
+    has_last_gen <- any(tmp_df$Gen == 800)
+    large_at_last_gen <- ifelse(
+      has_last_gen,
+      tmp_df$Count[tmp_df$Gen == 800] > 200,
+      F)
+    
+    if (nrow(tmp_df) >= 5 & has_last_gen & large_at_last_gen) {
+      opt_fn <- function(par) {
+        se <- (log(tmp_df$Count) - change_point(tmp_df$Gen,par[1],par[2],par[3],par[4]))^2
+        return(mean(se))
+      }
+      
+      x_earliest <- seq(min(tmp_df$Gen),min(tmp_df$Gen) + 50,length.out = 20)
+      y_earliest <- approx(tmp_df$Gen,tmp_df$Count,xout = x_earliest)$y
+      
+      x_latest <- seq(max(tmp_df$Gen) - 50,max(tmp_df$Gen),length.out = 20)
+      y_latest <- approx(tmp_df$Gen,tmp_df$Count,xout = x_latest)$y
+      
+      latest <- lm(y_latest ~ x_latest)
+      earliest <- lm(y_earliest ~ x_earliest)
+
+      linear_sol <- lm(log(Count) ~ Gen,data = tmp_df)
+      change_point_regression <- optim(
+        par = c(linear_sol$coefficients[1],linear_sol$coefficients[2],0,mean(tmp_df$Gen)),
+        method = "L-BFGS-B",
+        lower = c(NA,0,NA,0),
+        upper = c(NA,NA,NA,800),
+        fn = opt_fn)
+      non_linear_estimate <- nlsLM(
+        Count ~ SSlogis(Gen, Asym, b2, b3),
+        start = list(Asym = max(tmp_df$Count),b2 = mean(tmp_df$Gen),b3 = 10),
+        control = nls.control(maxiter = 1000,warnOnly = T),
+        data = tmp_df,
+        upper = c(Asym = 2e5,b2 = 3000,b3 = 1e5),
+        algorithm = "port")
+      last_vaf <- tmp_df$Count[tmp_df$Gen == 800]/2e5
+      all_driver_fits[[x]][[as.character(driver)]] <- list(
+        data = tmp_df,
+        non_linear_estimate = non_linear_estimate,
+        change_point_regression = change_point_regression,
+        earliest_driver = earliest,
+        latest_driver = latest,
+        last_vaf = last_vaf,
+        gen_at_onset = min(tmp_df$Gen))
+    }
+  }
+}
+```
+
+## Extracting coefficients from BNPR fits
+
+```{r}
+all_bnpr_fits <- names(all_estimates) %>%
+  lapply(
+    function(x) {
+      if (length(all_estimates[[x]]) > 0) {
+        tree_eps <- unlist(all_estimates_trees[[x]]$summary[1,c(4,2,6)])
+        lapply(1:length(all_estimates[[x]]),function(y) {
+          y <- as.numeric(y)
+          if (!is.null(all_estimates[[x]][[y]]$non_linear_estimate)) {
+            pars <- all_estimates[[x]][[y]]$non_linear_estimate$m$getAllPars()
+            tao <- all_estimates[[x]][[y]]$mutation_timing * 800
+            cp <- all_estimates[[x]][[y]]$change_point_regression$par
+            pop_size_at_tao_cp <- exp((800 - tao)*cp[2])
+            earliest <- all_estimates[[x]][[y]]$earliest_growth$coefficients[2]
+            latest <- all_estimates[[x]][[y]]$latest_growth$coefficients[2]
+            O <- data.frame(
+              l = all_estimates[[x]][[y]]$linear_estimate$coefficients[2],
+              nl = 1 / pars[3],
+              nl_asym = pars[1],
+              nl_xmid = pars[2],
+              l_nw = all_estimates[[x]][[y]]$linear_estimate_no_weights$coefficients[2],
+              cp_1 = cp[2],
+              cp_2 = cp[3],
+              earliest = earliest,
+              latest = latest,
+              changepoint_bnpr = cp[4],
+              time_at_onset_low = tao[1],
+              time_at_onset_high = tao[2],
+              w_sum = mean(all_estimates[[x]][[y]]$data$W,na.rm=T),
+              pop_at_detection_low = pop_size_at_tao_cp[2],
+              pop_at_detection_high = pop_size_at_tao_cp[1],
+              tree_eps_low = tree_eps[1],
+              tree_eps_mean = tree_eps[2],
+              tree_eps_high = tree_eps[3],
+              point_of_saturation = which(
+                c(
+                  predict(
+                    all_estimates[[x]][[y]]$non_linear_estimate,
+                    newdata = data.frame(X = seq(1,800)))) > (0.9 * pars[1])) %>% min,
+              name = x,
+              clade_size = length(all_estimates[[x]][[y]]$clade),
+              driver = all_estimates[[x]][[y]]$driver,
+              clade = y)
+            return(O)
+          }
+        }) %>%
+          do.call(what = rbind)
+      } else {
+        return(NULL)
+      }
+    }
+    ) %>%
+  do.call(what = rbind) %>%
+  mutate(fitness = as.numeric(gsub('_',"",str_match(name,"_[0-9.]+_")))) %>%
+  group_by(name) %>%
+  mutate(N = length(unique(clade))) %>%
+  mutate(cp_late = cp_1 + cp_2)
+```
+
+## Extracting coefficients from driver fits from the original WF simulations
+
+```{r}
+all_driver_fits_df <- names(all_driver_fits) %>% 
+  lapply(function(x) {
+    if (length(all_driver_fits[[x]]) > 0) {
+      lapply(names(all_driver_fits[[x]]),function(y) {
+        pars <- all_driver_fits[[x]][[y]]$non_linear_estimate$m$getAllPars()
+        earliest <- all_driver_fits[[x]][[y]]$earliest_driver$coefficients[2]
+        latest <- all_driver_fits[[x]][[y]]$latest_driver$coefficients[2]
+        
+        early_cp <- all_driver_fits[[x]][[y]]$change_point_regression$par[2]
+        
+        m <- all_driver_fits[[x]][[y]]$data %>%
+          subset(Gen == min(Gen))
+        v <- m$Count / 2e5
+        time <- m$Gen
+        m <- -log((1 - v)/v) - early_cp * time
+        expected_last_vaf <- 1 / (1 + exp(-(m + early_cp * 800)))
+        return(
+          data.frame(
+            Asym = pars[1],
+            xmid = pars[2],
+            growth_rate = 1/pars[3],
+            early_growth = all_driver_fits[[x]][[y]]$change_point_regression$par[2],
+            late_growth = all_driver_fits[[x]][[y]]$change_point_regression$par[3],
+            earliest_driver = earliest,
+            latest_driver = latest,
+            changepoint_wf = all_driver_fits[[x]][[y]]$change_point_regression$par[4],
+            point_of_saturation_wf = which(
+              c(
+                predict(
+                  all_driver_fits[[x]][[y]]$non_linear_estimate,
+                  newdata = data.frame(Gen = seq(1,800)))) > (0.9 * pars[1])) %>% min,
+            name = x,
+            driver = y,
+            last_vaf = all_driver_fits[[x]][[y]]$last_vaf,
+            expected_last_vaf,
+            gen_at_onset = all_driver_fits[[x]][[y]]$gen_at_onset
+          )
+        )
+      }) %>%
+        do.call(what = rbind)
+    }
+  }) %>%
+  do.call(what = rbind) %>%
+  mutate(late_growth = early_growth + late_growth)
+```
+
+# Comparing BNPR trajectory models
+
+## Plotting BNPR trajectories
+
+Here, we plot all of the inferred BNPR trajectories for each clade. 
+
+```{r,fig.height=2,fig.width=3}
+all_fits %>%
+  do.call(what = rbind) %>%
+  mutate(fitness = str_match(obj_name,"[0-9.]+")) %>% 
+  group_by(n) %>%
+  mutate(x = x - min(x)) %>% 
+  filter(min(y) > 1e-6 & max(y) < 1e8) %>%
+  mutate(fitness = factor(
+    fitness,
+    levels = seq(0.005,0.03,by = 0.005),
+    labels = sprintf("s=%s",seq(0.005,0.03,by = 0.005)))) %>% 
+  ggplot(aes(x = x,y = y)) + 
+  geom_line(aes(group = n),alpha = 0.25,size = 0.25) + 
+  facet_wrap(~ fitness) + 
+  scale_y_continuous(trans = 'log10',expand = c(0,0),breaks = c(1e-2,1,1e2,1e4,1e6)) +
+  scale_x_continuous(expand = c(0,0)) +
+  theme_gerstung(base_size = 6) + 
+  theme(strip.text = element_text(margin = margin(b = 0.5))) +
+  ylab("Effective population size (EPS)") + 
+  xlab("Time since first coal. (generations)") + 
+  coord_cartesian(ylim = c(1e-2,1e7)) +
+  ggsave("figures/simulations/trajectories_BNPR.pdf",height = 1.5,width = 2.3)
+```
+
+## Comparing BNPR and WF trajectories
+
+Here we scale the BNPR trajectories so that they match as closely as possible those obtained from the WF trajectories. A fairly good fit between BNPR and WF trajectories is observable for a large fraction of trajectories.
+
+```{r,fig.height=6,fig.width=7}
+simulated_trajectories <- list()
+bnpr_estimates_ <- list()
+for (x in names(all_driver_fits)) {
+  if (x %in% names(all_estimates)) {
+    for (y in names(all_driver_fits[[x]])) {
+      clade_no <- 1
+      bnpr_sums <- list()
+      largest_clade <- which.max(unlist(lapply(all_estimates[[x]],function(x) length(x$clade))))[1]
+      for (estimate in all_estimates[[x]]) {
+        if (y == estimate$driver) {
+          driver_fit <- all_driver_fits[[x]][[y]]$data
+          bnpr_sum <- estimate$bnpr$summary
+          W <- (log(bnpr_sum$quant0.975) - log(bnpr_sum$quant0.025))^2/16
+          bnpr_sum$time <- (1 - bnpr_sum$time)*800
+          if (clade_no == largest_clade) {
+            opt_data <- data.frame(
+              a = approx(bnpr_sum$time,y = bnpr_sum$mean,xout = driver_fit$Gen)$y,
+              b = driver_fit$Count) %>%
+              na.omit
+            opt_fn <- function(pars) {
+              l <- (opt_data$a * pars[1] - opt_data$b)^2
+              l <- l
+              return(sum(l))
+            }
+            opt_solution <- optim(c(m = 0.001,b = 1),
+                                  opt_fn,
+                                  control = list(maxit = 10000),
+                                  method = "Nelder-Mead")
+            P <- opt_solution$par
+          }
+          driver_fit$id <- x
+          driver_fit$driver <- y
+          bnpr_sum$id <- x
+          bnpr_sum$driver <- y
+          bnpr_sum$clade <- clade_no
+          simulated_trajectories[[length(simulated_trajectories)+1]] <- driver_fit
+          bnpr_sums[[length(bnpr_sums)+1]] <- bnpr_sum
+          clade_no <- clade_no + 1
+        }
+      }
+      for (bnpr_sum in bnpr_sums) {
+        bnpr_sum$transformed_y <- bnpr_sum$mean * P[1]
+        bnpr_sum$transformed_y_low <- bnpr_sum$quant0.025 * P[1]
+        bnpr_sum$transformed_y_high <- bnpr_sum$quant0.975 * P[1]
+        bnpr_estimates_[[length(bnpr_estimates_)+1]] <- bnpr_sum
+      }
+    }
+  }
+}
+
+simulated_trajectories_df <- do.call(rbind,simulated_trajectories)
+bnpr_estimates_df <- do.call(rbind,bnpr_estimates_)
+ggplot(data = NULL) +
+  geom_hline(yintercept = 2e5,size = 0.25,colour = "goldenrod",alpha = 0.7) +
+  geom_line(data = simulated_trajectories_df,
+            aes(x = Gen/100,y = Count,colour = "Simulated",
+                group = paste(MutID_C,driver)),
+            size = 0.25,
+            alpha = 0.7) + 
+  geom_line(data = bnpr_estimates_df,aes(x = time/100,y = transformed_y,
+                                         group = paste(clade,driver),colour = "BNPR estimate"),
+            size = 0.25,
+            alpha = 0.5) + 
+  facet_wrap(~ id,scales = "free") + 
+  theme_gerstung(base_size = 6) + 
+  theme(strip.text = element_blank(),legend.position = "bottom") + 
+  scale_y_continuous(trans = 'log10') + 
+  coord_cartesian(ylim = c(NA,2e8),c(0,8)) +
+  scale_colour_manual(values = c(Simulated = "grey50",`BNPR estimate` = "orchid"),name = NULL) + 
+  xlab("Generation (x100)") + 
+  ggsave("figures/simulations/trajectories_wf_bnpr.pdf",height = 6,width = 7)
+```
+
+## Comparing inference of early and late growth between BNPR fits and driver fits from WF simulations
+
+We define here a measure of excessive observed variance in the BNPR trajectory - whenever the average log-EPS variance is larger than 10 we define these trajectories as "high variance" trajectories, noting that they are trajectories which were obtained from fairly small clades (fewer than 10 tips).
+
+```{r,fig.height=1.5,fig.width=1.5}
+bnpr_wf_merge_df <- merge(all_bnpr_fits,all_driver_fits_df,by = c("name","driver")) %>%
+  mutate(vaf_at_detection_low = pop_at_detection_low/2e5,
+         vaf_at_detection_high = pop_at_detection_high/2e5) %>%
+  mutate(vaf_at_detection_low = ifelse(vaf_at_detection_low > 1,1,vaf_at_detection_low),
+         vaf_at_detection_high = ifelse(vaf_at_detection_high > 1,1,vaf_at_detection_high)) %>%
+  mutate(vaf_contained = last_vaf > vaf_at_detection_low & last_vaf < vaf_at_detection_high) %>%
+  mutate(vaf_contained_higher_lower = ifelse(
+    vaf_contained == F,
+    ifelse(last_vaf > vaf_at_detection_high,"higher","lower"),
+    "contained")) %>%
+  mutate(col = ifelse(w_sum < 10,"Low variance","High variance")) %>%
+  mutate(wf_ratio = late_growth/early_growth,bnpr_ratio = cp_late/cp_1) %>% 
+  mutate(bnpr_ratio = ifelse(is.infinite(bnpr_ratio),1,bnpr_ratio),
+         wf_ratio = ifelse(is.infinite(wf_ratio),1,wf_ratio))
+
+
+bnpr_wf_merge_df %>% 
+  ggplot(aes(x = w_sum)) +
+  geom_density() +
+  scale_x_continuous(trans = 'log10') + 
+  theme_gerstung(base_size = 6) + 
+  xlab("Average variance")
+
+ggplot(bnpr_wf_merge_df) +
+  geom_boxplot(aes(x = col,y = clade_size),outlier.size = 0.5) + 
+  scale_y_continuous(breaks = seq(0,100,by = 10)) + 
+  theme_gerstung(base_size = 6) + 
+  xlab("Trajectory type") + 
+  ylab("Clade size")
+```
+
+```{r,fig.height=1.4,fig.width=4.5}
+early_v_early_plot <- bnpr_wf_merge_df %>% 
+  ggplot(aes(x = early_growth,y = cp_1,colour = col)) + 
+  geom_abline(slope = 1,linetype = 2, size = 0.25) +
+  geom_point(size = 0.5) + 
+  geom_smooth(method = "lm",alpha = 0.5,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  coord_cartesian(xlim = c(0,0.07),ylim = c(0,0.07))  + 
+  xlab("WF early growth") + 
+  ylab("BNPR early growth") + 
+  theme(legend.position = "bottom",
+        legend.key.size = unit(0,"cm")) + 
+  scale_colour_lancet() + 
+  scale_colour_lancet(name = NULL)
+
+late_v_late_plot <- bnpr_wf_merge_df %>% 
+  ggplot(aes(x = late_growth,y = cp_late,colour = col)) + 
+  geom_abline(slope = 1,linetype = 2, size = 0.25) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "lm",alpha = 0.5,size = 0.25) +
+  theme_gerstung(base_size = 6) +
+  coord_cartesian(xlim = c(-0.03,0.04),ylim = c(-0.03,0.04)) + 
+  xlab("WF late growth") + 
+  ylab("BNPR late growth") + 
+  theme(legend.position = "bottom",
+        legend.key.size = unit(0,"cm")) + 
+  scale_colour_lancet() + 
+  scale_colour_lancet(name = NULL)
+
+cp_v_cp_plot <- bnpr_wf_merge_df %>% 
+  ggplot(aes(x = changepoint_wf,y = changepoint_bnpr,colour = col)) + 
+  geom_abline(slope = 1,linetype = 2, size = 0.25) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "lm",alpha = 0.5,size = 0.25) +
+  theme_gerstung(base_size = 6) +
+  coord_cartesian(xlim = c(200,800),ylim = c(200,800)) + 
+  xlab("WF change point") + 
+  ylab("BNPR change point") + 
+  theme(legend.position = "bottom",
+        legend.key.size = unit(0,"cm")) + 
+  scale_colour_lancet(name = NULL)
+
+plot_grid(early_v_early_plot + theme(legend.position = "none"),
+          late_v_late_plot + theme(legend.position = "none"),
+          cp_v_cp_plot + theme(legend.position = "none"),
+          align = "hv",
+          nrow = 1) %>%
+  plot_grid(get_legend(early_v_early_plot),rel_heights = c(1,0.05),ncol = 1) + 
+  ggsave("figures/simulations/compare_cp_wf_bnpr.pdf",height = 1.5,width = 4.5)
+```
+
+## Comparing the growth ratio between early and late phases of growth
+
+We observe here that the ratio defined by $\frac{LateGrowth}{EarlyGrowth}$ for both WF and BNPR independently fits quite closely to the identity, thus proving that we are capable of detecting this reasonably well using the BNPR trajectories alone.
+
+```{r,fig.height=2,fig.width=2}
+bnpr_wf_merge_df %>% 
+  subset(early_growth > 0 & cp_1 > 0) %>% 
+  ggplot(aes(x = late_growth/early_growth,y = cp_late/cp_1)) + 
+  geom_abline(slope = 1,linetype = 2,size = 0.25) +
+  geom_point(size = 0.5,alpha = 0.4) + 
+  geom_smooth(method = "lm",colour = "red4",alpha = 0.5,size = 0.25) +
+  coord_cartesian(xlim = c(-1,4),ylim = c(-1,4)) + 
+  theme_gerstung(base_size = 6) + 
+  xlab("WF growth ratio") + 
+  ylab("BNPR growth ratio")
+
+bnpr_wf_merge_df %>%
+  lm(formula = bnpr_ratio ~ wf_ratio) %>% 
+  summary
+
+table(all_driver_fits_df$last_vaf < all_driver_fits_df$expected_last_vaf) / nrow(all_driver_fits_df)
+```
+
+## Comparing the expected and observed late growth 
+
+We also want to have a measure of growth deceleration that is more comparable with our inferences from the time series data - based on a sigmoidal fit with a fixed carrying capacity ($VAF = 0.5$) that is then extrapolated to its onset of origin. As such, we fit a sigmoidal to the BNPR that assumes a total carrying capacity of $1$ and that the final EPS corresponds to a proxy for the VAF that is parametrised as $\hat{VAF} = \frac{Number\ Of\ Tips\ In\ The\ Clade}{Total\ Tips\ In\ The\ Tree}$. 
+
+```{r,fig.height=1.5,fig.width=1.5}
+expected_late_growth <- function(vaf,id,clade) {
+  clade <- as.numeric(clade)
+  if (clade <= length(all_estimates[[id]])) {
+    
+    tmp_df <- all_estimates[[id]][[clade]]$data %>%
+      arrange(X)
+    last_eps <- tmp_df$Y_exp[nrow(tmp_df)]
+    last_eps <- max(tmp_df$Y_exp)
+    tmp_df$normalized_Y <- tmp_df$Y_exp / last_eps * vaf
+
+    nl_fit <- nls(formula = normalized_Y ~ SSlogis(X,1,Xmid,b),
+                  start = list(Xmid = mean(tmp_df$X),b = 10),
+                  control = nls.control(maxiter = 1000,minFactor = 1/(1024^32),
+                                        warnOnly = T),
+                  data = tmp_df)
+    return(nl_fit$m$getAllPars()[2])
+  } else {
+    return(NA)
+  }
+}
+
+bnpr_wf_merge_df$expected_nl <- rep(NA,nrow(bnpr_wf_merge_df))
+
+for (i in 1:nrow(bnpr_wf_merge_df)) {
+  sub_bnpr_wf_merge_df <- bnpr_wf_merge_df[i,]
+  last_vaf <- sub_bnpr_wf_merge_df$last_vaf
+  name <- as.character(sub_bnpr_wf_merge_df$name)
+  clade <- sub_bnpr_wf_merge_df$clade
+  bnpr_wf_merge_df$expected_nl[i] <- 1/expected_late_growth(last_vaf,name,clade)
+}
+
+bnpr_wf_merge_df %>% 
+  subset(col == "Low variance") %>% 
+  mutate(expected_late_ratio_wf = late_growth/growth_rate,
+         expected_late_ratio = cp_late / expected_nl) %>%
+  mutate(expected_late_ratio = ifelse(expected_late_ratio < -1,-1,expected_late_ratio)) %>% 
+  ggplot(aes(x = expected_late_ratio_wf < 0.8,y = expected_late_ratio)) +
+  geom_jitter(width = 0.3,size = 0.5,alpha = 0.7) +
+  geom_boxplot(outlier.alpha = 0) + 
+  theme_gerstung(base_size = 6) +
+  scale_y_continuous(breaks = c(-1,0,1,2),
+                     labels = c("<-1","0","1","2")) + 
+  ylab("BNPR late/expected growth ratio") +
+  xlab("WF late/expected growth ratio < 0.8")
+```
+
+```{r,fig.height=1.5,fig.width=0.7}
+bnpr_wf_merge_df %>% 
+  subset(col == "Low variance") %>% 
+  mutate(expected_late_ratio = cp_late / expected_nl) %>% 
+  mutate(expected_late_ratio = ifelse(expected_late_ratio < -1,-1,expected_late_ratio)) %>% 
+  ggplot(aes(y = expected_late_ratio,x=0)) + 
+  geom_jitter(size = 0.5,alpha = 0.5,width = 0.05) + 
+  geom_boxplot(size = 0.25,width = 0.1,outlier.size = 0,alpha = 0.8) + 
+  theme_gerstung(base_size = 6) + 
+  geom_hline(yintercept = 1,linetype = 2) +
+  #coord_cartesian(ylim = c(0,5)) + 
+  scale_y_continuous(breaks = c(-1,0,1,2),
+                     labels = c("<-1","0","1","2")) + 
+  ylab("Observed/expected late growth ratio") +
+  xlab("") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  ggsave("figures/simulations/expected_late_growth_ratio.pdf",height = 1.5,width = 0.7)
+```
+
+## Comparing inference of sigmoidal fit between BNPR fits and driver fits from WF simulations
+
+As mentioned, we also fit sigmoidal curves to each trajectory and here we assess whether they can be used for inference.
+
+```{r,fig.height=3.6,fig.width=4.8}
+bnpr_wf_merge_sigmoid_df <- bnpr_wf_merge_df
+asymptote_graph <- bnpr_wf_merge_sigmoid_df %>%
+  ggplot(aes(x = Asym,y = nl_asym,colour = col)) + 
+  geom_point(size = 0.5) + 
+  scale_y_continuous(trans = 'log10') +
+  scale_x_continuous(trans = 'log10') +
+  theme_gerstung(base_size = 6) +
+  xlab("Simulated asymptote") +
+  ylab("BNPR asymptote") + 
+  theme(legend.position = "none") + 
+  coord_cartesian(ylim = c(NA,1e6)) + 
+  scale_color_lancet(name = NULL)
+
+midpoint_graph <- bnpr_wf_merge_sigmoid_df %>%
+  ggplot(aes(x = xmid,y = nl_xmid,colour = col)) + 
+  geom_abline(slope = 1,size = 0.25,linetype = 2) +
+  geom_smooth(method = "lm",size = 0.25,alpha = 0.25) +
+  geom_point(size = 0.5) + 
+  coord_cartesian(xlim = c(0,2000),ylim = c(0,2000)) + 
+  theme_gerstung(base_size = 6) +
+  xlab("Simulated midpoint") +
+  ylab("BNPR midpoint") + 
+  theme(legend.position = "none") + 
+  scale_color_lancet(name = NULL)
+
+point_of_saturation_plot <- bnpr_wf_merge_sigmoid_df %>%
+  subset(!is.infinite(point_of_saturation) & !is.infinite(point_of_saturation_wf)) %>%
+  ggplot(aes(x = point_of_saturation,y = point_of_saturation_wf,colour = col)) + 
+  geom_abline(slope = 1,size = 0.25,linetype = 2) +
+  geom_smooth(method = "lm",size = 0.25,alpha = 0.25) +
+  geom_point(size = 0.5) +
+  coord_cartesian(xlim = c(200,800),ylim = c(200,800)) + 
+  theme_gerstung(base_size = 6) + 
+  xlab("Simulated generation at saturation") +
+  ylab("BNPR generation at saturation") + 
+  theme(legend.position = "none") + 
+  scale_color_lancet(name = NULL)
+
+fitness_plot <- bnpr_wf_merge_sigmoid_df %>%
+  ggplot(aes(x = growth_rate,y = nl,colour = col)) +
+  geom_abline(slope = 1,size = 0.25,linetype = 2) +
+  geom_smooth(method = "lm",size = 0.25,alpha = 0.25) +
+  geom_point(size = 0.5) +
+  coord_cartesian() + 
+  theme_gerstung(base_size = 6) + 
+  xlab("Fitness inferred from simulation") +
+  ylab("Fitness inferred from BNPR") +
+  theme(legend.key.width = unit(0.1,"cm"),
+        legend.key.height = unit(0.3,"cm")) + 
+  scale_color_lancet(name = NULL) + 
+  coord_cartesian(ylim = c(NA,0.05),xlim = c(NA,NA))
+
+plot_grid(
+  asymptote_graph,midpoint_graph,point_of_saturation_plot,
+  fitness_plot + theme(legend.position = "none"),
+  nrow = 2,align = "hv",
+  rel_heights = c(1,1)
+) %>% 
+  plot_grid(plot_grid(ggplot() + theme_nothing(),
+                      get_legend(fitness_plot + theme(legend.position = "bottom")),
+                      ggplot() + theme_nothing(),nrow = 1),
+            rel_heights = c(1,0.1),ncol = 1) + 
+  ggsave("figures/simulations/compare_wf_bnpr.pdf",height = 3.6,width = 4.8)
+
+truth <- is.finite(bnpr_wf_merge_df$point_of_saturation_wf)
+pred <- is.finite(bnpr_wf_merge_df$point_of_saturation)
+acc <- sum(truth == pred) / length(truth)
+prec <- sum(truth == pred & truth == 1) / (sum(pred == 1))
+recall <- sum(truth == pred & truth == 1) / (sum(truth == 1))
+
+truth_low_var <- is.finite(
+  subset(bnpr_wf_merge_df,col == "Low variance")$point_of_saturation_wf)
+pred_low_var <- is.finite(
+  subset(bnpr_wf_merge_df,col == "Low variance")$point_of_saturation)
+acc_low_var <- sum(truth_low_var == pred_low_var) / length(truth_low_var)
+prec_low_var <- sum(truth_low_var == pred_low_var & truth_low_var == 1)/(sum(pred_low_var == 1))
+recall_low_var <- sum(truth_low_var == pred_low_var & truth_low_var == 1)/(sum(truth_low_var == 1))
+
+data.frame(
+  Accuracy = c(acc,acc_low_var),
+  Precision = c(prec,prec_low_var),
+  Recall = c(recall,recall_low_var),
+  Data = c("All trajectories","Low variance trajectories")
+)
+```
+
+## Benchmarking different models for BNPR fits
+
+Finally we compare all of the methods specified above and make statements regarding their usability in predicting the true fitness of each clade. We note that log-linear fits have a tendency to underestimate the growth rate of clones with large fitness values, whereas sigmoidal curves have a tendency to do the opposite - overestimate the growth rate of clones with small fitness values. The early growth rate stands as the most adequate solution for our problem, with $R^2 > 0.3$ for fits with low variance. We must note that we still observe an $RMSE = 0.01$ which would, assuming 10 generations per year, correspond to a variation of $\pm 10%$. As such, these inferences should account for this considerable level of uncertainty that is associated with each estimate.
+
+```{r,fig.height=5,fig.width=4.7}
+all_bnpr_fits <- all_bnpr_fits %>% 
+  mutate(col = ifelse(w_sum < 10,"Low variance","High variance")) 
+
+limits <- c(0,0.05)
+plot_list <- list()
+metric_list <- list()
+
+for (col_name in c("l","cp_1","cp_late","nl")) {
+  sub_data <- all_bnpr_fits %>%
+    ungroup() %>%
+    select(fitness,R = col_name) %>%
+    na.omit()
+  sub_data_low <- all_bnpr_fits %>%
+    subset(col == "Low variance") %>%
+    ungroup() %>%
+    select(fitness,R = col_name) %>%
+    na.omit() 
+  
+  plot_list[[col_name]] <- all_bnpr_fits %>%
+    select(fitness,R = col_name,col = col) %>% 
+    ggplot(aes(x = fitness,y = R,group = paste(fitness),colour = col)) +
+    geom_jitter(width = 0.001,size = 0.5) +
+    geom_boxplot(outlier.alpha = 0,size = 0.25,alpha = 0.7,colour = "black") +
+    theme_gerstung(base_size = 6) +
+    coord_cartesian(xlim = limits,
+                    ylim = limits) +
+    geom_abline(slope = 1) +
+    ylab("Inferred growth") +
+    xlab("Simulated growth") + 
+    scale_colour_lancet(guide = F)
+  
+  metric_list[[col_name]] <- data.frame(
+    method = col_name,
+    s = c("All trajectories","Low variance"),
+    R = c(cor(sub_data$fitness,sub_data$R),
+          cor(sub_data_low$fitness,sub_data_low$R)),
+    mse = c(mean((sub_data$fitness - sub_data$R)^2),
+            mean((sub_data_low$fitness - sub_data_low$R)^2))
+  )
+}
+
+metric_df <- do.call(rbind,metric_list) %>%
+  mutate(
+    
+    met = list(l = "Linear\ngrowth",
+               cp_1 = "Early linear\ngrowth",
+               cp_late = "Late linear\ngrowth",
+               nl = "Sigmoidal\ngrowth")[method] %>%
+      unlist
+  )
+
+r2_plot <- ggplot(data = metric_df,aes(x = reorder(met,-R^2),y = R^2,fill = s)) + 
+  geom_bar(stat = "identity",position = "dodge") + 
+  xlab("") + 
+  ylab("R2") + 
+  theme_gerstung(base_size = 6) +
+  coord_flip() + 
+  scale_y_continuous(expand = c(0,0)) + 
+  scale_fill_lancet(guide = F)
+
+mse_plot <- ggplot(data = metric_df,aes(x = reorder(met,-mse),y = sqrt(mse),fill = s)) + 
+  geom_bar(stat = "identity",position = "dodge") + 
+  xlab("") + 
+  ylab("RMSE") + 
+  theme_gerstung(base_size = 6) +
+  coord_flip() + 
+  scale_y_continuous(expand = c(0,0)) + 
+  scale_fill_lancet(guide = F)
+
+plot_grid(
+  plot_list$l + ggtitle("Linear growth"),
+  plot_list$cp_1 + ggtitle("Early linear growth"),
+  plot_list$cp_late + ggtitle("Late linear growth"),
+  plot_list$nl + ggtitle("Sigmoidal growth"),
+  r2_plot,
+  mse_plot,
+  rel_heights = c(1,1,0.6),
+  ncol = 2) + 
+  ggsave("figures/simulations/validation_BNPR.pdf",height = 5,width = 4.7)
+
+write.csv(bnpr_wf_merge_df,"data_output/simulated_bnpr_coefficients.csv",row.names = F)
+```

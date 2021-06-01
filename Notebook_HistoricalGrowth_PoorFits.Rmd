@@ -107,11 +107,108 @@ historical_estimates <- historical_estimates %>%
   filter(paste(individual,site) %in% paste(good_sites_individual$individual,good_sites_individual$site))
 ```
 
+
+```{r,fig.height=0.65,fig.width=1.4}
+idxs <- sampling_idxs %>% 
+  subset(individual == 4088 & site == "DNMT3At-E578X")
+
+#idxs <- sampling_idxs[1,]
+
+S <- data.frame(
+  u = offset_samples[,idxs$clone_numeric],
+  b_gene = gene_samples[,idxs$gene_numeric],
+  b_site = site_samples[,idxs$site_numeric],
+  b_clone = clone_samples[,idxs$clone_numeric],
+  idx = seq(1,nrow(clone_samples)),
+  maxAge = idxs$maxAge) %>%
+  apply(1,function(x) {
+    u <- as.numeric(x[1])
+    b_gene <- as.numeric(x[2])
+    b_site <- as.numeric(x[3])
+    b_site <- ifelse(is.na(b_site),0,b_site)
+    b_clone <- as.numeric(x[4])
+    max_age <- as.numeric(x[6]) + 40
+    b <- b_gene+b_site+b_clone
+    traj <- suppressWarnings(trajectory_from_parameters_2(
+      b = b,u = u,g = 2,N = pop_size,x = seq(-20,max_age,by = 0.5) - values_model$min_age))
+    age_at_onset <- t0_adjusted(u,b,g = 2,n = pop_size)
+    return(data.frame(
+      age = traj$x + values_model$min_age,
+      VAF = traj$y,
+      t0 = age_at_onset + values_model$min_age,
+      ID = as.numeric(x[5])
+    ))
+  }) %>%
+  do.call(what = rbind) %>%
+  mutate(plausible = t0 >= 0) %>%
+  mutate(VAF = ifelse(is.na(VAF),0,VAF))
+
+x <- rbind(
+  S %>% 
+    subset(plausible == T) %>%
+    group_by(age,plausible) %>%
+    summarise(q05 = quantile(VAF,0.05,na.rm = T),
+              q50 = quantile(VAF,0.5,na.rm = T),
+              q95 = quantile(VAF,0.95,na.rm = T)) %>%
+    as.data.frame,
+  S %>% 
+    group_by(age) %>%
+    summarise(plausible = as.logical(0),
+              q05 = quantile(VAF,0.05,na.rm = T),
+              q50 = quantile(VAF,0.5,na.rm = T),
+              q95 = quantile(VAF,0.95,na.rm = T)) %>%
+    as.data.frame) %>%
+  subset(q95 > 0)
+
+plot_good_bad <- x %>% 
+  group_by(age) %>% 
+  subset(q95 > 0) %>% 
+  mutate(q05 = ifelse(
+    all(c(T,F) %in% plausible),
+    ifelse(plausible == F,min(q95),q05),
+    q05)) %>% 
+  ggplot(aes(x = age,ymin = q05,ymax = q95,fill = plausible)) + 
+  geom_ribbon() + 
+  geom_vline(xintercept = 0,linetype = 3,
+             size = 0.5) +
+  theme_gerstung(base_size = 6) + 
+  xlab("Age") + 
+  ylab("VAF") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) + 
+  scale_fill_manual(values = colorspace::lighten(c("red4","goldenrod"),amount = 0.01),
+                    guide = F) + 
+  scale_y_continuous(trans = 'log10') + 
+  scale_x_continuous(breaks = 0)
+
+plot_plausible <- x %>% 
+  ggplot(aes(x = age,y = q50,group = plausible,colour = plausible)) + 
+  geom_line(size = 0.25) + 
+  geom_vline(xintercept = 0,linetype = 3,
+             size = 0.5) +
+  theme_gerstung(base_size = 6) + 
+  xlab("Age") + 
+  ylab("VAF") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  scale_colour_manual(values = c("red4","goldenrod"),guide = F) + 
+  scale_y_continuous(trans = 'log10') + 
+  scale_x_continuous(breaks = 0,limits = c(min(x$age),max(x$age)))
+
+plot_grid(plot_good_bad,plot_plausible) + 
+  ggsave(filename = sprintf("figures/%s/dynamic_coefficients/good_bad_traj.pdf",model_id),
+         width = 1.4,height = 0.65)
+```
+
 ## Comparing historical with observed growth
 
 We can see clearly a bias in terms of genes where the difference between historical and observed growth is concerned - particularly, the phase of clonal dynamics we are able to observe for *TP53*, *DNMT3A* and *BRCC3* is far too slow to explain the observed VAF.
 
 ```{r historical_growth_plots,fig.height=2,fig.width=4}
+aging_order <- c(
+  "DNMT3A","BRCC3","TP53","GNB1","ASXL1","TET2","CBL",
+  "CTCF","PPM1D","JAK2","KRAS","SRSF2-other","SF3B1","IDH1",
+  "IDH2","PTPN11","U2AF1","SRSF2-P95H")
 min_max <- c(
   exp(min(historical_estimates$observed_growth_mean,historical_estimates$historical_growth_mean,na.rm=T))-1,
   exp(max(historical_estimates$observed_growth_mean,historical_estimates$historical_growth_mean,na.rm=T))-1
@@ -138,15 +235,22 @@ growth_per_year_plot <- historical_estimates %>%
   xlab("Observed growth per year") + 
   ylab("Historical growth per year")
 
-growth_per_year_gene_plot <- historical_estimates %>%
+growth_per_year_gene_plot_data <- historical_estimates %>%
+  mutate(gene = ifelse(gene == "SRSF2",
+                       ifelse(site == "SRSF2-P95H",
+                              "SRSF2-P95H",
+                              "SRSF2-other"),
+                       gene)) %>%
   group_by(gene) %>%
-  summarise(average_historical_growth = exp(mean(historical_growth_mean,na.rm=T))-1,
-            average_observed_growth = exp(mean(observed_growth_mean,na.rm=T))-1) %>% 
-  ggplot(aes(x = reorder(gene,average_observed_growth),
+  summarise(average_historical_growth = mean(exp(historical_growth_mean)-1,na.rm=T),
+            average_observed_growth = mean(exp(observed_growth_mean)-1,na.rm=T))
+
+growth_per_year_gene_plot <- growth_per_year_gene_plot_data %>% 
+  ggplot(aes(x = factor(gene,levels = aging_order),
              y = (average_observed_growth + average_historical_growth)/2,
              width = 0.9,
              height = average_historical_growth-average_observed_growth,
-             fill = gene)) +  
+             fill = str_match(gene,"[A-Z0-9]+"))) +  
   geom_tile(size = 0.2,color = "black") + 
   geom_hline(yintercept = 0,size = 0.2) +
   theme_gerstung(base_size = 6) + 
@@ -156,7 +260,8 @@ growth_per_year_gene_plot <- historical_estimates %>%
                      labels = sprintf("%s%%",seq(-0.2,1,by = 0.05)*100),
                      expand = c(0,0,0.01,0)) + 
   scale_x_discrete(expand = c(0.05,0.05)) + 
-  scale_fill_manual(values = gene_colours,guide = F) + 
+  scale_fill_manual(values = gene_colours,
+                    guide = F) + 
   rotate_x_text(face = "italic")
 
 plot_grid(growth_per_year_plot,growth_per_year_gene_plot,nrow=1,align = "h") +
@@ -164,6 +269,106 @@ plot_grid(growth_per_year_plot,growth_per_year_gene_plot,nrow=1,align = "h") +
          height = 2,
          width = 4,
          useDingbats = F)
+
+growth_per_year_gene_plot + 
+  theme(axis.text.x = element_text(face = "plain",angle = 0,hjust = 0.5),
+        axis.text.y = element_text(face = "italic")) + 
+  coord_flip() + 
+  ggsave(filename = sprintf("figures/%s/dynamic_coefficients/historical_growth_figure_larger.pdf",model_id),
+         width = 3.2,height = 2.3)
+```
+
+### Comparison between the expected and observable growth for phylogenetic trees and longitudinal data
+
+We can estimate the annual growth that one would expect and the growth one would be able to observe in the later years of a clone from phylogenetic trees alone. This allows us to draw a comparison between the EPS trajectory defined by a tree and the ratio between observed and plausible - or historical - growth. In this figure we present the combined evidence from simulations and real data (both longitudinal and phylogenetic) that clonal deceleration is observable across most clones, with a few genes being characterised by their larger deceleration - we estimate that *DNMT3A*, one of the most prevalent genes in CH, loses in average at least half of its annual growth rate.
+
+```{r early_late_ratio,fig.height=1.4,fig.width=2.5}
+mitchell_coefficients <- read.csv("data_output/mitchell_bnpr_coefficients.csv") %>%
+  subset(N_samples >= 6) %>% 
+  select(id,clade,
+         early = cp_1,late = cp_2,expected = nonlinear_vaf) %>%
+  mutate(plotting_id = "Real data") %>% 
+  mutate(source = "Michell et al. 2021") %>%
+  mutate(colour = ifelse(grepl("DNMT3A",clade),"DNMT3A",
+                         ifelse(grepl("Clade",clade),"No known driver","Other driver")))
+
+tree_coefficients <- read.csv("data_output/tree_bnpr_coefficients.csv") %>%
+  mutate(b_late = b_early + b_late) %>% 
+  select(id = individual,clade = plot_label,
+         early = b_early,late = b_late,expected = expected_late) %>%
+  mutate(plotting_id = "Real data") %>% 
+  mutate(source = "Fabre et al. 2021") %>%
+  mutate(colour = str_match(clade,"[A-Z0-9]+")) %>%
+  mutate(colour = ifelse(grepl("UD",colour),"No known driver",colour))
+simulation_coefficients_full <- read.csv("data_output/simulated_bnpr_coefficients.csv")
+  
+simulation_coefficients <-  simulation_coefficients_full %>% 
+  subset(col == "Low variance") %>% 
+  subset(w_sum < 3) %>% 
+  mutate(plotting_id = ifelse(late_growth/growth_rate < 0.8,
+                              "Saturating",
+                              "Near\nconstant")) %>% 
+  select(id = name,clade = driver,early = cp_1,late = cp_late,expected = expected_nl,plotting_id) %>%
+  mutate(source = "Simulated") %>%
+  mutate(colour = "No known driver")
+
+all_bnpr_coefficients <- rbind(mitchell_coefficients,tree_coefficients,simulation_coefficients) 
+
+x_order <- c("Near\nconstant","Saturating",
+             "Real data","Obs./plaus.\ngrowth ratio") %>%
+  rev
+
+rbind(
+  all_bnpr_coefficients %>% 
+    group_by(source) %>% 
+    summarise(N = sum((late / expected) < 0.7,na.rm = T),
+              Total = length(id)) %>% 
+    mutate(Ratio = N / Total),
+  historical_estimates %>% 
+    mutate(ratio = (exp(observed_growth_mean)-1) / (exp(historical_growth_mean)-1)) %>% 
+    summarise(N = sum(ratio < 0.7,na.rm=T),Total = length(ratio)) %>% 
+    mutate(Ratio = N / Total) %>%
+    mutate(source = "Fabre et al. 2021 (longitudinal)") %>%
+    select(source,N,Total,Ratio)) %>% 
+  select(Source = source,`Number of saturating trajectories` = N,`Total number of trajectories` = Total,Proportion = Ratio) %>%
+  as.data.frame
+
+all_bnpr_coefficients %>%
+  mutate(late_expected = late / expected) %>%
+  mutate(late_expected = ifelse(late_expected < -1,-1,late_expected)) %>% 
+  ggplot(aes(x = plotting_id,y = late_expected)) +
+  geom_point(
+    data = growth_per_year_gene_plot_data,inherit.aes = F,
+    mapping = aes(x = "Obs./plaus.\ngrowth ratio",
+                  y = average_observed_growth/average_historical_growth,
+                  group = reorder(gene,average_observed_growth/average_historical_growth),
+                  colour = str_match(gene,"[A-Z0-9]+"),
+                  shape = "Fabre et al. 2021"),
+    size = 0.5,
+    position = position_dodge(width = 0.75)) +
+  geom_point(aes(shape = source,colour = colour),size = 0.25,
+             position = position_jitter(width = 0.2,height = 0),
+             alpha = 0.9) + 
+  geom_boxplot(size = 0.25,fill = NA,outlier.color = NA) +
+  geom_hline(yintercept = 1.0,linetype = 2,size = 0.25) +
+  geom_hline(yintercept = 0.5,size = 0.25) + 
+  theme_gerstung(base_size = 6) + 
+  scale_shape_manual(values = c("circle","triangle","cross"),name = NULL) +
+  scale_x_discrete(breaks = x_order,limits = x_order) +
+  xlab("") + 
+  ylab("Growth ratio") + 
+  scale_colour_manual(values = c(gene_colours,
+                                 `Other driver` = "#18A558",
+                                 `No known driver` = "grey50"),guide = F) + 
+  coord_flip(ylim = c(NA,NA)) + 
+  scale_y_continuous(breaks = c(-1,0,0.5,1,2),
+                     labels = c("<-1","0","0.5","1","2")) +
+  theme(legend.position = "top",
+        legend.key.size = unit(0,"cm"),legend.box.spacing = unit(0.1,"cm")) +
+  guides(shape = guide_legend(nrow = 2)) +
+  ggsave(filename = sprintf("figures/%s/dynamic_coefficients/bnpr_historical_growth.pdf",model_id),
+         useDingbats = F,
+         width = 2.1,height = 1.4)
 ```
 
 ## Investigating the determinants of the difference between historical and observed growth effect
@@ -177,10 +382,10 @@ unique_genes <- historical_estimates %>%
   unlist
 historical_estimates <- historical_estimates %>%
   mutate(
-    ratio_q05 = exp(historical_growth_q05-observed_growth_q05),
-    ratio_q50 = exp(historical_growth_q50-observed_growth_q50),
-    ratio_q95 = exp(historical_growth_q95-observed_growth_q95),
-    ratio_mean = exp(historical_growth_mean-observed_growth_mean)
+    ratio_q05 = observed_growth_q05/historical_growth_q05,
+    ratio_q50 = observed_growth_q50/historical_growth_q50,
+    ratio_q95 = observed_growth_q95/historical_growth_q95,
+    ratio_mean = observed_growth_mean/historical_growth_mean
   )
 ```
 
@@ -190,11 +395,14 @@ historical_estimates <- historical_estimates %>%
 historical_estimates %>%
   group_by(gene) %>%
   mutate(M = unlist(quantile(ratio_q50,c(0.5),na.rm = T))) %>%
+  mutate(ratio_q50 = ifelse(ratio_q50 < -0.5,-0.5,ratio_q50)) %>% 
   ggplot(aes(x = reorder(gene,M),y = ratio_q50)) + 
+  geom_hline(yintercept = 1,linetype = 2,size = 0.25) + 
   geom_point(size = 0.5,position = position_jitter(width = 0.1)) +
   geom_boxplot(outlier.size = 0,alpha = 0.7,size = 0.25) + 
   coord_flip() + 
   theme_gerstung(base_size = 6) +
+  scale_y_continuous(breaks = c(-0.5,0,1),labels = c("<-0.5","0","1")) + 
   theme(axis.text.y = element_text(face = "italic")) + 
   ylab("Ratio of historical and observed annual fold change") + 
   xlab("Gene")
@@ -255,19 +463,15 @@ tmp <- historical_estimates_gender_smoking %>%
   filter(!is.na(ratio_q50) & !is.na(HasSmoked) & !is.na(Gender) & !is.na(min_age))
 all_models <- list(
   `All genes` = list(
-    m = glm(ratio_q50 ~ HasSmoked + Gender + min_age,data = tmp,
-            family = Gamma),
-    null_m = glm(ratio_q50 ~ min_age,data = tmp,
-                 family = Gamma)))
+    m = glm(ratio_q50 ~ HasSmoked + Gender + min_age,data = tmp),
+    null_m = glm(ratio_q50 ~ min_age,data = tmp)))
 
 for (g in unique_genes) {
   x <- tmp %>% 
     subset(gene == g)
   all_models[[g]] <- list(
-    m = glm(ratio_q50 ~ HasSmoked + Gender + min_age,data = x,
-            family = Gamma),
-    null_m = glm(ratio_q50 ~ min_age,data = x,
-                 family = Gamma))
+    m = glm(ratio_q50 ~ HasSmoked + Gender + min_age,data = x),
+    null_m = glm(ratio_q50 ~ min_age,data = x))
 }
 
 significance_df <- all_models %>% 
@@ -417,16 +621,16 @@ for (P in unique(tmp$par)) {
     subset(par == P) %>%
     subset(!is.na(Mean) & !is.na(Slope))
   if (P == "RDW") {
-    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x,family = Gamma(link = "identity"))
-    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x)
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x)
     all_comparisons_dnmt3a[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "mean")
   }
   else {
-    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x,family = Gamma(link = "identity"))
-    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x)
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x)
     all_comparisons_dnmt3a[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "mean")
-    Mm <- glm(ratio_q50 ~ Gender*meanAge + Slope,data = x,family = Gamma(link = "identity"))
-    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Slope,data = x)
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x)
     all_comparisons_dnmt3a[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "slope")
   }
 }
@@ -444,16 +648,16 @@ for (P in unique(tmp$par)) {
     subset(par == P) %>%
     subset(!is.na(Mean) & !is.na(Slope))
   if (P == "RDW") {
-    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x,family = Gamma(link = "identity"))
-    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x)
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x)
     all_comparisons_tet2[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "mean")
   }
   else {
-    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x,family = Gamma(link = "identity"))
-    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Mean,data = x)
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x)
     all_comparisons_tet2[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "mean")
-    Mm <- glm(ratio_q50 ~ Gender*meanAge + Slope,data = x,family = Gamma(link = "identity"))
-    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x,family = Gamma(link = "identity"))
+    Mm <- glm(ratio_q50 ~ Gender*meanAge + Slope,data = x)
+    NMm <- glm(ratio_q50 ~ Gender*meanAge,data = x)
     all_comparisons_tet2[[P]] <- data.frame(par = P,anova(NMm,Mm,test = "F")[2,c(5,6)],f = "slope")
   }
 }

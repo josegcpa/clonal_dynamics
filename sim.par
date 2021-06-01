@@ -1,0 +1,1 @@
+/homes/josegcpa/clonex/clonex -n 200000 -N 200000 -g 1300 -f . -t 0 -p 5000 -d 50 -u 10e-9 -v 5e-6 -G 500 -s 0.010 -R 20 

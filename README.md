@@ -29,7 +29,7 @@ This is the repository for [The Natural History of Clonal Haematopoiesis](). In 
 
 *Please note that this entails installing your own version of `greta`, which is the package used for MCMC sampling, and the adequate alteration of paths in `vaf_dynamics_functions.R`*
 
-*Please note this assumes that you are running this script from the root directory of this project*
+*Please note this assumes that you are running this script from the root directory of this project and that steps where the instructions mention running "in `Rstudio`" can be replaced by `./knit NOTEBOOK.Rmd` where `NOTEBOOK.Rmd` is the relevant Rmarkdown notebook. This generates `NOTEBOOK.html` and output files which are stored in `data_output`*
 
 *Notebooks with complete runs are already present above, but if one wants to run this locally the following steps can be taken:*
 
@@ -56,11 +56,12 @@ This is the repository for [The Natural History of Clonal Haematopoiesis](). In 
     1. Run `Scripts/run_model.R` (`Rscript Scripts/run_model.R`) - this runs the model that infers all growth rate coefficients
     2. Run `Notebook_GrowthCoefficients_AgeAtOnset_PossibleAssociations.Rmd` (in `Rstudio`) - this is the notebook containing the bulk of the analysis
 
-5. Analysis of the historical growth effect and poor fits
-    1. Run `Notebook_HistoricalGrowth_PoorFits.Rmd` (in `Rstudio`) - this runs analyses which factors - technical and biological - may be determinant of the difference between historical and inferred growth and a fit being poor (having one or more outlier)
-
-6. Phylogenetic trees from single cell colonies, the determination of growth per year and age at onset from these trees and comparison with estimates from longitudinal data
+5. Phylogenetic trees from single cell colonies, the determination of growth per year and age at onset from these trees and comparison with estimates from longitudinal data
     1. Run `Scripts/plot_tree.R` (`Rscript Scripts/plot_tree.R`) - this runs all of the aforementioned analysis and plots it as displayed in the manuscript
+    2. Run `Notebook_Mitchell.Rmd` (in `Rstudio`) - analyses the phylogenetic data from [Michell et al. (2021)]()
+
+6. Analysis of the historical growth effect and poor fits
+    1. Run `Notebook_HistoricalGrowth_PoorFits.Rmd` (in `Rstudio`) - this runs analyses which factors - technical and biological - may be determinant of the difference between historical and inferred growth and a fit being poor (having one or more outlier)
 
 *Optional: run `Scripts/plots_for_initial_panel.R`*
 
