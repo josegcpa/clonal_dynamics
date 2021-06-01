@@ -1,2 +1,0 @@
-fname=\'$1\'
-R -e "Sys.setenv(RSTUDIO_PANDOC='/hps/nobackup/research/gerstung/josegcpa/software/Rserver/usr/lib/rstudio-server/bin/pandoc',clean=T); rmarkdown::render($fname)"

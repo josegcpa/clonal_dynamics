@@ -1,1 +1,0 @@
-/homes/josegcpa/clonex/clonex -n 200000 -N 200000 -g 1300 -f tmp_hsc -t 0 -p 1000 -d 50 -u 8e-8 -v 2e-6 -G 20 -s 0.020 -R 5 

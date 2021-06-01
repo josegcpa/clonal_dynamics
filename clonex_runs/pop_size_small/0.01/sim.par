@@ -1,1 +1,0 @@
-/homes/josegcpa/clonex/clonex -d 1000 -p 1000 -o 0 -u 1.000000e-09 -v 1.000000e-05 -s 1.000000e-02 -t 0.000000e+00 -n 50000 -N 50000 -g 1000 -G 50 -r 42 -f clonex_runs/pop_size_small/0.01 -X 0 -Y 0 -Z 0.000100 -L 0 -R 10 
