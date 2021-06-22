@@ -84,13 +84,16 @@ historical_estimates <- sampling_idxs %>%
     b <- b_gene + b_clone + b_site
     u_values <- offset_samples[,clone_numeric]
     ages_at_onset <- t0_adjusted(u_values,b,g=2,n=pop_size) + values_model$min_age
-    biologically_feasible <- ages_at_onset > 0 & ages_at_onset < minAge
+    ages_at_onset_corrected <- ifelse(ages_at_onset < -1,-1,ages_at_onset)
+    ages_at_onset_corrected <- ifelse(ages_at_onset > minAge,minAge,ages_at_onset)
+    biologically_feasible <- ages_at_onset > -1 & ages_at_onset < minAge
     historical_b <- b[biologically_feasible]
     Q <- quantile(historical_b,c(0.05,0.5,0.95),na.rm = T)
     Q_observed <- quantile(b,c(0.05,0.5,0.95),na.rm = T)
     names(Q) <- c("Q05","Q50","Q95")
     return(data.frame(individual=x[1],
                       site=x[2],
+                      ages_Q50 = quantile(ages_at_onset_corrected,0.5,na.rm = T)[1],
                       observed_growth_q05=Q_observed[1],
                       observed_growth_q50=Q_observed[2],
                       observed_growth_q95=Q_observed[3],
@@ -112,6 +115,9 @@ historical_estimates <- historical_estimates %>%
 idxs <- sampling_idxs %>% 
   subset(individual == 4088 & site == "DNMT3At-E578X")
 
+tmp_data <- full_data %>%
+  subset(SardID == idxs$individual & amino_acid_change == idxs$site)
+
 #idxs <- sampling_idxs[1,]
 
 S <- data.frame(
@@ -127,7 +133,189 @@ S <- data.frame(
     b_site <- as.numeric(x[3])
     b_site <- ifelse(is.na(b_site),0,b_site)
     b_clone <- as.numeric(x[4])
-    max_age <- as.numeric(x[6]) + 40
+    max_age <- as.numeric(x[6]) + 25
+    b <- b_gene+b_site+b_clone
+    traj <- suppressWarnings(trajectory_from_parameters_2(
+      b = b,u = u,g = 2,N = pop_size,x = seq(-20,max_age,by = 0.5) - values_model$min_age))
+    age_at_onset <- t0_adjusted(u,b,g = 2,n = pop_size)
+    return(data.frame(
+      age = traj$x + values_model$min_age,
+      VAF = traj$y,
+      t0 = age_at_onset + values_model$min_age,
+      ID = as.numeric(x[5])
+    ))
+  }) %>%
+  do.call(what = rbind) %>%
+  mutate(plausible = t0 >= 0) %>%
+  mutate(VAF = ifelse(is.na(VAF),0,VAF))
+
+x <- rbind(
+  S %>% 
+    subset(plausible == T) %>%
+    group_by(age,plausible) %>%
+    summarise(q05 = quantile(VAF,0.05,na.rm = T),
+              q50 = quantile(VAF,0.5,na.rm = T),
+              q95 = quantile(VAF,0.95,na.rm = T)) %>%
+    as.data.frame,
+  S %>% 
+    group_by(age) %>%
+    summarise(plausible = as.logical(0),
+              q05 = quantile(VAF,0.05,na.rm = T),
+              q50 = quantile(VAF,0.5,na.rm = T),
+              q95 = quantile(VAF,0.95,na.rm = T)) %>%
+    as.data.frame) %>%
+  subset(q95 > 0)
+
+plot_good_bad <- x %>% 
+  group_by(age) %>% 
+  subset(q95 > 0) %>% 
+  mutate(q05 = ifelse(
+    all(c(T,F) %in% plausible),
+    ifelse(plausible == F,min(q95),q05),
+    q05)) %>% 
+  ggplot(aes(x = age,ymin = q05,ymax = q95,fill = plausible)) + 
+  geom_ribbon(alpha = 0.3) + 
+  geom_line(aes(y = q50,colour = plausible),size = 0.25) +
+  geom_vline(xintercept = 0,linetype = 3,
+             size = 0.5) +
+  theme_gerstung(base_size = 6) + 
+  xlab("Age") + 
+  ylab("VAF") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank()) + 
+  scale_fill_manual(values = colorspace::lighten(c("red4","goldenrod"),amount = 0.2),
+                    guide = F) + 
+  scale_colour_manual(values = colorspace::darken(c("red4","goldenrod"),amount = 0.2),
+                      guide = F) + 
+  scale_y_continuous(trans = 'log10') + 
+  scale_x_continuous(breaks = 0)
+
+plot_plausible <- x %>% 
+  ggplot(aes(x = age,y = q50,group = plausible,colour = plausible)) + 
+  geom_line(size = 0.25) + 
+  geom_point(data = tmp_data,aes(x = Age,y = VAF),inherit.aes = F,size = 0.25) +
+  geom_vline(xintercept = 0,linetype = 3,
+             size = 0.5) +
+  theme_gerstung(base_size = 6) + 
+  xlab("Age") + 
+  ylab("VAF") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank()) +
+  scale_colour_manual(values = c("red4","goldenrod"),guide = F) + 
+  scale_y_continuous(trans = 'log10') + 
+  scale_x_continuous(breaks = 0,limits = c(min(x$age),max(x$age)))
+
+plot_grid(plot_good_bad,plot_plausible) + 
+  ggsave(filename = sprintf("figures/%s/dynamic_coefficients/good_bad_traj.pdf",model_id),
+         width = 1.4,height = 0.55,
+         useDingbats = F)
+```
+
+```{r,fig.width=0.9,fig.height=0.8}
+plot_good_bad + 
+    geom_point(data = tmp_data,aes(x = Age,y = VAF),inherit.aes = F,size = 0.25) + 
+  ggsave(filename = sprintf("figures/%s/dynamic_coefficients/good_bad_traj_combo.pdf",model_id),
+         width = 0.8,height = 0.8,
+         useDingbats = F)
+```
+
+```{r,fig.height=0.5,fig.width=0.6}
+idxs <- sampling_idxs %>% 
+  subset((individual == 4088 & site == "DNMT3At-E578X") | (individual == 3877 & site == "U2AF1-Q157R"))
+
+tmp_data <- full_data %>%
+  subset(SardID %in% idxs$individual & amino_acid_change %in% idxs$site)
+
+#idxs <- sampling_idxs[1,]
+
+S <- data.frame(
+  u = c(offset_samples[,idxs$clone_numeric]),
+  b_gene = c(gene_samples[,idxs$gene_numeric]),
+  b_site = c(site_samples[,idxs$site_numeric]),
+  b_clone = c(clone_samples[,idxs$clone_numeric]),
+  idx = c(replicate(2,seq(1,nrow(clone_samples)))),
+  maxAge = c(sapply(idxs$maxAge, function(x) rep(x,nrow(offset_samples)))),
+  site = c(sapply(idxs$site, function(x) rep(x,nrow(offset_samples)))),
+  id = c(sapply(idxs$individual, function(x) rep(x,nrow(offset_samples))))) %>%
+  apply(1,function(x) {
+    u <- as.numeric(x[1])
+    b_gene <- as.numeric(x[2])
+    b_site <- as.numeric(x[3])
+    b_site <- ifelse(is.na(b_site),0,b_site)
+    b_clone <- as.numeric(x[4])
+    max_age <- as.numeric(x[6]) + 10
+    b <- b_gene+b_site+b_clone
+    traj <- suppressWarnings(trajectory_from_parameters_2(
+      b = b,u = u,g = 2,N = pop_size,x = seq(-20,max_age,by = 0.5) - values_model$min_age))
+    age_at_onset <- t0_adjusted(u,b,g = 2,n = pop_size)
+    return(suppressWarnings(data.frame(
+      age = traj$x + values_model$min_age,
+      VAF = traj$y,
+      t0 = age_at_onset + values_model$min_age,
+      ID = as.numeric(x[5]),
+      site = x[7],
+      individual = x[8]
+    )))
+  }) %>%
+  do.call(what = rbind) %>%
+  mutate(plausible = t0 >= 0) %>%
+  mutate(VAF = ifelse(is.na(VAF),0,VAF))
+
+x <- S %>% 
+  group_by(age,site,individual) %>%
+  summarise(plausible = as.logical(0),
+            q05 = quantile(VAF,0.05,na.rm = T),
+            q50 = quantile(VAF,0.5,na.rm = T),
+            q95 = quantile(VAF,0.95,na.rm = T)) 
+
+plot_slow_fast <- x %>% 
+  ggplot(aes(x = age,y = q50,colour = site)) + 
+  geom_ribbon(aes(ymin = q05,ymax = q95,fill = site),
+              colour = NA,alpha = 0.5) +
+  geom_line(size = 0.25) + 
+  #geom_point(data = tmp_data,aes(x = Age,y = VAF),inherit.aes = F,size = 0.25) +
+  geom_vline(xintercept = 0,linetype = 3,
+             size = 0.5) +
+  theme_gerstung(base_size = 6) + 
+  xlab("Age") + 
+  ylab("VAF") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  scale_colour_manual(values = c("goldenrod","lightblue"),guide = F) + 
+  scale_fill_manual(values = c("goldenrod","lightblue"),guide = F) + 
+  scale_y_continuous(trans = 'log10') + 
+  scale_x_continuous(breaks = 0,limits = c(min(x$age),max(x$age))) + 
+  theme(axis.title.x = element_blank())
+
+plot_slow_fast + 
+  ggsave(filename = sprintf("figures/%s/dynamic_coefficients/slow_fast_traj.pdf",model_id),
+         width = 0.6,height = 0.5,
+         useDingbats = F)
+```
+
+```{r,fig.height=0.65,fig.width=1.4}
+idxs <- sampling_idxs %>% 
+  subset(grepl("TP53",site))# %>% subset(individual == 4088 & site == "DNMT3At-E578X")
+idxs <- idxs[1,]
+tmp_data <- full_data %>%
+  subset(SardID == idxs$individual & amino_acid_change == idxs$site)
+
+S <- data.frame(
+  u = offset_samples[,idxs$clone_numeric],
+  b_gene = gene_samples[,idxs$gene_numeric],
+  b_site = site_samples[,idxs$site_numeric],
+  b_clone = clone_samples[,idxs$clone_numeric],
+  idx = seq(1,nrow(clone_samples)),
+  maxAge = idxs$maxAge) %>%
+  apply(1,function(x) {
+    u <- as.numeric(x[1])
+    b_gene <- as.numeric(x[2])
+    b_site <- as.numeric(x[3])
+    b_site <- ifelse(is.na(b_site),0,b_site)
+    b_clone <- as.numeric(x[4])
+    max_age <- as.numeric(x[6]) + 25
     b <- b_gene+b_site+b_clone
     traj <- suppressWarnings(trajectory_from_parameters_2(
       b = b,u = u,g = 2,N = pop_size,x = seq(-20,max_age,by = 0.5) - values_model$min_age))
@@ -184,6 +372,7 @@ plot_good_bad <- x %>%
 plot_plausible <- x %>% 
   ggplot(aes(x = age,y = q50,group = plausible,colour = plausible)) + 
   geom_line(size = 0.25) + 
+  geom_point(data = tmp_data,aes(x = Age,y = VAF),inherit.aes = F,size = 0.25) +
   geom_vline(xintercept = 0,linetype = 3,
              size = 0.5) +
   theme_gerstung(base_size = 6) + 
@@ -196,8 +385,9 @@ plot_plausible <- x %>%
   scale_x_continuous(breaks = 0,limits = c(min(x$age),max(x$age)))
 
 plot_grid(plot_good_bad,plot_plausible) + 
-  ggsave(filename = sprintf("figures/%s/dynamic_coefficients/good_bad_traj.pdf",model_id),
-         width = 1.4,height = 0.65)
+  ggsave(filename = sprintf("figures/%s/dynamic_coefficients/good_bad_traj_2.pdf",model_id),
+         width = 1.4,height = 0.55,
+         useDingbats = F)
 ```
 
 ## Comparing historical with observed growth
@@ -248,26 +438,25 @@ growth_per_year_gene_plot_data <- historical_estimates %>%
 growth_per_year_gene_plot <- growth_per_year_gene_plot_data %>% 
   ggplot(aes(x = factor(gene,levels = aging_order),
              y = (average_observed_growth + average_historical_growth)/2,
-             width = 0.9,
-             height = average_historical_growth-average_observed_growth,
-             fill = str_match(gene,"[A-Z0-9]+"))) +  
-  geom_tile(size = 0.2,color = "black") + 
-  geom_hline(yintercept = 0,size = 0.2) +
+             colour = str_match(gene,"[A-Z0-9]+"))) +  
+  geom_linerange(aes(ymin = average_observed_growth,ymax = average_historical_growth),
+                 colour = "black") + 
+  geom_point(aes(y = average_observed_growth),size = 1) + 
+  geom_point(aes(y = average_historical_growth),size = 1) + 
+  geom_point(aes(y = average_historical_growth),size = 0.5,colour = 'white') + 
   theme_gerstung(base_size = 6) + 
   xlab("") + 
   ylab("Growth per year") +
-  scale_y_continuous(breaks = seq(-0.2,1,by = 0.05),
-                     labels = sprintf("%s%%",seq(-0.2,1,by = 0.05)*100),
-                     expand = c(0,0,0.01,0)) + 
-  scale_x_discrete(expand = c(0.05,0.05)) + 
-  scale_fill_manual(values = gene_colours,
-                    guide = F) + 
+  scale_y_continuous(breaks = seq(-0.2,1,by = 0.1),
+                     labels = sprintf("%s%%",seq(-0.2,1,by = 0.1)*100),
+                     expand = c(0,0,0.05,0),limits = c(0,NA)) + 
+  scale_colour_manual(values = gene_colours,guide = F) + 
   rotate_x_text(face = "italic")
 
 plot_grid(growth_per_year_plot,growth_per_year_gene_plot,nrow=1,align = "h") +
   ggsave(filename = sprintf("figures/%s/dynamic_coefficients/historical_growth_figure.pdf",model_id),
          height = 2,
-         width = 4,
+         width = 3.5,
          useDingbats = F)
 
 growth_per_year_gene_plot + 
@@ -275,7 +464,7 @@ growth_per_year_gene_plot +
         axis.text.y = element_text(face = "italic")) + 
   coord_flip() + 
   ggsave(filename = sprintf("figures/%s/dynamic_coefficients/historical_growth_figure_larger.pdf",model_id),
-         width = 3.2,height = 2.3)
+         width = 1.7,height = 2,useDingbats = F)
 ```
 
 ### Comparison between the expected and observable growth for phylogenetic trees and longitudinal data
@@ -284,18 +473,18 @@ We can estimate the annual growth that one would expect and the growth one would
 
 ```{r early_late_ratio,fig.height=1.4,fig.width=2.5}
 mitchell_coefficients <- read.csv("data_output/mitchell_bnpr_coefficients.csv") %>%
-  subset(N_samples >= 6) %>% 
+  subset(w_sum < 10) %>%
+  group_by(id,clade) %>% 
   select(id,clade,
          early = cp_1,late = cp_2,expected = nonlinear_vaf) %>%
   mutate(plotting_id = "Real data") %>% 
-  mutate(source = "Michell et al. 2021") %>%
+  mutate(source = "Mitchell et al. 2021") %>%
   mutate(colour = ifelse(grepl("DNMT3A",clade),"DNMT3A",
-                         ifelse(grepl("Clade",clade),"No known driver","Other driver")))
+                         ifelse(grepl("Clade",clade),"No known driver","Other driver"))) 
 
 tree_coefficients <- read.csv("data_output/tree_bnpr_coefficients.csv") %>%
-  mutate(b_late = b_early + b_late) %>% 
-  select(id = individual,clade = plot_label,
-         early = b_early,late = b_late,expected = expected_late) %>%
+  transmute(id = individual,clade = plot_label,
+            early = b_early,late = b_early + b_late,expected = expected_late) %>%
   mutate(plotting_id = "Real data") %>% 
   mutate(source = "Fabre et al. 2021") %>%
   mutate(colour = str_match(clade,"[A-Z0-9]+")) %>%
@@ -304,7 +493,6 @@ simulation_coefficients_full <- read.csv("data_output/simulated_bnpr_coefficient
   
 simulation_coefficients <-  simulation_coefficients_full %>% 
   subset(col == "Low variance") %>% 
-  subset(w_sum < 3) %>% 
   mutate(plotting_id = ifelse(late_growth/growth_rate < 0.8,
                               "Saturating",
                               "Near\nconstant")) %>% 
@@ -312,7 +500,9 @@ simulation_coefficients <-  simulation_coefficients_full %>%
   mutate(source = "Simulated") %>%
   mutate(colour = "No known driver")
 
-all_bnpr_coefficients <- rbind(mitchell_coefficients,tree_coefficients,simulation_coefficients) 
+all_bnpr_coefficients <- rbind(as.data.frame(mitchell_coefficients),
+                               as.data.frame(tree_coefficients),
+                               as.data.frame(simulation_coefficients))
 
 x_order <- c("Near\nconstant","Saturating",
              "Real data","Obs./plaus.\ngrowth ratio") %>%
@@ -321,16 +511,17 @@ x_order <- c("Near\nconstant","Saturating",
 rbind(
   all_bnpr_coefficients %>% 
     group_by(source) %>% 
-    summarise(N = sum((late / expected) < 0.7,na.rm = T),
+    summarise(N = sum((late / expected) < 0.8,na.rm = T),
               Total = length(id)) %>% 
     mutate(Ratio = N / Total),
   historical_estimates %>% 
     mutate(ratio = (exp(observed_growth_mean)-1) / (exp(historical_growth_mean)-1)) %>% 
-    summarise(N = sum(ratio < 0.7,na.rm=T),Total = length(ratio)) %>% 
+    summarise(N = sum(ratio < 0.8,na.rm=T),Total = length(ratio)) %>% 
     mutate(Ratio = N / Total) %>%
     mutate(source = "Fabre et al. 2021 (longitudinal)") %>%
     select(source,N,Total,Ratio)) %>% 
-  select(Source = source,`Number of saturating trajectories` = N,`Total number of trajectories` = Total,Proportion = Ratio) %>%
+  select(Source = source,`Number of saturating trajectories` = N,
+         `Total number of trajectories` = Total,Proportion = Ratio) %>%
   as.data.frame
 
 all_bnpr_coefficients %>%
@@ -344,14 +535,13 @@ all_bnpr_coefficients %>%
                   group = reorder(gene,average_observed_growth/average_historical_growth),
                   colour = str_match(gene,"[A-Z0-9]+"),
                   shape = "Fabre et al. 2021"),
-    size = 0.5,
+    size = 0.3,
     position = position_dodge(width = 0.75)) +
   geom_point(aes(shape = source,colour = colour),size = 0.25,
              position = position_jitter(width = 0.2,height = 0),
              alpha = 0.9) + 
   geom_boxplot(size = 0.25,fill = NA,outlier.color = NA) +
-  geom_hline(yintercept = 1.0,linetype = 2,size = 0.25) +
-  geom_hline(yintercept = 0.5,size = 0.25) + 
+  geom_hline(yintercept = 1.0,size = 0.25) + 
   theme_gerstung(base_size = 6) + 
   scale_shape_manual(values = c("circle","triangle","cross"),name = NULL) +
   scale_x_discrete(breaks = x_order,limits = x_order) +
@@ -368,7 +558,104 @@ all_bnpr_coefficients %>%
   guides(shape = guide_legend(nrow = 2)) +
   ggsave(filename = sprintf("figures/%s/dynamic_coefficients/bnpr_historical_growth.pdf",model_id),
          useDingbats = F,
-         width = 2.1,height = 1.4)
+         width = 1.9,height = 1.2)
+```
+
+```{r,fig.height=0.8,fig.width=1.9}
+all_bnpr_coefficients %>%
+  mutate(late_expected = late / expected) %>%
+  mutate(late_expected = ifelse(late_expected < -1,-1,late_expected)) %>% 
+  subset(source != "Simulated") %>%
+  ggplot(aes(x = plotting_id,y = late_expected)) +
+  geom_point(
+    data = growth_per_year_gene_plot_data,inherit.aes = F,
+    mapping = aes(x = "Obs./plaus.\ngrowth ratio",
+                  y = average_observed_growth/average_historical_growth,
+                  group = reorder(gene,average_observed_growth/average_historical_growth),
+                  colour = str_match(gene,"[A-Z0-9]+"),
+                  shape = "Fabre et al. 2021"),
+    size = 0.3,
+    position = position_dodge(width = 0.75)) +
+  geom_point(size = 0.25,
+             position = position_jitter(width = 0.2,height = 0),
+             alpha = 0.9,
+             colour = "grey") + 
+  geom_boxplot(size = 0.25,fill = NA,outlier.color = NA) +
+  geom_hline(yintercept = 1.0,size = 0.25) + 
+  theme_gerstung(base_size = 6) + 
+  scale_shape_manual(values = c("circle","triangle","cross"),guide = F) +
+  scale_x_discrete(breaks = x_order[1:2],limits = x_order[1:2]) +
+  xlab("") + 
+  ylab("Growth ratio") + 
+  scale_colour_manual(values = c(gene_colours,
+                                 `Other driver` = "#18A558",
+                                 `No known driver` = "grey50"),guide = F) + 
+  scale_y_continuous(breaks = c(-1,0,0.5,1,2),
+                     labels = c("<-1","0","0.5","1","2")) +
+  theme(legend.position = "none",
+        legend.key.size = unit(0,"cm"),legend.box.spacing = unit(0.1,"cm")) +
+  guides(shape = guide_legend(nrow = 2)) +
+  coord_flip() +
+  ggsave(filename = sprintf("figures/%s/dynamic_coefficients/bnpr_historical_growth_simplified.pdf",model_id),
+         useDingbats = F,
+         width = 1.9,height = 0.8)
+```
+
+### Comparison between expected and observed VAF 
+
+```{r,fig.height=1,fig.width=1}
+mitchell_vaf <- read.csv("data_output/mitchell_bnpr_coefficients.csv") %>%
+  subset(w_sum < 10) %>%
+  group_by(id,clade) %>% 
+  select(id,clade,
+         observed_vaf=vaf_from_clade,expected_vaf) %>%
+  mutate(plotting_id = "Real data") %>% 
+  mutate(source = "Mitchell et al. 2021") %>%
+  mutate(colour = ifelse(grepl("DNMT3A",clade),"DNMT3A",
+                         ifelse(grepl("Clade",clade),"No known driver","Other driver"))) 
+
+tree_vaf <- read.csv("data_output/tree_bnpr_coefficients.csv") %>%
+  subset(source == "Colonies") %>% 
+  select(id = individual,clade = plot_label,
+         observed_vaf,expected_vaf) %>%
+  mutate(plotting_id = "Real data") %>% 
+  mutate(source = "Fabre et al. 2021") %>%
+  mutate(colour = str_match(clade,"[A-Z0-9]+")) %>%
+  mutate(colour = ifelse(grepl("UD",colour),"No known driver",colour)) %>%
+  mutate(id = factor(id))
+
+rbind(as.data.frame(mitchell_vaf),as.data.frame(tree_vaf)) %>%
+  mutate(expected_vaf = expected_vaf) %>% 
+  mutate(expected_vaf = ifelse(expected_vaf > 1,1,expected_vaf)) %>% 
+  ggplot(aes(x = observed_vaf,y = expected_vaf)) + 
+  geom_point(size = 0.5) + 
+  geom_abline(slope = 1,size = 0.25) + 
+  theme_gerstung(base_size = 6) + 
+  scale_y_continuous(breaks = c(0,0.5,1.0)) +
+  scale_x_continuous(breaks = c(0,0.5,1.0)) + 
+  xlab("Observed clone freq.") + 
+  ylab("Extrapolated\nclone frequency") 
+```
+
+```{r,fig.height=0.7,fig.width=1}
+rbind(as.data.frame(mitchell_vaf),as.data.frame(tree_vaf)) %>%
+  mutate(expected_vaf = expected_vaf) %>% 
+  mutate(expected_vaf = ifelse(expected_vaf > 1,1,expected_vaf)) %>% 
+  ggplot(aes(y = expected_vaf/observed_vaf,x = "")) + 
+  geom_hline(yintercept = 1,size = 0.25) +
+  geom_point(position = position_jitter(height = 0.2),size = 0.25,colour = "grey") + 
+  geom_boxplot(outlier.color = NA,alpha = 0.5,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  theme(axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.line.y = element_blank()) +
+  ylab("Expected/observed\nclone size fold change") +
+  scale_y_continuous(trans = 'log10',
+                     breaks = c(0.1,1e-2,1,10,100),labels = c("0.1","0.01","1","10","100")) + 
+  coord_flip() +
+  ggsave(filename = sprintf("figures/%s/dynamic_coefficients/expected_vs_observed_vaf.pdf",model_id),
+         useDingbats = F,
+         width = 1.1,height = 0.75)
 ```
 
 ## Investigating the determinants of the difference between historical and observed growth effect

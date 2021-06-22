@@ -1,9 +1,9 @@
 #' Function and constant library for "The Natural History of Clonal Haematopoiesis"
 
 library(reticulate)
-use_python('/homes/josegcpa/r-crap/bin/python3',required = T)
-Sys.setenv(LD_LIBRARY_PATH = paste(Sys.getenv('LD_LIBRARY_PATH'), "/homes/josegcpa/r-crap/lib", sep = ":"))
-Sys.setenv(PYTHONPATH="/homes/josegcpa/r-crap/lib/python3.6/site-packages")
+use_python('/homes/josegcpa/r-python/bin/python3',required = T)
+Sys.setenv(LD_LIBRARY_PATH = paste(Sys.getenv('LD_LIBRARY_PATH'), "/homes/josegcpa/r-python/lib", sep = ":"))
+Sys.setenv(PYTHONPATH="/homes/josegcpa/r-python/lib/python3.6/site-packages")
 library(greta)
 library(ggplot2)
 library(ggpubr)

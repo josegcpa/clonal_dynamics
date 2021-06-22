@@ -82,6 +82,41 @@ grab_samples <- function(site_numeric,gene_numeric,clone_numeric,sample_size=100
   return(list(b_site,b_clone,b_gene,u))
 }
 
+bnpr_at_coalescence <- function(bnpr_estimate) {
+  time_at_coal <- bnpr_estimate$coal_times
+  X <- bnpr_estimate$summary$time
+  Y <- bnpr_estimate$summary$quant0.5
+  Y025 <- bnpr_estimate$summary$quant0.025
+  Y975 <- bnpr_estimate$summary$quant0.975
+  Y_log <- log(na.omit(approx(X,Y,xout = time_at_coal,rule = 2)$y))
+  values_at_coalescence <- data.frame(
+    X = time_at_coal,
+    Y = Y_log,
+    Y_exp = approx(X,Y,xout = time_at_coal)$y,
+    Y025 = approx(X,Y025,xout = time_at_coal)$y,
+    Y975 = approx(X,Y975,xout = time_at_coal)$y
+  ) %>%
+    na.omit()
+  return(values_at_coalescence)
+}
+
+bnpr_at_all <- function(bnpr_estimate) {
+  X <- bnpr_estimate$summary$time
+  Y <- bnpr_estimate$summary$quant0.5
+  Y025 <- bnpr_estimate$summary$quant0.025
+  Y975 <- bnpr_estimate$summary$quant0.975
+  Y_log <- log(Y)
+  values_at_coalescence <- data.frame(
+    X = X,
+    Y = Y_log,
+    Y_exp = Y,
+    Y025 = Y025,
+    Y975 = Y975
+  ) %>%
+    na.omit()
+  return(values_at_coalescence)
+}
+
 sample_ages <- function(sampling_idxs,pop_size,gen_time,sample_size=1000) {
   sampling_idxs %>% 
     apply(1,function(x) {
@@ -213,12 +248,68 @@ for (item_name in names(bnpr_estimates)) {
               1,
               mean(X)),
       method = "L-BFGS-B",
-      upper = c(NA,NA,0,NA),
+      lower = c(NA,0,NA,min(X) + diff(range(X)) * 0.25),
+      upper = c(NA,NA,NA,max(X) - diff(range(X)) * 0.25),
       fn = opt_fn)
+    
+    b <- -log(200e3 - 1)
+    expected_vaf <- inv.logit(change_point_regression$par[2] * diff(range(X)) + b)
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$linear_estimate <- linear_estimate
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$non_linear_estimate <- non_linear_estimate
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$change_point_regression <- change_point_regression
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$non_linear_estimate_vaf <- non_linear_estimate_vaf
+    bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$vaf <- vaf
+    bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$expected_vaf <- expected_vaf
+  }
+}
+
+bnpr_estimates_coalescence <- bnpr_estimates
+for (item_name in names(bnpr_estimates_coalescence)) {
+  tree_size <- length(trees[[item_name]]$tree_ultra$tip.label)
+  for (clade_name in names(bnpr_estimates_coalescence[[item_name]][["clade_dynamics"]])) {
+    clade <- bnpr_estimates_coalescence[[item_name]][["clade_dynamics"]][[clade_name]]
+    bnpr_estimate <- clade$bnpr_estimate
+    vaf <- length(clade$clade) / tree_size
+    tmp_df <- bnpr_at_all(bnpr_estimate)
+    Y <- tmp_df$Y
+    X <- -tmp_df$X
+    W <- (log(tmp_df$Y975) - log(tmp_df$Y025))^2/16
+    linear_estimate <- lm(Y ~ X,w = 1/W)
+    mp <- mean(X[Y > max(Y)/2])
+    Y_exp <- exp(Y)
+    non_linear_estimate <- nls(exp(Y) ~ SSlogis(X,theta1,theta2,theta3),
+                               weights = 1/W,
+                               control = nls.control(warnOnly = T,
+                                                     maxiter = 1000,
+                                                     minFactor = 1 / (1024^2)),
+                               start = c(theta1 = max(exp(Y)),
+                                         theta2 = mp,
+                                         theta3 = 1))
+    non_linear_estimate_vaf <- nls(Y_exp / Y_exp[1] * vaf ~ SSlogis(X,1,theta2,theta3),
+                                   weights = 1/W,
+                                   control = nls.control(warnOnly = T,
+                                                         maxiter = 1000,
+                                                         minFactor = 1 / (1024^16)),
+                                   start = c(theta2 = max(X),
+                                             theta3 = 5))
+    
+    opt_fn <- function(par) {
+      se <- (Y - change_point(X,par[1],par[2],par[3],par[4]))^2
+      return(mean(se / W))
+    }
+    change_point_regression <- optim(
+      par = c(linear_estimate$coefficients[1],
+              linear_estimate$coefficients[2],
+              1,
+              mean(X)),
+      method = "L-BFGS-B",
+      lower = c(NA,0,NA,min(X) + diff(range(X)) * 0.25),
+      upper = c(NA,NA,NA,max(X) - diff(range(X)) * 0.25),
+      fn = opt_fn)
+    bnpr_estimates_coalescence[[item_name]][["clade_dynamics"]][[clade_name]]$linear_estimate <- linear_estimate
+    bnpr_estimates_coalescence[[item_name]][["clade_dynamics"]][[clade_name]]$non_linear_estimate <- non_linear_estimate
+    bnpr_estimates_coalescence[[item_name]][["clade_dynamics"]][[clade_name]]$change_point_regression <- change_point_regression
+    bnpr_estimates_coalescence[[item_name]][["clade_dynamics"]][[clade_name]]$non_linear_estimate_vaf <- non_linear_estimate_vaf
   }
 }
 
@@ -399,6 +490,8 @@ for (curr_id in c("2259","500","3877")) {
     bnpr_x <- -clade$bnpr_estimate$summary$time + max_age
     bnpr_y <- clade$bnpr_estimate$summary$mean
     cp <- clade$change_point_regression$par
+    observed_vaf <- clade$vaf
+    expected_vaf <- clade$expected_vaf
     if (!grepl("Unknown driver",driver_id)) {
       tmp <- Parameters_Age %>% 
         subset(individual == as.numeric(curr_id) & site == driver_id)
@@ -493,7 +586,9 @@ for (curr_id in c("2259","500","3877")) {
       vaf_trajectory$y_95 <- vaf_trajectory$y_95 * solution$par
     
       tmp_data <- tmp_data %>%
-        mutate(VAF = solution$par * VAF)
+        mutate(VAF = solution$par * VAF) %>%
+        mutate(VAF005 = qbeta(0.05,MUTcount_Xadj+1,TOTALcount - MUTcount_Xadj) * solution$par,
+               VAF095 = qbeta(0.95,MUTcount_Xadj+1,TOTALcount - MUTcount_Xadj) * solution$par)
       y_lims <- c(
         min(vaf_trajectory$y[vaf_trajectory$y>0],na.rm = T),
         max(c(y * solution$par,bnpr_y,tmp_data$VAF)) * 5
@@ -601,6 +696,15 @@ for (curr_id in c("2259","500","3877")) {
                        fill = "Data",
                        colour = "Data",
                        linetype = "Data")) +
+        geom_linerange(inherit.aes = F,
+                       data = tmp_data,
+                       linetype = 1,size = 0.25,
+                       aes(x = Age,
+                           ymin = VAF005,
+                           ymax = VAF095,
+                           shape = "Data",
+                           fill = "Data",
+                           colour = "Data")) +
         theme_gerstung(base_size = 6) + 
         scale_y_continuous(
           trans = 'log10',
@@ -708,6 +812,8 @@ for (curr_id in c("2259","500","3877")) {
         b_early = c(NA,cp[2]),
         b_late = c(NA,cp[3]),
         midpoint = c(NA,cp[4]),
+        observed_vaf = observed_vaf,
+        expected_vaf = expected_vaf,
         age_mean = c(tmp$Mean,mean(mutation_timing$x)),
         age_q05 = c(tmp$Q05,mutation_timing$x[1]),
         age_q95 = c(tmp$Q95,mutation_timing$x[2]),
@@ -873,6 +979,8 @@ for (curr_id in c("2259","500","3877")) {
         b_early = c(cp[2]),
         b_late = c(cp[3]),
         midpoint = c(cp[4]),
+        observed_vaf = observed_vaf,
+        expected_vaf = expected_vaf,
         age_mean = c(mean(mutation_timing$x)),
         age_q05 = c(mutation_timing$x[1]),
         age_q95 = c(mutation_timing$x[2]),
@@ -900,28 +1008,37 @@ for (individual in names(bnpr_estimates)) {
     all_trajectories[[length(all_trajectories) + 1]] <- data.frame(
       X = ages[[individual]] - clade$bnpr_estimate$summary$time,
       Y = clade$bnpr_estimate$summary$mean,
+      W = (log(clade$bnpr_estimate$summary$quant0.975) - log(clade$bnpr_estimate$summary$quant0.025))^2/16,
       individual = individual,
       driver = driver
     )
   }
 }
 
-all_trajectories_df <- all_trajectories %>% do.call(what = rbind)
+all_trajectories_df <- all_trajectories %>% do.call(what = rbind) %>%
+  mutate(alpha_W = W <= 5) 
 
-all_trajectories_df %>% 
+all_trajectories_df <- all_trajectories_df %>% 
   group_by(driver,individual) %>% 
   mutate(X = X - min(X)) %>% 
-  mutate(gene = str_match(driver,"[A-Z0-9]+")) %>%
+  mutate(gene = str_match(driver,"[A-Z0-9]+"))
+
+all_trajectories_df %>%
+  subset(alpha_W == T) %>% 
   ggplot(aes(x = X,y = Y,group = driver,colour = gene)) + 
+  geom_rect(aes(xmin = 0,xmax = max(all_trajectories_df$X),
+                ymin = 50e3,ymax = 200e3),fill = "grey92",colour = NA) +
+  geom_line(data = all_trajectories_df,linetype = 3,size = 0.25) + 
   geom_line(size = 0.25) + 
   facet_wrap(~ individual,ncol = 2) + 
   theme_gerstung(base_size = 6) + 
+  scale_x_continuous(expand = c(0,0)) +
   scale_y_continuous(trans = 'log10',expand = c(0,0),breaks = c(1e-2,1,1e2,1e4,1e6)) +
-  coord_cartesian(ylim = c(1e-2,1e7)) +
+  coord_cartesian(ylim = c(0.5,1e7)) +
   theme(strip.text = element_text(margin = margin(b = 0.5))) +
   xlab("Time since first coal. (years)") +
-  ylab("EPS") +
-  scale_color_manual(values = c(U = "grey",gene_colours),
+  ylab("Neff") +
+  scale_color_manual(values = c(U = "grey40",gene_colours),
                      guide = F) + 
   ggsave("figures/model_ch/trees/tree_trajectories.pdf",
          height = 1.5,
@@ -944,6 +1061,27 @@ coefficients_df <- plot_list %>%
   mutate(source = ifelse(source == "EPS","Colonies","Longitudinal")) %>%
   mutate(age_q05 = age_q05 - ifelse(source == "Colonies",0.75,0),
          age_q95 = age_q95 - ifelse(source == "Colonies",0.75,0))
+
+coefficients_df_coalescence <- bnpr_estimates_coalescence %>%
+  lapply(function(x) {
+    lapply(x$clade_dynamics,function(y) {
+      driver <- which(names(clone_assignment[[x$ID]]) %in% x$tree_ultra$tip.label[y$clade])
+      driver <- clone_assignment[[x$ID]][[driver]]
+      data.frame(
+        linear = y$linear_estimate$coefficients[2],
+        expected_late = 1/y$non_linear_estimate_vaf$m$getPars()[2],
+        b_early = y$change_point_regression$par[2],
+        b_late = sum(y$change_point_regression$par[c(2,3)]),
+        CP = sum(y$change_point_regression$par[4]),
+        individual = x$ID,
+        plot_label = driver,
+        colour_code = str_match(driver,'[A-Z0-9]+')
+      ) %>%
+        return
+    }) %>%
+      do.call(what = rbind)
+  }) %>%
+  do.call(what = rbind)
 
 site_labels <- sapply(
   strsplit(rev(c("SF3B1-K666N","U2AF1-Q157R","UD1","UD2","UD3")), "-"), 

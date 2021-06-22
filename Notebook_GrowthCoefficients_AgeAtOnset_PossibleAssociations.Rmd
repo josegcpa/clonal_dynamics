@@ -755,7 +755,9 @@ variation_explained_plot <- r_values_full %>%
   gather("key" = key,"value",-genes) %>% 
   mutate(model_name = paste0("Driver-associated\ninter-individual\nvariation = ",100*round(explained_variance_total,3),'%')) %>%
   mutate(key = factor(key,levels = rev(unique(key)))) %>% 
-  ggplot(aes(x = genes,y = value,fill = key)) + 
+  group_by(genes) %>% 
+  mutate(G = value[key == "Genetic"]) %>% 
+  ggplot(aes(x = reorder(genes,G),y = value,fill = key)) + 
   geom_bar(stat = "identity",color = "black",position = "dodge") + 
   theme_gerstung(base_size = 6) + 
   scale_fill_manual(values = rev(pal_jama()(2)),name = NULL,breaks = c("Genetic","Unknown")) + 
@@ -778,6 +780,55 @@ variation_explained_plot <- r_values_full %>%
 
 ggsave(useDingbats=FALSE,filename = sprintf("figures/%s/statistical_analysis/variation_explained.pdf",model_id),
        variation_explained_plot,height = 2.5,width = 1.5)
+variation_explained_plot
+```
+
+```{r,fig.height=4,fig.width=2}
+variation_explained_plot <- r_values_full %>% 
+  subset(b_site != 0) %>% 
+  mutate(genes = str_match(genes,"[A-Z0-9]+"),
+         site = str_match(site,"[A-Z0-9]+$")) %>%
+  group_by(site,genes) %>% 
+  summarise(Gene = rowSums(cov(data.frame(gene=b_gene*(age-values_model$min_age),
+                                          site=b_site*(age-values_model$min_age),
+                                          clone=b_clone*(age-values_model$min_age)))) %>% (function(x) x[1]),
+            Site = rowSums(cov(data.frame(gene=b_gene*(age-values_model$min_age),
+                                          site=b_site*(age-values_model$min_age),
+                                          clone=b_clone*(age-values_model$min_age)))) %>% (function(x) x[2]),
+            Unknown = rowSums(cov(data.frame(gene=b_gene*(age-values_model$min_age),
+                                             site=b_site*(age-values_model$min_age),
+                                             clone=b_clone*(age-values_model$min_age)))) %>% (function(x) x[3])) %>% 
+  # mutate(Gene = Gene / (Gene + Site + Unknown),
+  #        Site = Site / (Gene + Site + Unknown),
+  #        Unknown = Unknown / (Gene + Site + Unknown)) %>%
+  gather("key" = key,"value",-site,-genes) %>% 
+  mutate(model_name = paste0("Driver-associated\ninter-individual\nvariation = ",100*round(explained_variance_total,3),'%')) %>%
+  mutate(key = factor(key,levels = rev(unique(key)))) %>% 
+  group_by(site) %>% 
+  mutate(G = sum(value)) %>% 
+  group_by(genes) %>% 
+  mutate(GG = max(G)) %>% 
+  ggplot(aes(x = reorder(site,G),y = value,fill = key)) + 
+  geom_bar(stat = "identity",color = "black",size = 0) + 
+  geom_hline(yintercept = 0,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  scale_fill_manual(values = rev(pal_jama()(3)),name = NULL,breaks = c("Gene","Site","Unknown")) + 
+  #rotate_x_text() + 
+  xlab("Driver site") + 
+  ylab("Variance explained") + 
+  facet_grid(reorder(genes,-GG) ~ .,scales = "free_y",space = "free") + 
+  scale_x_discrete(expand = c(0,0)) +
+  coord_flip() + 
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5),
+        legend.margin=margin(0,0,0,0),
+        legend.key.size = unit(0.1,"cm"),
+        legend.box.margin=margin(0,0,0,0),
+        strip.text.y = element_text(angle = 0,face = "italic")) +
+  guides(fill=guide_legend(nrow=1,byrow=TRUE))
+
+ggsave(useDingbats=FALSE,filename = sprintf("figures/%s/statistical_analysis/variation_explained_site.pdf",model_id),
+       variation_explained_plot,height = 4,width = 2)
 variation_explained_plot
 ```
 
@@ -2968,12 +3019,12 @@ estimates_from_samples %>%
          width = 2.5,height = 2.3) +
   ggsave(useDingbats=FALSE,
          sprintf("figures/%s/age_at_clone_foundation/age_at_onset_bars_smaller.pdf",model_id),
-         width = 1.9,height = 1.7)
+         width = 1.9,height = 2)
 ```
 
 ##### Clone size vs. growth rate
 
-```{r clone_size_vs_growth_rate, fig.height=3,fig.width=3}
+```{r clone_size_vs_growth_rate, fig.height=1.,fig.width=1.3}
 B <- function(n,f) {
   return(log(n) + log(f))
 }
@@ -2986,16 +3037,17 @@ Parameters_Age %>%
   subset(!is.na(Q50) & sum_stat == T) %>% 
   ggplot(aes(x = maxVAF,y = maxAge*(exp(b_genetic_mean + b_clone_mean)-1),
              colour = Q50 <= -1)) + 
-  geom_point(size = 0.5) + 
+  geom_point(size = 0.25) + 
   geom_line(aes(x = x,y = y_50e3),size = 0.5,data = expected,inherit.aes = F) +
   theme_gerstung(base_size = 6) + 
-  scale_colour_manual(values = c("lightblue","goldenrod"),labels = c("Feasible","Unfeasible"),name = NULL) + 
-  theme(legend.position = "bottom",legend.key.size = unit(0,"cm")) + 
+  scale_colour_manual(values = c("lightblue","goldenrod"),labels = c("Feasible","Unfeasible"),guide = F) + 
+  theme(legend.position = "bottom",legend.key.size = unit(0,"cm"),
+        legend.box.spacing = unit(0,"cm")) + 
   xlab("VAF") + 
-  ylab("Age * Growth per year") + 
+  ylab("Age*annual growth") + 
   scale_x_continuous(trans = 'log10') +
   ggsave(useDingbats=FALSE,
-         sprintf("figures/%s/age_at_clone_foundation/size_vs_growth.pdf",model_id),width = 2,height = 2)
+         sprintf("figures/%s/age_at_clone_foundation/size_vs_growth.pdf",model_id),width = 1.3,height = 1.0)
 ```
 
 #### Assessing the technical determinants of the age at onset
@@ -3048,6 +3100,31 @@ dff %>%
   scale_fill_manual(values = c("grey40","grey80"),guide = F) +
   ggsave(useDingbats=FALSE,
          sprintf("figures/%s/age_at_clone_foundation/fraction_of_plausible_clones.pdf",model_id),width = 4.5,height = 2)
+```
+
+```{r,fig.width=1.3,fig.height=1.45}
+dff %>%
+  subset(population == 50e3 & gen_time == 2) %>% 
+  mutate(gene = str_match(as.character(site),"[A-Z0-9]+")) %>% 
+  group_by(population,gen_time,gene) %>%
+  summarise(UnfeasibleCorrected = sum(Q50 <= -1),
+            N = sum(!is.na(Q50))) %>% 
+  mutate(p05 = qbeta(0.05,UnfeasibleCorrected,N-UnfeasibleCorrected),
+         p95 = qbeta(0.95,UnfeasibleCorrected,N-UnfeasibleCorrected)) %>%
+  ggplot(aes(x = reorder(gene,UnfeasibleCorrected / N),y = UnfeasibleCorrected / N,fill = gene)) + 
+  geom_bar(stat = "identity") + 
+  geom_linerange(aes(ymin = p05,ymax = p95),size = 0.25) + 
+  coord_flip() + 
+  scale_fill_manual(guide = F,values = gene_colours) + 
+  theme_gerstung(base_size = 6) + 
+  theme(axis.text.y = element_text(face = "italic")) + 
+  scale_y_continuous(expand = c(0,0),
+                     labels = function(x) return(sprintf("%s%%",x * 100))) + 
+  ylab("Fraction of clones\nexceeding lifetime") + 
+  xlab("") + 
+  ggsave(useDingbats=FALSE,
+         sprintf("figures/%s/age_at_clone_foundation/fraction_of_plausible_clones_gene.pdf",model_id),
+         width = 1.3,height = 1.6)
 ```
 
 ```{r compare_gen_time_pop_size,fig.width=6,fig.height=6}
@@ -3192,7 +3269,7 @@ all_samples_for_age_estimation_gene_specific_df %>%
         legend.key.width = unit(0.3,"cm")) + 
   xlab("Projected age at onset") + 
   ylab("Density") + 
-  scale_y_continuous(breaks = c(1,2,3),labels = c("50,000","100,000","200,000")) +
+  scale_y_continuous(breaks = c(1,2,3),labels = c("N=50,000","N=100,000","N=200,000")) +
   scale_colour_aaas(name = "Generations/year") + 
   ggsave(useDingbats=FALSE,
          sprintf("figures/%s/age_at_clone_foundation/variability_density.pdf",model_id),width = 7,height = 4)
@@ -3238,6 +3315,7 @@ uniformity %>%
   geom_text(aes(label = R),size = 2, colour = "white") + 
   facet_wrap(~ Gene,ncol = 4) + 
   theme_gerstung(base_size = 6) + 
+  ggtitle("Entropy of the age at onset estimates") +
   ylab("Generations/year") + 
   xlab("Population size") + 
   theme(legend.key.width = unit(0.2,"cm")) +
@@ -3254,6 +3332,7 @@ uniformity %>%
   geom_text(aes(label = R),size = 2, colour = "white") + 
   facet_wrap(~ Gene,ncol = 4) + 
   theme_gerstung(base_size = 6) + 
+  ggtitle("Kolmogorof statistic for the age at onset against a uniform distribution") +
   ylab("Generations/year") + 
   xlab("Population size") + 
   theme(legend.key.width = unit(0.2,"cm")) +
@@ -4431,7 +4510,7 @@ forest_plot_data <- model.base %>%
 forest_plot_data <- cbind(
   as.data.frame(forest_plot_data$coefficients),
   as.data.frame(forest_plot_data$conf.int[,c(3,4)]),
-  names = c("Last time point","Male","Fastest clone dynamics","Number of clones",
+  names = c("Age at last time point","Male","Fastest clone dynamics","Number of clones",
             "Largest clone VAF","Type 2 diabetes","Smoker")) %>%
   mutate(sign = cut(`Pr(>|z|)`,c(0,0.001,0.01,0.05,1),
                     c("p-val<0.001","p-val<0.01","p-val<0.05","")))

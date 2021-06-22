@@ -647,8 +647,17 @@ age_data_full %>%
 
 age_data_full %>%
   group_by(population,gen_time) %>%
-  summarise(MAE = sum(abs(true_clone_age - Q50))/length(true_clone_age))
-
+  summarise(MAE = sum(abs(true_clone_age - Q50))/length(true_clone_age)) %>%
+  mutate(Y = population == 2e5 & gen_time == 13) %>% 
+  ggplot(aes(x = as.factor(population),y = as.factor(gen_time),fill = MAE,label = round(MAE,2))) + 
+  geom_tile(aes(colour = Y),size = 0.5) + 
+  geom_label(size = 2.6,label.size = unit(0,"cm"),label.r = unit(0,"cm"),fill = "white") + 
+  theme_gerstung(base_size = 6) + 
+  scale_fill_material(palette = "teal",name = "MAE") + 
+  scale_colour_manual(values = c(NA,"black"),guide = F) + 
+  xlab("Population size") + 
+  ylab("Generations per year")
+  
 plot_grid(true_clone_age_plot,residual_plot,
           ncol = 1,align = "v",axis = "tlrb",
           rel_heights = c(0.15,1))
@@ -656,7 +665,7 @@ plot_grid(true_clone_age_plot,residual_plot,
 
 ### Rank analysis
 
-If clones appear uniformly, then we can rank the ages at onset and, if their distances to the previous age at onset are uniformly distributed, assess this uniformity using a simple chi-squared test.
+We here begin by assessing that we can clearly observe mutations appearing consistently over life for all simulation conditions.
 
 ```{r real_age_distribution,fig.height=1,fig.width=4}
 dir.create(path = "figures/rank_analysis",showWarnings = F)
@@ -723,6 +732,8 @@ distances_age_at_onset <- rbind(
   mutate(RankExpected_ = ran(RankExpected))
 ```
 
+For all conditions we observe that using the correct estimates for population size and generation time renders a relatively uniform distribution of mutations through life for the distance to the earliest clone. The same is observable when analysing the rank of ages at onset. Importantly, there is a range of more or less likely solutions provided different combinations of population size and number of generations per year. This is unsurprising since we calculte the age at onset as $age\ at\ onset = \frac{log(\frac{gn}{\beta}) - \alpha - 1}{\beta}$, where $\alpha$ and $\beta$ are the offset and growth coefficient, respectively, $g$ is the number of generations per year and $n$ is the population size. Thus, the same solution can be if $g$ is multiplied by $x$ while $n$ is divided by $x$ and vice-versa.
+
 ```{r,fig.width=7,fig.height=4}
 distance_distribution_N50 <- distances_age_at_onset %>%
   subset(true_pop_size == 50e3) %>%
@@ -759,8 +770,6 @@ distance_distribution_N100 <- distances_age_at_onset %>%
   theme(legend.position = "bottom",
         strip.text = element_text(margin = margin()),
         panel.spacing.x = unit(0.1,"cm"))
-
-
 
 distance_distribution_N200 <- distances_age_at_onset %>%
   subset(true_pop_size == 200e3) %>%
@@ -896,10 +905,10 @@ chisq_statistic <- distances_age_at_onset %>%
   summarise(
     ChiSq = sum(qnorm(ran(DistToFirst)*(1-1e-6) + 1e-8)^2,na.rm=T),
     ChiSqTrue = sum(qnorm(ran(DistToFirst)*(1-1e-6) + 1e-8)^2,na.rm=T),
+    Tau = cor(Rank,RankTrue,method = "kendall"),
     N = sum(!is.na(DistToPrevious)),
     ks_unif = suppressWarnings(ks.test(ran(DistToFirst),"punif",0,1)$statistic),
     ks_beta = suppressWarnings(ks.test(ran(DistToFirst),"pbeta",age_at_onset_distribution$estimate[1],age_at_onset_distribution$estimate[2])$statistic),
-
     HE = hist_entropy(ran(DistToFirst),M=1)) 
 
 plot_stat_data <- chisq_statistic %>% 

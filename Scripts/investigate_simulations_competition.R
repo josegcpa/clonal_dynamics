@@ -206,6 +206,12 @@ if (file.exists("data_output/simulated_samples_competition.RDS")) {
     gc()
   }
 
+Data <- simulated_samples %>%
+  ungroup() %>% 
+  group_by(Individual,Mutation_C) %>% 
+  filter(all(sample/coverage < 0.48)) %>%
+  group_by(fitness)
+
 total_clones_through_time <- mutation_count_df %>% 
   ggplot(aes(x = Gen, y = NClones,colour = fitness,group = paste(Replicate,fitness))) + 
   geom_line(size = 0.25,alpha = 0.5) + 
@@ -379,15 +385,16 @@ r_values <- data.frame(
 
 x <- r_values %>%
   ungroup %>% 
-  select(Mutation,Individual,fitness,clone_effect,NPossibleDrivers,age) %>%
-  group_by(Mutation,Individual,fitness,clone_effect,NPossibleDrivers) %>%
+  select(Mutation,Individual,fitness,clone_effect,genetic_effect,NPossibleDrivers,age) %>%
+  group_by(Mutation,Individual,fitness,clone_effect,genetic_effect,NPossibleDrivers) %>%
   summarise(Age = min(age)) %>%
   distinct %>% 
   group_by(Individual) %>%
   mutate(NMut = length(unique(Mutation))) %>%
   mutate(DriverFraction = NMut / NPossibleDrivers)
 
-glm_3 <- glm(clone_effect ~ fitness + NMut + NPossibleDrivers,data = x) %>% 
+glm_3 <- glm(NMut ~ fitness + NPossibleDrivers + clone_effect,data = x,
+             family = stats::poisson) %>% 
   summary
 
 bp_uc <- x %>%
@@ -453,7 +460,7 @@ nmut_uc <- x %>%
   scale_y_continuous(breaks = c(-0.2,-0.1,0,0.1,0.2),
                      limits = c(min(x$clone_effect),max(x$clone_effect))) +
   ylab("Unknown cause effect") +
-  xlab("Number of possible drivers") +
+  xlab("Number of mutations") +
   theme_gerstung(base_size = 6) +
   scale_colour_gradient(breaks = c(0.002,0.005,0.010,0.015,0.020,0.025),name = "Fitness",
                         low = "goldenrod",

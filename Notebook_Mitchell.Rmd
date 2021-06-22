@@ -25,7 +25,6 @@ change_point <- function(x, b0, m1, m2, delta) {
 
 expand_edge <- function(tree,edge_id) {
   # takes an edge_id and retrieves the tips which are common to this edge
-  #edge_id = 342
   n_tips <- length(tree$tip.label)
   edge_ids <- c(edge_id)
   done <- F
@@ -49,6 +48,10 @@ trim_tree <- function(tree,l) {
     tree$edge.length - l,
     tree$edge.length
   )
+  tree <- drop.tip(
+    tree,
+    tree$edge[tree$edge.length < 0] %>% sapply(
+      function(x) expand_edge(tree,x)) %>% unlist())
   return(tree)
 }
 
@@ -65,6 +68,41 @@ expanded_clade_reader <- function(path) {
     return
 }
 
+bnpr_at_coalescence <- function(bnpr_estimate) {
+  time_at_coal <- bnpr_estimate$coal_times
+  X <- bnpr_estimate$summary$time
+  Y <- bnpr_estimate$summary$quant0.5
+  Y025 <- bnpr_estimate$summary$quant0.025
+  Y975 <- bnpr_estimate$summary$quant0.975
+  Y_log <- log(na.omit(approx(X,Y,xout = time_at_coal,rule = 2)$y))
+  values_at_coalescence <- data.frame(
+    X = time_at_coal,
+    Y = Y_log,
+    Y_exp = approx(X,Y,xout = time_at_coal)$y,
+    Y025 = approx(X,Y025,xout = time_at_coal)$y,
+    Y975 = approx(X,Y975,xout = time_at_coal)$y
+  ) %>%
+    na.omit()
+  return(values_at_coalescence)
+}
+
+bnpr_at_all <- function(bnpr_estimate) {
+  X <- bnpr_estimate$summary$time
+  Y <- bnpr_estimate$summary$quant0.5
+  Y025 <- bnpr_estimate$summary$quant0.025
+  Y975 <- bnpr_estimate$summary$quant0.975
+  Y_log <- log(Y)
+  values_at_coalescence <- data.frame(
+    X = X,
+    Y = Y_log,
+    Y_exp = Y,
+    Y025 = Y025,
+    Y975 = Y975
+  ) %>%
+    na.omit()
+  return(values_at_coalescence)
+}
+
 colours <- c(
   RColorBrewer::brewer.pal(9, "Set1"),
   RColorBrewer::brewer.pal(8, "Set2"),
@@ -79,6 +117,11 @@ trees <- list(
   KX007 = read.tree("data/Trees_emily/KX007_2_ultra.tree"),
   KX008 = read.tree("data/Trees_emily/KX008_2_ultra.tree")
 )
+
+trees$KX003$edge.length <- trees$KX003$edge.length * ages$KX003
+trees$KX004$edge.length <- trees$KX004$edge.length * ages$KX004
+trees$KX007$edge.length <- trees$KX007$edge.length * ages$KX007
+trees$KX008$edge.length <- trees$KX008$edge.length * ages$KX008
 
 clade_identification <- list(
   KX003 = expanded_clade_reader("data/Trees_emily/KX003_5_expanded_clades.csv"),
@@ -98,18 +141,21 @@ if (file.exists(file_name) == T) {
   clade_ids <- tmp_obj[[2]]
   bnpr_estimates <- tmp_obj[[3]]
   bnpr_estimates_trimmed <- tmp_obj[[4]]
-  individual_bnpr_estimates <- tmp_obj[[5]]
-  individual_bnpr_estimates_trimmed <- tmp_obj[[6]]
+  bnpr_estimates_extended <- tmp_obj[[5]]
+  individual_bnpr_estimates <- tmp_obj[[6]]
+  individual_bnpr_estimates_trimmed <- tmp_obj[[7]]
 } else {
   clades <- list()
   clade_ids <- list()
   bnpr_estimates <- list()
   bnpr_estimates_trimmed <- list()
+  bnpr_estimates_extended <- list()
   individual_bnpr_estimates <- list()
   individual_bnpr_estimates_trimmed <- list()
   
   for (x in c("KX003","KX004","KX007","KX008")) {
     tr <- trees[[x]]
+    tr$edge.length <- tr$edge.length
     bnpr_estimates[[x]] <- list()
     clades[[x]] <- clade_identification[[x]]$node %>%
       lapply(expand_edge,tree = tr)
@@ -124,34 +170,59 @@ if (file.exists(file_name) == T) {
            aes(colour = group)) +
       scale_color_manual(breaks = c(0:length(clades[[x]])),
                          values = c("black",colours[1:length(clades[[x]])]))
-    X <- mclapply(list(tr,trim_tree(tr,5/ages[[x]])),BNPR,mc.cores = 2)
+    X <- mclapply(list(tr,trim_tree(tr,5)),BNPR,mc.cores = 2)
     individual_bnpr_estimates[[x]] <- X[[1]]
     # bnpr for tree trimmed by 5 years
     individual_bnpr_estimates_trimmed[[x]] <- X[[2]]
     for (i in 1:length(clades[[x]])) {
+      print(c(x,i))
       clade <- clades[[x]][[i]]
       tree_subset <- keep.tip(tr,clade)
       tree_subset <- multi2di(tree_subset)
-      X <- mclapply(list(tree_subset,trim_tree(tree_subset,5/ages[[x]])),BNPR,mc.cores = 2)
+      X <- mclapply(list(tree_subset,
+                         trim_tree(tree_subset,5),
+                         trim_tree(tree_subset,-10)),
+                    BNPR,mc.cores = 2)
       bnpr_estimates[[x]][[i]] <- X[[1]]
       # bnpr for tree subsets trimmed by 5 years
       bnpr_estimates_trimmed[[x]][[i]] <- X[[2]]
+      bnpr_estimates_extended[[x]][[i]] <- X[[3]]
     }
   }
   saveRDS(
-    list(clades,clade_ids,bnpr_estimates,bnpr_estimates_trimmed,individual_bnpr_estimates,individual_bnpr_estimates_trimmed),
+    list(clades,clade_ids,bnpr_estimates,bnpr_estimates_trimmed,bnpr_estimates_extended,
+         individual_bnpr_estimates,individual_bnpr_estimates_trimmed),
     file_name)
+}
+```
+
+## Assessing the effect of extending trees
+
+```{r}
+par(mfrow = c(4,5),mar = c(2,2,1,1))
+for (x in names(bnpr_estimates_trimmed)) {
+  for (y in 1:length(bnpr_estimates_trimmed[[x]])) {
+    if (length(c(bnpr_estimates_trimmed[[x]][[y]]$coal_times)) > 5) {
+      plot_BNPR(bnpr_estimates_extended[[x]][[y]])
+      lines(bnpr_estimates_trimmed[[x]][[y]]$summary$time + 15,
+            bnpr_estimates_trimmed[[x]][[y]]$summary$quant0.5,
+            col = "blue")
+      lines(bnpr_estimates[[x]][[y]]$summary$time + 10,
+            bnpr_estimates[[x]][[y]]$summary$quant0.5,
+            col = "red")
+    }
+  }
 }
 ```
 
 # plotting estimates
 
-## making plots for non-trimmed data
+## fitting models and creating plots
 
 ```{r,echo=F,collapse=T}
 all_plots <- list()
 all_growth_estimates <- list()
-
+par(mfrow = c(4,5),mar = c(1,1,1,1))
 for (x in names(clades)) {
   all_estimates <- list()
   all_growth_estimates[[x]] <- list()
@@ -161,10 +232,12 @@ for (x in names(clades)) {
   for (i in 1:length(clades[[x]])) {
     clade_size <- clade_identification[[x]]$number_samples[i]
     vaf_from_clade <- clade_size / total_size
+    vaf_from_clade_005 <- qbeta(0.05,clade_size,total_size - clade_size)
+    vaf_from_clade_095 <- qbeta(0.95,clade_size,total_size - clade_size)
     dff <- bnpr_estimates[[x]][[i]]$summary
     dff$clade <- i
     all_estimates[[i]] <- dff
-    X <- (1 - dff$time) * ages[[x]]
+    X <- (ages[[x]] - dff$time)
     Y <- log(dff$quant0.5)
     not_valid <- is.infinite(Y) | is.na(Y)
     Y <- Y[!not_valid]
@@ -203,10 +276,16 @@ for (x in names(clades)) {
               0,
               mean(X)),
       method = "L-BFGS-B",
-      lower = c(NA,0,NA,0),
-      upper = c(NA,NA,NA,800),
+      lower = c(NA,0,NA,min(X) + diff(range(X)) * 0.25),
+      upper = c(NA,NA,NA,max(X) - diff(range(X)) * 0.25),
       fn = opt_fn)
+    cprp <- change_point_regression$par
+    cp_y <- change_point(X,cprp[1],cprp[2],cprp[3],cprp[4])
+    cp_early <- change_point(X,cprp[1],cprp[2],0,cprp[4])
 
+    b <- -log(200e3 - 1)
+    expected_vaf <- inv.logit(change_point_regression$par[2] * diff(range(X)) + b)
+    
     if (length(X) > 50) {
       linear_early <- lm(Y ~ X,data = data.frame(X, Y)[81:100,],weights = 1/W[81:100])
       linear_late <- lm(Y ~ X,data = data.frame(X, Y)[1:20,],weights = 1/W[1:20])
@@ -216,6 +295,7 @@ for (x in names(clades)) {
     }
     
     pred_nl <- predict(nonlinear)
+    pred_nl_vaf <- predict(nonlinear_vaf)/vaf_from_clade * Y_exp[1]
     pred_l <- predict(linear)
     n_samples <- clade_identification[[x]]$number_samples[i]
     clade_id <- clade_identification[[x]]$variant_ID[i]
@@ -228,8 +308,14 @@ for (x in names(clades)) {
       linear_late = linear_late,
       change_point_regression = change_point_regression,
       nonlinear_vaf = nonlinear_vaf,
+      vaf_from_clade = vaf_from_clade,
+      vaf_from_clade_005 = vaf_from_clade_005,
+      vaf_from_clade_095 = vaf_from_clade_095,
+      expected_vaf = expected_vaf,
+      clade_id = clade_id,
       data = data.frame(
-        X,Y,Y025,Y975,Y_exp,pred_l,pred_nl,
+        X,Y,Y025,Y975,Y_exp,pred_l,pred_nl,pred_nl_vaf,W,pred_cp = cp_y,
+        pred_cp_early = cp_early,
         clade = i,clade_id = clade_id,id = x,n_samples = n_samples))
   }
   all_estimates <- do.call(rbind,all_estimates)
@@ -280,7 +366,7 @@ for (x in names(clades)) {
   bnpr_plot <- all_estimates %>%
     subset(n_samples >= 5) %>% 
     mutate(clade_id = factor(clade_id,levels = clade_identification[[x]]$variant_ID)) %>%
-    ggplot(aes(x = (1-time)*ages[[x]],y = quant0.5,
+    ggplot(aes(x = (1-time),y = quant0.5,
                color = as.factor(clade),
                fill = as.factor(clade))) + 
     geom_ribbon(aes(ymin = quant0.025,ymax = quant0.975),color = NA,alpha = 0.1) +
@@ -337,19 +423,49 @@ final_pop_size <- all_growth_estimates_df %>%
 all_growth_estimates_values_df <- lapply(
   c("KX003","KX004","KX007","KX008"),
   function(x) data.frame(
-    linear = unlist(lapply(all_growth_estimates[[x]],function(x) x$linear$coefficients[2])),
-    linear_se = unlist(lapply(all_growth_estimates[[x]],function(x) summary(x$linear)$coefficients[2,2])),
-    nonlinear = unlist(lapply(all_growth_estimates[[x]],function(x) 1/x$nonlinear$m$getPars()[3])),
-    nonlinear_vaf = unlist(lapply(all_growth_estimates[[x]],function(x) 1/x$nonlinear_vaf$m$getPars()[2])),
-    linear_early = unlist(lapply(all_growth_estimates[[x]],function(x) x$linear_early$coefficients[2])),
-    linear_late = unlist(lapply(all_growth_estimates[[x]],function(x) x$linear_late$coefficients[2])),
-    cp_1 = unlist(lapply(all_growth_estimates[[x]],function(x) x$change_point_regression$par[2])),
+    linear = unlist(lapply(all_growth_estimates[[x]],
+                           function(x) x$linear$coefficients[2])),
+    linear_se = unlist(lapply(all_growth_estimates[[x]],
+                              function(x) summary(x$linear)$coefficients[2,2])),
+    nonlinear = unlist(lapply(all_growth_estimates[[x]],
+                              function(x) 1/x$nonlinear$m$getPars()[3])),
+    nonlinear_vaf = unlist(lapply(all_growth_estimates[[x]],
+                                  function(x) 1/x$nonlinear_vaf$m$getPars()[2])),
+    linear_early = unlist(lapply(all_growth_estimates[[x]],
+                                 function(x) x$linear_early$coefficients[2])),
+    linear_late = unlist(lapply(all_growth_estimates[[x]],
+                                function(x) x$linear_late$coefficients[2])),
+    offset = unlist(lapply(all_growth_estimates[[x]],
+                           function(x) x$change_point_regression$par[1])),
+    cp_1 = unlist(lapply(all_growth_estimates[[x]],
+                         function(x) x$change_point_regression$par[2])),
     cp_2 = unlist(
       lapply(
-        all_growth_estimates[[x]],function(x) sum(x$change_point_regression$par[c(3,2)]))),
+        all_growth_estimates[[x]],
+        function(x) sum(x$change_point_regression$par[c(3,2)]))),
+    midpoint = unlist(lapply(all_growth_estimates[[x]],
+                             function(x) x$change_point_regression$par[4])),
     id = x,
-    clade = clade_identification[[x]]$variant_ID[c(1:length(all_growth_estimates[[x]]))],
-    N_samples = clade_identification[[x]]$number_samples[c(1:length(all_growth_estimates[[x]]))]
+    vaf_from_clade = unlist(lapply(all_growth_estimates[[x]],
+                                   function(x) x$vaf_from_clade)),
+    vaf_from_clade_005 = unlist(lapply(all_growth_estimates[[x]],
+                                       function(x) x$vaf_from_clade_005)),
+    vaf_from_clade_095 = unlist(lapply(all_growth_estimates[[x]],
+                                       function(x) x$vaf_from_clade_095)),
+    expected_vaf = unlist(lapply(all_growth_estimates[[x]],
+                                 function(x) x$expected_vaf)),
+    min_age = unlist(lapply(all_growth_estimates[[x]],
+                            function(x) min(x$data$X))),
+    max_age = unlist(lapply(all_growth_estimates[[x]],
+                            function(x) max(x$data$X))),
+    w_sum = unlist(lapply(all_growth_estimates[[x]],
+                          function(x) mean(x$data$W))),
+    clade = unlist(lapply(all_growth_estimates[[x]],
+                          function(x) x$data$clade_id[1])),
+    clade_no = unlist(lapply(all_growth_estimates[[x]],
+                             function(x) x$data$clade[1])),
+    N_samples = clade_identification[[x]]$number_samples[
+      c(1:length(all_growth_estimates[[x]]))]
   )
 ) %>% 
   do.call(what = rbind)
@@ -371,7 +487,9 @@ size_estimates_df <- lapply(
 ```{r,echo=F,collapse=T}
 final_pop_size %>%
   subset(n_samples >= 5) %>%
-  ggplot(aes(x = clade_id,y = exp(N),ymin = exp(N025),ymax = exp(N975),color = ifelse(clade_id == "Total","Total","NotTotal"))) + 
+  ggplot(aes(x = clade_id,y = exp(N),
+             ymin = exp(N025),ymax = exp(N975),
+             color = ifelse(clade_id == "Total","Total","NotTotal"))) + 
   geom_point() + 
   geom_linerange() + 
   facet_wrap(~ id,scales = "free") + 
@@ -385,7 +503,9 @@ final_pop_size %>%
 
 final_pop_size %>%
   subset(n_samples >= 5) %>%
-  ggplot(aes(x = n_samples,y = exp(N),ymin = exp(N025),ymax = exp(N975),color = ifelse(clade_id == "Total","Total","NotTotal"))) + 
+  ggplot(aes(x = n_samples,y = exp(N),
+             ymin = exp(N025),ymax = exp(N975),
+             color = ifelse(clade_id == "Total","Total","NotTotal"))) + 
   geom_point() + 
   geom_linerange() + 
   xlab("Number of samples in clade") + 
@@ -454,7 +574,7 @@ all_growth_estimates_values_df %>%
          width = 4)
 ```
 
-## Growth rates when using first (early) or last (late) 20% of the data
+## Growth rates when using early and late coefficients
 
 ```{r,fig.height=2,fig.width=2}
 all_growth_estimates_values_df %>%
@@ -479,24 +599,36 @@ all_growth_estimates_values_df %>%
 
 ```{r,fig.height=2,fig.width=3}
 min_clades <- 5
-all_growth_estimates_df %>% 
-  group_by(clade,id) %>% 
+all_growth_estimates_df_var <- all_growth_estimates_df %>% 
+  group_by(id,clade) %>% 
   mutate(X = X - min(X)) %>% 
+  group_by(clade,id) %>%
+  mutate(V = mean(W)) %>% 
+  ungroup %>% 
+  mutate(alpha_W = W <= 5) %>% 
   subset(n_samples >= min_clades) %>%
   mutate(col = ifelse(grepl("DNMT3A",clade_id),"DNMT3A",
-                      ifelse(grepl("Clade",clade_id),"No known driver","Other driver"))) %>% 
-  ggplot(aes(x = X,y = exp(Y),colour = col,group = clade)) + 
+                      ifelse(grepl("Clade",clade_id),"No known driver","Other driver"))) %>%
+  group_by(clade,id) %>%
+  mutate(C = cumsum(c(0,diff(alpha_W) == 1)))
+
+subset(all_growth_estimates_df_var,alpha_W == T) %>%
+  ggplot(aes(x = X,y = exp(Y),colour = col,group = paste(clade,C))) + 
+  geom_hline(linetype = 2,size = 0.25,yintercept = 50e3) +
+  geom_hline(linetype = 2,size = 0.25,yintercept = 200e3) +
+  geom_line(data = all_growth_estimates_df_var,aes(group = clade),alpha = 0.3,size = 0.25) +
   geom_line(size = 0.25) + 
   facet_wrap(~ id) + 
-  scale_color_manual(values = c(DNMT3A = "#BE0032",
-                                `Other driver` = "#18A558",
-                                `No known driver` = "grey50"),
-                     guide = F) + 
+  scale_colour_manual(values = c(DNMT3A = "#BE0032",
+                                 `Other driver` = "#18A558",
+                                 `No known driver` = "grey"),
+                      guide = F) + 
   scale_y_continuous(trans = 'log10',expand = c(0,0),breaks = c(1e-2,1,1e2,1e4,1e6)) +
-  coord_cartesian(ylim = c(1e-2,1e7)) +
+  scale_x_continuous(expand = c(0,0)) +
+  coord_cartesian(ylim = c(0.5,1e7)) +
   theme_gerstung(base_size = 6) + 
   xlab("Time since first coal. (years)") +
-  ylab("EPS") +
+  ylab("Neff") +
   theme(strip.text = element_text(margin = margin(b = 0.5))) +
   ggsave("figures/model_ch/trees/mitchell_trajectories.pdf",
          height = 1.5,
@@ -553,6 +685,115 @@ nl_sc_pop_size <- data.frame(
 )
 ```
 
+## Trajectories for different types of fit (using only trajectories fitted at coalescence points)
+
+```{r,fig.height=2,fig.width=3}
+min_clades <- 5
+all_growth_estimates_df_var <- all_growth_estimates_df %>% 
+  group_by(id,clade) %>% 
+  mutate(X = X - min(X)) %>% 
+  group_by(clade,id) %>%
+  mutate(V = mean(W)) %>% 
+  ungroup %>% 
+  mutate(alpha_W = W <= 5) %>% 
+  subset(n_samples >= min_clades) %>%
+  mutate(col = ifelse(grepl("DNMT3A",clade_id),"DNMT3A",
+                      ifelse(grepl("Clade",clade_id),"No known driver","Other driver"))) %>%
+  group_by(clade,id) %>%
+  mutate(C = cumsum(c(0,diff(alpha_W) == 1)))
+
+subset(all_growth_estimates_df_var,alpha_W == T) %>%
+  ggplot(aes(x = X,y = exp(Y),colour = col,group = paste(clade,C))) + 
+  geom_rect(aes(xmin = 0,xmax = max(all_growth_estimates_df_var$X),
+                ymin = 50e3,ymax = 200e3),fill = "grey92",colour = NA) +
+  geom_line(data = all_growth_estimates_df_var,aes(group = clade),linetype = 3,size = 0.25) +
+  geom_line(size = 0.25) + 
+  facet_wrap(~ id) + 
+  scale_colour_manual(values = c(DNMT3A = "#BE0032",
+                                 `Other driver` = "#18A558",
+                                 `No known driver` = "grey40"),
+                      guide = F) + 
+  scale_y_continuous(trans = 'log10',expand = c(0,0),breaks = c(1e-2,1,1e2,1e4,1e6)) +
+  coord_cartesian(ylim = c(1e-2,1e7)) +
+  theme_gerstung(base_size = 6) + 
+  xlab("Time since first coal. (years)") +
+  ylab("Neff") +
+  theme(strip.text = element_text(margin = margin(b = 0.5))) +
+  ggsave("figures/model_ch/trees/mitchell_trajectories.pdf",
+         height = 1.5,
+         width = 1.8)
+
+all_growth_estimates_df %>% 
+  group_by(clade,id) %>% 
+  mutate(X = X - min(X)) %>% 
+  subset(n_samples >= min_clades) %>%
+  ggplot(aes(x = X,y = pred_l,colour = as.factor(clade))) + 
+  geom_line(aes(y = Y),size = 0.25) + 
+  geom_line(size = 0.25,linetype = 2) + 
+  facet_wrap(~ id) + 
+  scale_color_manual(breaks = c(1:18),
+                     values = c(colours[1:18]),
+                     guide = F) + 
+  scale_y_continuous(breaks = seq(-21,21,by = 3),labels = 10^seq(-21,21,by = 3)) + 
+  theme_gerstung(base_size = 6) + 
+  xlab("Time since first coalescence (years)") +
+  ylab("Effective population size") +
+  ggtitle("Linear fit") +
+  ggsave("figures/model_ch/trees/mitchell_trajectories_predicted.pdf",
+         height = 2,
+         width = 3)
+
+all_growth_estimates_df %>% 
+  group_by(clade,id) %>% 
+  mutate(X = X - min(X)) %>% 
+  subset(n_samples >= min_clades) %>%
+  ggplot(aes(x = X,y = pred_nl,colour = as.factor(clade))) + 
+  geom_line(aes(y = exp(Y)),size = 0.25) + 
+  geom_line(size = 0.25,linetype = 2) + 
+  facet_wrap(~ id) + 
+  scale_color_manual(breaks = c(1:18),
+                     values = c(colours[1:18]),
+                     guide = F) + 
+  scale_y_continuous(trans = 'log10') + 
+  theme_gerstung(base_size = 6) + 
+  xlab("Time since first coalescence (years)") +
+  ylab("Effective population size") +
+  ggtitle("Sigmoidal fit") +
+  ggsave("figures/model_ch/trees/mitchell_trajectories_predicted_nl.pdf",
+         height = 2,
+         width = 3)
+
+all_growth_estimates_df %>% 
+  group_by(clade,id) %>% 
+  mutate(X = X - min(X)) %>% 
+  subset(n_samples >= min_clades) %>%
+  ggplot(aes(x = X,y = exp(pred_cp),colour = as.factor(clade))) + 
+  geom_line(aes(y = exp(Y)),size = 0.25) + 
+  geom_line(size = 0.25,linetype = 2) + 
+  facet_wrap(~ id) + 
+  scale_color_manual(breaks = c(1:18),
+                     values = c(colours[1:18]),
+                     guide = F) + 
+  scale_y_continuous(trans = 'log10') + 
+  theme_gerstung(base_size = 6) + 
+  xlab("Time since first coalescence (years)") +
+  ylab("Effective population size") +
+  ggtitle("Changepoint regression") +
+  ggsave("figures/model_ch/trees/mitchell_trajectories_predicted_nl.pdf",
+         height = 2,
+         width = 3)
+
+nl_sc_pop_size <- data.frame(
+  clade = rep(NA,4),
+  id = c("KX003","KX004","KX007","KX008"),
+  clade_id = rep("Total",4),
+  N = sapply(individual_bnpr_estimates,function(x) log(x$summary$quant0.5[1])),
+  N025 = sapply(individual_bnpr_estimates,function(x) log(x$summary$quant0.025[1])),
+  N975 = sapply(individual_bnpr_estimates,function(x) log(x$summary$quant0.975[1])),
+  n_samples = sapply(trees,function(x) length(x$tip.label))
+)
+```
+
 ## Trees and trajectories
 
 ```{r}
@@ -575,4 +816,99 @@ plot_grid(
          width = 7)
 
 write.csv(all_growth_estimates_values_df,"data_output/mitchell_bnpr_coefficients.csv",row.names = T)
+```
+
+## Representation of early and biphasic growth
+
+```{r,fig.height=0.8,fig.width=0.8}
+coefs <- all_growth_estimates_values_df[1,]
+bnpr_trajectory <- bnpr_estimates$KX003[[1]]$summary %>%
+  mutate(time = ages$KX003 - time)
+
+b_early <- coefs$cp_1
+b_late <- coefs$cp_2
+X <- seq(min(bnpr_trajectory$time),81)
+plotting_scheme_exp <- data.frame(
+  time = X,
+  traj_true = exp(change_point(X,coefs$offset,b_early,b_late - b_early,coefs$midpoint)),
+  traj_early = exp(X * b_early + coefs$offset))
+
+plotting_scheme_exp %>%
+  mutate(extrapol = traj_true != traj_early) %>% 
+  ggplot(aes(x = time,y = traj_early)) + 
+  geom_ribbon(data = bnpr_trajectory,aes(x = time,ymin = quant0.025,ymax = quant0.975),
+              inherit.aes = F,
+              alpha = 0.2) +
+  geom_line(data = bnpr_trajectory,aes(x = time,y = quant0.5),
+            inherit.aes = F,
+            alpha = 0.75,size = 0.25) +
+  geom_point(aes(x = 81,y = coefs$vaf_from_clade * 2e5),
+             inherit.aes = F,
+             colour = "grey50") +
+  geom_line(aes(y = traj_true),colour = "blue",size = 0.25) +
+  geom_line(colour = "red",size = 0.25,aes(linetype = extrapol)) + 
+  scale_y_continuous(trans = 'log10',breaks = NULL) + 
+  ylab("Neff") +
+  xlab("Time") + 
+  theme_gerstung(base_size = 6) + 
+  scale_x_continuous(breaks = NULL) + 
+  scale_linetype_manual(values = c(1,3),guide = F) +
+  ggsave(filename = sprintf("figures/model_ch/dynamic_coefficients/early_late_difference_trajectory.pdf"),
+         useDingbats = F,
+         width = 0.8,height = 0.8)
+```
+
+```{r,fig.height=3,fig.width=5}
+all_vafs <- list()
+
+for (i in 1:nrow(all_growth_estimates_values_df)) {
+  coefs <- all_growth_estimates_values_df[i,]
+  ID <- coefs$id
+  clade_number <- coefs$clade_no
+
+  all_vafs[[i]] <- data.frame(
+    vaf = coefs$vaf_from_clade,
+    vaf_005 = coefs$vaf_from_clade_005,
+    vaf_095 = coefs$vaf_from_clade_095,
+    clade = coefs$clade,
+    id = ID,
+    age = ages[[ID]]
+  )
+}
+
+all_vafs_df <- all_vafs %>%
+  do.call(what = rbind)
+
+low_var_estimates <- all_growth_estimates_df %>%
+  mutate(clade = clade_id) %>% 
+  group_by(clade,id) %>% 
+  mutate(WW = mean(W)) %>%
+  subset(WW < 10) 
+
+all_vafs_df <- all_vafs_df %>%
+  subset(paste(clade,id) %in% paste(low_var_estimates$clade,low_var_estimates$id)) %>%
+  arrange(vaf)
+
+low_var_estimates %>% 
+  mutate(extrapol = pred_cp != pred_cp_early) %>% 
+  ggplot(aes(x = X)) +
+  geom_ribbon(aes(ymin = Y025,ymax = Y975),
+              alpha = 0.2) +
+  geom_line(aes(y = exp(Y)),size = 0.25) +
+  geom_line(aes(y = exp(pred_cp)),colour = "blue") +
+  geom_line(aes(y = exp(pred_cp_early),linetype = extrapol),colour = "red") + 
+  geom_linerange(data = all_vafs_df,
+                 aes(x = age,ymin = vaf_005*200e3,ymax = vaf_095*200e3)) +
+  geom_point(data = all_vafs_df,aes(x = age,y = vaf * 200e3),size = 0.5) +
+  facet_wrap(~ factor(sprintf("%s\n%s",id,clade),paste(all_vafs_df$id,all_vafs_df$clade,sep = "\n")))+ 
+  theme_gerstung(base_size = 6) + 
+  scale_y_continuous(trans = 'log10') + 
+  theme(strip.text = element_text(margin = margin())) + 
+  coord_cartesian(ylim = c(1,1e8)) + 
+  xlab("Time (years)") + 
+  ylab("Neff") + 
+  scale_linetype_manual(values = c(1,3),guide = F) +
+  ggsave(filename = sprintf("figures/model_ch/dynamic_coefficients/early_late_difference_trajectory_all.pdf"),
+         useDingbats = F,
+         width = 5,height = 3)
 ```
