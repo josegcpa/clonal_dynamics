@@ -16,11 +16,9 @@ This is the repository for [The Natural History of Clonal Haematopoiesis](). In 
 
 #### R library
 
-`reticulate`,`greta`,`ggplot2`,`ggpubr`,`tidyverse`,`bayesplot`,`openxlsx`,`gtools`,`cowplot`,`ggsci`,`ggrepel`,`extraDistr`,`default`,`dendextend`,`ape`,`ggtree`,`grid`,`scatterpie`,`reghelper`,`phylodyn`,`survival`,`survminer`
+`ape`,`bayesplot`,`castor`,`cowplot`,`default`,`dendextend`,`extraDistr`,`ggplot`,`ggpubr`,`ggrepel`,`ggsci`,`ggtree`,`greta`,`grid`,`gtools`,`Matrix`,`minpack.lm`,`openxlsx`,`parallel`,`phangorn`,`phylodyn`,`reghelper`,`reticulate`,`scatterpie`,`survival`,`survminer`,`tidyverse`
 
 ### Accessing the analysis
-
-*Being served by `htmlpreview.github.io`*
 
 1. [Estimating the technical overdispersion]()
 2. [Validating the approach to estimate annual growth from longitudinal data with Wright-Fisher simulations]()
