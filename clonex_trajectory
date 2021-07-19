@@ -1,0 +1,13 @@
+FILE=$1
+export DRIVER=$2
+
+# for clonex: 1 is gen, 2 is count, 3 is clone, 4 is mut
+
+cat $FILE | tr '\t' ',' | awk -v driver=$DRIVER -F "," '
+BEGIN {}
+{
+    if ( $4 < driver && $4 > 0 ) {
+        print $0
+    }
+}
+'
