@@ -59,8 +59,43 @@ plot_tree <- function(obj) {
   for (i in R) {
     D <- driver_list[[i]]
     colour_code[tree_ultra$tip.label %in% unique(D)] <- colours[i]
+    print(c(names(driver_list)[i],colours[i]))
   }
+  print(names(driver_list))
+  print(colours)
   plot(tree_ultra,tip.color = colour_code)
+}
+
+expand_edge <- function(tree,edge_id) {
+  # takes an edge_id and retrieves the tips which are common to this edge
+  n_tips <- length(tree$tip.label)
+  edge_ids <- c(edge_id)
+  done <- F
+  while (done == F) {
+    new_edge <- tree$edge[,2][tree$edge[,1] %in% edge_id]
+    edge_ids <- c(edge_ids,new_edge)
+    edge_id <- new_edge
+    if (length(edge_id) == 0) {
+      done <- T
+    }
+  }
+  edge_ids <- unique(edge_ids)
+  edge_ids <- edge_ids[edge_ids <= n_tips]
+  return(edge_ids)
+}
+
+trim_tree <- function(tree,l) {
+  n_tips <- length(tree$tip.label)
+  tree$edge.length <- ifelse(
+    tree$edge[,2] <= n_tips,
+    tree$edge.length - l,
+    tree$edge.length
+  )
+  tree <- drop.tip(
+    tree,
+    tree$edge[tree$edge.length < 0] %>% sapply(
+      function(x) expand_edge(tree,x)) %>% unlist())
+  return(tree)
 }
 
 bnpr_at_coalescence <- function(bnpr_estimate) {
@@ -134,7 +169,8 @@ build_tree <- function(sub_data,subsample_size=100,
                            j = sub_data$MutID,
                            dims = c(MaxClone,MaxMut))
   Presence[cbind(sub_data$CloneID,sub_data$MutID)] <- 1
-
+  Presence_ <- Presence
+  
   if (sum(as.logical(sub_af_sparse)) < subsample_size) {
     sub_af_sparse <- rep(1,length(sub_af_sparse))
   }
@@ -143,7 +179,9 @@ build_tree <- function(sub_data,subsample_size=100,
   af <- sub_af_sparse[S]
   Presence <- Presence[S,]
   Presence <- as.matrix(rbind(Presence,wt=0))
-  Presence <- Presence[,colSums(Presence) > 0]
+  r_idx <- colSums(Presence)
+  Presence <- Presence[,r_idx > 0]
+  Presence_ <- Presence_[,r_idx > 0]
   
   dst <- as.matrix(dist(Presence > 0,method = "manhattan"))
   tree <- root(njs(dst),
@@ -151,7 +189,10 @@ build_tree <- function(sub_data,subsample_size=100,
                resolve.root = T,
                edgelabel = T) 
   tree <- drop.tip(tree,"wt")
-  return(list(tree = tree,S = S,af = af))
+  # assign clones not in tree to the closest clone in the tree
+  # using Hamming distance (which.max(number of identical bits))
+  closest_clone <- (Presence %*% t(Presence_)) %>% apply(2,which.max)
+  return(list(tree = tree,S = S,af = af,closest_clone = closest_clone))
 }
 
 read_clonex <- function(path,d = 1000) {
@@ -186,17 +227,17 @@ file_name <- "data_output/simulated_trees_trajectories.RDS"
 if (file.exists(file_name) == T) {
   tree_traj <- readRDS(file_name)
   trees <- tree_traj[[1]]
-  all_driver_trajectories <- tree_traj[[2]]
+  all_driver_trajectories_raw <- tree_traj[[2]]
 } else {
-  all_driver_trajectories <- all_driver_file_paths %>%
+  all_driver_trajectories_raw <- all_driver_file_paths %>%
     lapply(function(x) {
       read.csv(x,header = F) %>%
         arrange(V1,V2) %>%
-        select(Gen = V1,MutID = V2,Count = V3)})
+        select(Gen = V1,Count = V2,Clone = V3,MutID = V4)})
   
   trees <- mclapply(
     all_file_paths,
-    mc.cores = 6,
+    mc.cores = 2,
     mc.cleanup = T,
     function(path) {
       s <- str_match(path,"hsc_[0-9.]+") %>%
@@ -236,8 +277,8 @@ if (file.exists(file_name) == T) {
   )
   
   names(trees) <- gsub('/last_generation','',all_file_paths)
-  names(all_driver_trajectories) <- gsub('/driver_trajectory','',all_driver_file_paths)
-  saveRDS(object = list(trees,all_driver_trajectories),file = file_name)
+  names(all_driver_trajectories_raw) <- gsub('/driver_trajectory','',all_driver_file_paths)
+  saveRDS(object = list(trees,all_driver_trajectories_raw),file = file_name)
 }
 
 for (tree_name in names(trees)) {
@@ -263,10 +304,8 @@ file_name <- "data_output/simulated_bnpr_trees.RDS"
 if (file.exists(file_name) == T) {
   all_estimates_trees <- readRDS(file_name)
 } else {
-  all_estimates_trees <- mclapply(
+  all_estimates_trees <- lapply(
     trees,
-    mc.cores = 2, # 2 cores led to OOM errors
-    mc.cleanup = T,
     function(x) {
       system(sprintf('echo "%s"', x$path)) # prints during mclapply by using bash
       BNPR(x$tree_ultra) %>%
@@ -282,9 +321,14 @@ if (file.exists(file_name) == T) {
 ```{r}
 file_name <- "data_output/simulated_bnpr_clades.RDS"
 if (file.exists(file_name) == T) {
-  all_estimates <- readRDS(file_name)
+  all_estimates_full <- readRDS(file_name)
+  all_estimates <- all_estimates_full[[1]]
+  all_estimates_trimmed_5_years <- all_estimates_full[[2]]
+  all_estimates_trimmed_10_years <- all_estimates_full[[3]]
 } else {
   all_estimates <- list()
+  all_estimates_trimmed_5_years <- list()
+  all_estimates_trimmed_10_years <- list()
   i <- 1
   for (obj_name in names(trees)) {
     obj <- trees[[obj_name]]
@@ -305,7 +349,7 @@ if (file.exists(file_name) == T) {
     for (clade in clades) {
       clade_tips <- tree$tip.label[clade]
       for (driver in names(driver_id_list)) {
-        if (any(clade_tips %in% driver_id_list[[driver]])) {
+        if (all(clade_tips %in% driver_id_list[[driver]])) {
           clades_[[length(clades_)+1]] <- list(
             clade = clade,
             driver = driver
@@ -314,12 +358,17 @@ if (file.exists(file_name) == T) {
       }
     }
     clades <- clades_
-    
+    # clades <- names(driver_id_list) %>%
+    #   lapply(function(x) {
+    #     return(list(clade = which(tree_$tip.label %in% driver_id_list[[x]]),
+    #                 driver = x))
+    #     })
+
     if (!(obj_name %in% names(all_estimates))) {
-      bnpr_estimates <- mclapply(
+      bnpr_estimates <- lapply(
         clades,
-        mc.cores = 2,
-        mc.cleanup = T,
+        #mc.cores = 2,
+        #mc.cleanup = T,
         function(clad) {
           #tip_in_clade <- which(Tree$tree$tip.label %in% clad)
           tip_in_clade <- clad$clade
@@ -347,7 +396,137 @@ if (file.exists(file_name) == T) {
     }
     gc()
   }
-  saveRDS(all_estimates,file_name)
+  
+  # trimmed 5 years
+  i <- 1
+  for (obj_name in names(trees)) {
+    print(obj_name)
+    obj <- trees[[obj_name]]
+    s <- str_match(obj_name,"[0-9.]+") %>%
+      as.numeric
+    Tree <- list(tree = obj$tree_ultra)
+    Tree$tree$tip.label <- obj$tree$S
+    Tree$tree <- trim_tree(Tree$tree,l = 50)
+    Tree$tree$edge.length[is.infinite(Tree$tree$edge.length)] <- 0
+    tree <- Tree$tree
+    tree_ <- tree
+    tree_$edge.length <- tree_$edge.length / 800
+    driver_id_list <- Filter(function(x) length(x) > 5,obj$driver_list)
+    all_drivers <- do.call(c,driver_id_list)
+    clades <- cut_tree(tree = tree_,depth = 0.1) %>%
+      Filter(f = function(x) length(x) >= 5)
+    clades_ <- list()
+    for (clade in clades) {
+      clade_tips <- tree$tip.label[clade]
+      for (driver in names(driver_id_list)) {
+        if (all(clade_tips %in% driver_id_list[[driver]])) {
+          clades_[[length(clades_)+1]] <- list(
+            clade = clade,
+            driver = driver
+          )
+        }
+      }
+    }
+    clades <- clades_
+    
+    if (!(obj_name %in% names(all_estimates_trimmed_5_years))) {
+      bnpr_estimates <- lapply(
+        clades,
+        #mc.cores = 2,
+        #mc.cleanup = T,
+        function(clad) {
+          #tip_in_clade <- which(Tree$tree$tip.label %in% clad)
+          tip_in_clade <- clad$clade
+          if (length(tip_in_clade) > 4) {
+            sub_tree <- keep.tip(Tree$tree,tip_in_clade) %>%
+              multi2di()
+            if (!is.null(sub_tree)) {
+              bnpr_estimates <- NULL
+              bnpr_estimate <- BNPR(sub_tree)
+              if (!is.null(bnpr_estimate)) {
+                list(
+                  tree = tree,
+                  bnpr = bnpr_estimate,
+                  clade = clad$clade,
+                  tree = sub_tree,
+                  driver = clad$driver) %>%
+                  return
+              }
+            }
+          }
+        }
+      ) %>%
+        Filter(f = function(x) !is.null(x))
+      all_estimates_trimmed_5_years[[obj_name]] <- bnpr_estimates
+    }
+    gc()
+  }
+
+  # trimmed 10 years
+  i <- 1
+  for (obj_name in names(trees)) {
+    print(obj_name)
+    obj <- trees[[obj_name]]
+    s <- str_match(obj_name,"[0-9.]+") %>%
+      as.numeric
+    Tree <- list(tree = obj$tree_ultra)
+    Tree$tree$tip.label <- obj$tree$S
+    Tree$tree <- trim_tree(Tree$tree,l = 50)
+    Tree$tree$edge.length[is.infinite(Tree$tree$edge.length)] <- 0
+    tree <- Tree$tree
+    tree_ <- tree
+    tree_$edge.length <- tree_$edge.length / 800
+    driver_id_list <- Filter(function(x) length(x) > 5,obj$driver_list)
+    all_drivers <- do.call(c,driver_id_list)
+    clades <- cut_tree(tree = tree_,depth = 0.1) %>%
+      Filter(f = function(x) length(x) >= 5)
+    clades_ <- list()
+    for (clade in clades) {
+      clade_tips <- tree$tip.label[clade]
+      for (driver in names(driver_id_list)) {
+        if (all(clade_tips %in% driver_id_list[[driver]])) {
+          clades_[[length(clades_)+1]] <- list(
+            clade = clade,
+            driver = driver
+          )
+        }
+      }
+    }
+    clades <- clades_
+    
+    if (!(obj_name %in% names(all_estimates_trimmed_10_years))) {
+      bnpr_estimates <- lapply(
+        clades,
+        #mc.cores = 2,
+        #mc.cleanup = T,
+        function(clad) {
+          #tip_in_clade <- which(Tree$tree$tip.label %in% clad)
+          tip_in_clade <- clad$clade
+          if (length(tip_in_clade) > 4) {
+            sub_tree <- keep.tip(Tree$tree,tip_in_clade) %>%
+              multi2di()
+            if (!is.null(sub_tree)) {
+              bnpr_estimates <- NULL
+              bnpr_estimate <- BNPR(sub_tree)
+              if (!is.null(bnpr_estimate)) {
+                list(
+                  tree = tree,
+                  bnpr = bnpr_estimate,
+                  clade = clad$clade,
+                  tree = sub_tree,
+                  driver = clad$driver) %>%
+                  return
+              }
+            }
+          }
+        }
+      ) %>%
+        Filter(f = function(x) !is.null(x))
+      all_estimates_trimmed_10_years[[obj_name]] <- bnpr_estimates
+    }
+    gc()
+  }
+  saveRDS(list(all_estimates,all_estimates_trimmed_5_years,all_estimates_trimmed_10_years),file_name)
 }
 ```
 
@@ -402,6 +581,8 @@ for (obj_name in names(all_estimates)) {
       na.omit()
     R <- range(tmp_df$X)
     tmp_df <- tmp_df[!is.infinite(tmp_df$Y),]
+    tmp_df <- tmp_df[!is.infinite(tmp_df$Y025),]
+    tmp_df <- tmp_df[!is.infinite(tmp_df$Y975),]
     tmp_df$Y_exp <- exp(tmp_df$Y)
     
     tmp_df$W[is.infinite(tmp_df$W)] <- max(tmp_df$W[!is.infinite(tmp_df$W)])
@@ -486,17 +667,17 @@ for (obj_name in names(all_estimates)) {
       obj_name,n = length(all_fits)+1,
       clade_size = length(bnpr$clade))
 
-    if ((cpr$par[2] + cpr$par[3]) < 100) {
-        plot_BNPR(bnpr$bnpr,main = sprintf("%s",length(bnpr$clade)))
-        # if (!is.null(bnpr$non_linear_estimate)) {
-        #   lines(bnpr$data$X,predict(
-        #     bnpr$non_linear_estimate,newdata = data.frame(X = bnpr$data$X)),
-        #     col = "red")
-        # }
-        lines(800-bnpr$data$X,
-              exp(change_point(bnpr$data$X,cpr$par[1],cpr$par[2],cpr$par[3],cpr$par[4])),
-              col="red")
-      }
+    # if ((cpr$par[2] + cpr$par[3]) < 100) {
+    #     plot_BNPR(bnpr$bnpr,main = sprintf("%s",length(bnpr$clade)))
+    #     # if (!is.null(bnpr$non_linear_estimate)) {
+    #     #   lines(bnpr$data$X,predict(
+    #     #     bnpr$non_linear_estimate,newdata = data.frame(X = bnpr$data$X)),
+    #     #     col = "red")
+    #     # }
+    #     lines(800-bnpr$data$X,
+    #           exp(change_point(bnpr$data$X,cpr$par[1],cpr$par[2],cpr$par[3],cpr$par[4])),
+    #           col="red")
+    #   }
     }
 }
 ```
@@ -504,7 +685,6 @@ for (obj_name in names(all_estimates)) {
 ## Fitting different models to BNPR trajectory (5 year trimmed)
 
 ```{r}
-all_estimates_trimmed_5_years <- all_estimates
 par(mfrow = c(4,5),mar = c(3,1,1,1))
 for (obj_name in names(all_estimates_trimmed_5_years)) {
   bnpr_estimates <- all_estimates_trimmed_5_years[[obj_name]] %>%
@@ -522,10 +702,11 @@ for (obj_name in names(all_estimates_trimmed_5_years)) {
       Y025 = Y025,Y975 = Y975,
       W = (Y975 - Y025)^2/16
     ) %>% 
-      na.omit() %>%
-      subset(X < (max(X) - 50))
+      na.omit() 
     R <- range(tmp_df$X)
     tmp_df <- tmp_df[!is.infinite(tmp_df$Y),]
+    tmp_df <- tmp_df[!is.infinite(tmp_df$Y025),]
+    tmp_df <- tmp_df[!is.infinite(tmp_df$Y975),]
     tmp_df$Y_exp <- exp(tmp_df$Y)
     
     tmp_df$W[is.infinite(tmp_df$W)] <- max(tmp_df$W[!is.infinite(tmp_df$W)])
@@ -599,7 +780,6 @@ for (obj_name in names(all_estimates_trimmed_5_years)) {
 ## Fitting different models to BNPR trajectory (10 year trimmed)
 
 ```{r}
-all_estimates_trimmed_10_years <- all_estimates
 par(mfrow = c(4,5),mar = c(3,1,1,1))
 for (obj_name in names(all_estimates_trimmed_10_years)) {
   bnpr_estimates <- all_estimates_trimmed_10_years[[obj_name]] %>%
@@ -617,10 +797,11 @@ for (obj_name in names(all_estimates_trimmed_10_years)) {
       Y025 = Y025,Y975 = Y975,
       W = (Y975 - Y025)^2/16
     ) %>% 
-      na.omit() %>%
-      subset(X < (max(X) - 100))
+      na.omit()
     R <- range(tmp_df$X)
     tmp_df <- tmp_df[!is.infinite(tmp_df$Y),]
+    tmp_df <- tmp_df[!is.infinite(tmp_df$Y025),]
+    tmp_df <- tmp_df[!is.infinite(tmp_df$Y975),]
     tmp_df$Y_exp <- exp(tmp_df$Y)
     
     tmp_df$W[is.infinite(tmp_df$W)] <- max(tmp_df$W[!is.infinite(tmp_df$W)])
@@ -688,6 +869,64 @@ for (obj_name in names(all_estimates_trimmed_10_years)) {
   
   all_estimates_trimmed_10_years[[obj_name]] <- bnpr_estimates
 }
+```
+
+### Plotting estimates with distinct trimming
+
+```{r,fig.height=5,fig.width=6}
+trajectories_trimmed_0 <- names(all_estimates) %>%
+  lapply(function(x) do.call(
+    rbind,lapply(all_estimates[[x]],
+                 function(y) data.frame(y$data,id = x,clade = paste(y$clade,collapse=','),
+                                        clade_size = length(y$clade))))) %>%
+  do.call(what = rbind) %>%
+  mutate(Trimmed = 0)
+
+trajectories_trimmed_5 <- names(all_estimates_trimmed_5_years) %>%
+  lapply(function(x) do.call(
+    rbind,lapply(all_estimates_trimmed_5_years[[x]],
+                 function(y) data.frame(y$data,id = x,clade = paste(y$clade,collapse=','),
+                                        clade_size = length(y$clade))))) %>%
+  do.call(what = rbind) %>% 
+  mutate(Trimmed = 5) 
+
+trajectories_trimmed_10 <- names(all_estimates_trimmed_10_years) %>%
+  lapply(function(x) do.call(
+    rbind,lapply(all_estimates_trimmed_10_years[[x]],
+                 function(y) data.frame(y$data,id = x,clade = paste(y$clade,collapse=','),
+                                        clade_size = length(y$clade))))) %>%
+  do.call(what = rbind) %>%
+  mutate(Trimmed = 10)
+
+rbind(trajectories_trimmed_0,
+      trajectories_trimmed_5,
+      trajectories_trimmed_10) %>%
+  group_by(clade,id) %>%
+  filter(all(c(0,5,10) %in% Trimmed)) %>%
+  subset(paste(id,clade) %in% sample(unique(paste(id,clade)),40,replace = F)) %>% 
+  group_by(clade,id,Trimmed) %>%
+  mutate(w_sum = mean(W)) %>% 
+  mutate(X = X - min(X)) %>% 
+  mutate(Trimmed = c(`0`="Original",`5`="Trimmed by 5 years",`10`="Trimmed by 10 years")[as.character(Trimmed)]) %>%
+  mutate(Trimmed = factor(Trimmed,
+                          levels = c("Original","Trimmed by 5 years","Trimmed by 10 years"))) %>% 
+  ungroup %>% 
+  mutate(unique_id = as.character(as.numeric(as.factor(paste(id,clade))))) %>%
+  group_by(clade,id) %>% 
+  filter(all(w_sum < 10)) %>% 
+  ggplot(aes(x = X,y = exp(Y),group = paste(id,clade,Trimmed),colour = Trimmed,size = Trimmed)) + 
+  geom_line(alpha = 0.3) + 
+  scale_y_continuous(trans = 'log10') + 
+  coord_cartesian(ylim = c(10,1e10)) + 
+  facet_wrap(~ reorder(sprintf("id=%s; N=%s",unique_id,clade_size),clade_size)) + 
+  theme_gerstung(base_size = 6) +
+  theme(strip.text = element_text(margin = margin())) + 
+  scale_color_aaas(name = NULL) + 
+  scale_size_manual(values = c(0.5,1.0,1.5),name = NULL) +
+  xlab("Time since first coalescence (generations)") + 
+  ylab("Neff") + 
+  theme(legend.position = "bottom",legend.box.spacing = unit(0,"cm")) + 
+  ggsave("figures/simulations/trimmed_representation.pdf",height = 5,width = 6)
 ```
 
 ## Fitting different models to BNPR trajectory (only at coalescence)
@@ -793,20 +1032,31 @@ for (estimate in all_estimates) {
 ```{r}
 all_driver_fits <- list()
 par(mfrow = c(4,5),mar = c(1.5,2.5,2.5,1))
-for (x in names(all_driver_trajectories)) {
-  driver_trajectories <- all_driver_trajectories[[x]]
+for (x in names(all_driver_trajectories_raw)) {
+  driver_trajectories <- all_driver_trajectories_raw[[x]]
+  driver_trajectories$ClosestTip <- trees[[x]]$tree$closest_clone[driver_trajectories$Clone]
+  driver_trajectories$Clade <- NA
+  if (length(all_estimates[[x]]) > 0) {
+      for (i in 1:length(all_estimates[[x]])) {
+        estimate <- all_estimates[[x]][[i]]
+        driver_trajectories$Clade[driver_trajectories$ClosestTip %in% estimate$clade] <- i
+        }
+  }
+  
   driver_trajectories <- driver_trajectories %>%
-    arrange(MutID,Gen) %>%
-    group_by(MutID) %>%
-    mutate(Break = c(T,diff(Gen) != 20)) %>%
-    mutate(Component = cumsum(Break)) %>%
-    mutate(MutID_C = sprintf("%s_%s",MutID,Component))
-  drivers <- unique(driver_trajectories$MutID_C)
+    group_by(Clade,Gen,MutID) %>%
+    summarise(Count = sum(Count))
+  clades <- unique(driver_trajectories$Clade)
+  clades <- clades[!is.na(clades)]
   all_driver_fits[[x]] <- list()
-  for (driver in drivers) {
+  for (clade in clades) {
     tmp_df <- driver_trajectories %>%
-      subset(MutID_C == driver)
-    driver <- tmp_df$MutID[1]
+      subset(Clade == clade)
+    drivers <- unique(tmp_df$MutID)
+    tmp_df <- tmp_df %>% 
+      group_by(Clade,Gen) %>%
+      summarise(Count = sum(Count))
+    clade <- tmp_df$Clade[1]
     has_last_gen <- any(tmp_df$Gen == 800)
     large_at_last_gen <- ifelse(
       has_last_gen,
@@ -842,13 +1092,14 @@ for (x in names(all_driver_trajectories)) {
         upper = c(b2 = 3000,b3 = 1e5),
         algorithm = "port")
       last_vaf <- tmp_df$Count[tmp_df$Gen == 800]/2e5
-      all_driver_fits[[x]][[as.character(driver)]] <- list(
+      all_driver_fits[[x]][[as.character(clade)]] <- list(
         data = tmp_df,
         non_linear_estimate = non_linear_estimate,
         change_point_regression = change_point_regression,
         earliest_driver = earliest,
         latest_driver = latest,
         last_vaf = last_vaf,
+        drivers = drivers,
         gen_at_onset = min(tmp_df$Gen))
     }
   }
@@ -960,9 +1211,7 @@ all_bnpr_fits_trimmed_5 <- names(all_estimates_trimmed_5_years) %>%
           nle <- all_estimates_trimmed_5_years[[x]][[y]]$non_linear_estimate
           if (!is.null(nle) & class(nle) != "try-error") {
             pars <- all_estimates_trimmed_5_years[[x]][[y]]$non_linear_estimate$m$getAllPars()
-            tao <- all_estimates_trimmed_5_years[[x]][[y]]$mutation_timing
             cp <- all_estimates_trimmed_5_years[[x]][[y]]$change_point_regression$par
-            pop_size_at_tao_cp <- exp((800 - tao)*cp[2])
             earliest <- all_estimates_trimmed_5_years[[x]][[y]]$earliest_growth$coefficients[2]
             latest <- all_estimates_trimmed_5_years[[x]][[y]]$latest_growth$coefficients[2]
             O <- data.frame(
@@ -976,11 +1225,7 @@ all_bnpr_fits_trimmed_5 <- names(all_estimates_trimmed_5_years) %>%
               earliest = earliest,
               latest = latest,
               changepoint_bnpr = cp[4],
-              time_at_onset_low = tao[1],
-              time_at_onset_high = tao[2],
               w_sum = mean(all_estimates_trimmed_5_years[[x]][[y]]$data$W,na.rm=T),
-              pop_at_detection_low = pop_size_at_tao_cp[2],
-              pop_at_detection_high = pop_size_at_tao_cp[1],
               point_of_saturation = which(
                 c(
                   predict(
@@ -1014,9 +1259,7 @@ all_bnpr_fits_trimmed <- names(all_estimates_trimmed_10_years) %>%
           nle <- all_estimates_trimmed_10_years[[x]][[y]]$non_linear_estimate
           if (!is.null(nle) & class(nle) != "try-error") {
             pars <- all_estimates_trimmed_10_years[[x]][[y]]$non_linear_estimate$m$getAllPars()
-            tao <- all_estimates_trimmed_10_years[[x]][[y]]$mutation_timing
             cp <- all_estimates_trimmed_10_years[[x]][[y]]$change_point_regression$par
-            pop_size_at_tao_cp <- exp((800 - tao)*cp[2])
             earliest <- all_estimates_trimmed_10_years[[x]][[y]]$earliest_growth$coefficients[2]
             latest <- all_estimates_trimmed_10_years[[x]][[y]]$latest_growth$coefficients[2]
             O <- data.frame(
@@ -1030,11 +1273,7 @@ all_bnpr_fits_trimmed <- names(all_estimates_trimmed_10_years) %>%
               earliest = earliest,
               latest = latest,
               changepoint_bnpr = cp[4],
-              time_at_onset_low = tao[1],
-              time_at_onset_high = tao[2],
               w_sum = mean(all_estimates_trimmed_10_years[[x]][[y]]$data$W,na.rm=T),
-              pop_at_detection_low = pop_size_at_tao_cp[2],
-              pop_at_detection_high = pop_size_at_tao_cp[1],
               point_of_saturation = which(
                 c(
                   predict(
@@ -1094,7 +1333,7 @@ all_driver_fits_df <- names(all_driver_fits) %>%
                   all_driver_fits[[x]][[y]]$non_linear_estimate,
                   newdata = data.frame(Gen = seq(1,800)))) > (0.9 * pars[1])) %>% min,
             name = x,
-            driver = y,
+            clade = y,
             last_vaf = all_driver_fits[[x]][[y]]$last_vaf,
             expected_last_vaf,
             gen_at_onset = all_driver_fits[[x]][[y]]$gen_at_onset
@@ -1148,57 +1387,74 @@ Here we scale the BNPR trajectories so that they match as closely as possible th
 simulated_trajectories <- list()
 bnpr_estimates_ <- list()
 for (x in names(all_driver_fits)) {
-  if (x %in% names(all_estimates)) {
-    for (y in names(all_driver_fits[[x]])) {
-      clade_no <- 1
-      bnpr_sums <- list()
-      largest_clade <- which.max(unlist(lapply(all_estimates[[x]],function(x) length(x$clade))))[1]
-      for (estimate in all_estimates[[x]]) {
-        if (y == estimate$driver) {
-          driver_fit <- all_driver_fits[[x]][[y]]$data
-          bnpr_sum <- estimate$bnpr$summary
-          W <- (log(bnpr_sum$quant0.975) - log(bnpr_sum$quant0.025))^2/16
-          bnpr_sum$time <- (800 - bnpr_sum$time)
-          if (clade_no == largest_clade) {
-            opt_data <- data.frame(
-              a = approx(bnpr_sum$time,y = bnpr_sum$mean,xout = driver_fit$Gen)$y,
-              b = driver_fit$Count) %>%
-              na.omit
-            opt_fn <- function(pars) {
-              l <- (opt_data$a * pars[1] - opt_data$b)^2
-              l <- l
-              return(sum(l))
-            }
-            opt_solution <- optim(c(m = 1),
-                                  opt_fn,
-                                  control = list(maxit = 10000),
-                                  method = "Nelder-Mead")
-            P <- opt_solution$par
-          }
-          driver_fit$id <- x
-          driver_fit$driver <- y
-          bnpr_sum$id <- x
-          bnpr_sum$driver <- y
-          bnpr_sum$clade <- clade_no
-          simulated_trajectories[[length(simulated_trajectories)+1]] <- driver_fit
-          bnpr_sums[[length(bnpr_sums)+1]] <- bnpr_sum
-          clade_no <- clade_no + 1
-        }
+  if (length(all_driver_fits[[x]]) > 0) {
+    for (i in 1:length(all_driver_fits[[x]])) {
+      driver_fit <- all_driver_fits[[x]][[i]]$data
+      bnpr_sum <- all_estimates[[x]][[i]]$bnpr$summary
+      W <- (log(bnpr_sum$quant0.975) - log(bnpr_sum$quant0.025))^2/16
+      bnpr_sum$time <- (800 - bnpr_sum$time)
+      driver_fit$id <- x
+      driver_fit$clade <- i
+      bnpr_sum$id <- x
+      bnpr_sum$clade <- i
+      simulated_trajectories[[length(simulated_trajectories)+1]] <- driver_fit
+      bnpr_estimates_[[length(bnpr_estimates_)+1]] <- bnpr_sum
       }
-      for (bnpr_sum in bnpr_sums) {
-        bnpr_sum$transformed_y <- bnpr_sum$mean * P[1]
-        bnpr_sum$transformed_y_low <- bnpr_sum$quant0.025 * P[1]
-        bnpr_sum$transformed_y_high <- bnpr_sum$quant0.975 * P[1]
-        bnpr_estimates_[[length(bnpr_estimates_)+1]] <- bnpr_sum
-      }
-    }
   }
 }
+
+# for (x in names(all_driver_fits)) {
+#   if (x %in% names(all_estimates)) {
+#     for (y in names(all_driver_fits[[x]])) {
+#       clade_no <- 1
+#       bnpr_sums <- list()
+#       largest_clade <- which.max(unlist(lapply(all_estimates[[x]],function(x) length(x$clade))))[1]
+#       for (estimate in all_estimates[[x]]) {
+#         if (y == estimate$driver) {
+#           driver_fit <- all_driver_fits[[x]][[y]]$data
+#           bnpr_sum <- estimate$bnpr$summary
+#           W <- (log(bnpr_sum$quant0.975) - log(bnpr_sum$quant0.025))^2/16
+#           bnpr_sum$time <- (800 - bnpr_sum$time)
+#           if (clade_no == largest_clade) {
+#             opt_data <- data.frame(
+#               a = approx(bnpr_sum$time,y = bnpr_sum$mean,xout = driver_fit$Gen)$y,
+#               b = driver_fit$Count) %>%
+#               na.omit
+#             opt_fn <- function(pars) {
+#               l <- (opt_data$a * pars[1] - opt_data$b)^2
+#               l <- l
+#               return(sum(l))
+#             }
+#             opt_solution <- optim(c(m = 1),
+#                                   opt_fn,
+#                                   control = list(maxit = 10000),
+#                                   method = "Nelder-Mead")
+#             P <- opt_solution$par
+#           }
+#           driver_fit$id <- x
+#           driver_fit$clade <- y
+#           bnpr_sum$id <- x
+#           bnpr_sum$clade <- y
+#           bnpr_sum$clade <- clade_no
+#           simulated_trajectories[[length(simulated_trajectories)+1]] <- driver_fit
+#           bnpr_sums[[length(bnpr_sums)+1]] <- bnpr_sum
+#           clade_no <- clade_no + 1
+#         }
+#       }
+#       for (bnpr_sum in bnpr_sums) {
+#         bnpr_sum$transformed_y <- bnpr_sum$mean * P[1]
+#         bnpr_sum$transformed_y_low <- bnpr_sum$quant0.025 * P[1]
+#         bnpr_sum$transformed_y_high <- bnpr_sum$quant0.975 * P[1]
+#         bnpr_estimates_[[length(bnpr_estimates_)+1]] <- bnpr_sum
+#       }
+#     }
+#   }
+# }
 
 simulated_trajectories_df <- do.call(rbind,simulated_trajectories)
 bnpr_estimates_df <- do.call(rbind,bnpr_estimates_) %>% 
   mutate(w = (log(quant0.975) - log(quant0.025))^2/16) %>% 
-  group_by(id, clade, driver) %>% 
+  group_by(id, clade) %>% 
   mutate(w_sum = mean(w)) %>%
   filter(w_sum < 5)
 
@@ -1206,11 +1462,11 @@ ggplot(data = NULL) +
   geom_hline(yintercept = 2e5,size = 0.25,colour = "goldenrod",alpha = 0.7) +
   geom_line(data = simulated_trajectories_df,
             aes(x = Gen/100,y = Count,colour = "Simulated",
-                group = paste(MutID_C,driver)),
+                group = paste(clade)),
             size = 0.25,
             alpha = 0.7) + 
-  geom_line(data = bnpr_estimates_df,aes(x = time/100,y = transformed_y,
-                                         group = paste(clade,driver),colour = "BNPR estimate"),
+  geom_line(data = bnpr_estimates_df,aes(x = time/100,y = mean,
+                                         group = paste(clade),colour = "BNPR estimate"),
             size = 0.25,
             alpha = 0.5) + 
   facet_wrap(~ id,scales = "free") + 
@@ -1223,38 +1479,68 @@ ggplot(data = NULL) +
   ggsave("figures/simulations/trajectories_wf_bnpr.pdf",height = 6,width = 7)
 ```
 
-```{r,fig.height=3,fig.width=4}
-set.seed(777)
-S <- sample(simulated_trajectories_df$id,
-                  size = 15,replace = F)
+```{r,fig.height=2.2,fig.width=3}
+set.seed(42)
+S <- sample(unique(paste(bnpr_estimates_df$id,bnpr_estimates_df$clade)),
+            size = 23,replace = F)
+
+bnpr_ss <- subset(bnpr_estimates_df,paste(id,clade) %in% S)
+sim_ss <- subset(simulated_trajectories_df,paste(id,clade) %in% S)
+
+similarity <- lapply(S,function(x) {
+  a <- bnpr_ss %>%
+    subset(paste(id,clade) == x) %>%
+    mutate(age_group = floor(time / 100)) %>%
+    group_by(age_group) %>%
+    summarise(av_neff = mean(mean))
+  b <- sim_ss %>%
+    subset(paste(id,clade) == x) %>%
+    mutate(age_group = floor(Gen / 100)) %>%
+    group_by(age_group,id,clade) %>%
+    summarise(av_n = mean(Count))
+  merge(a,b,by = "age_group") %>%
+    group_by(id,clade) %>%
+    summarise(mae = mean(abs(av_neff - av_n))) %>%
+    return
+}) %>%
+  do.call(what = rbind) %>%
+  arrange(mae) %>%
+  mutate(b = paste(id,clade))
 
 ggplot(data = NULL) +
   geom_hline(yintercept = 2e5,size = 0.25,colour = "goldenrod",alpha = 0.7) +
-  geom_line(data = subset(simulated_trajectories_df,id %in% S),
-            aes(x = Gen/100,y = Count,colour = "Simulated",
-                group = paste(MutID_C,driver)),
+  geom_line(data = sim_ss,
+            aes(x = Gen/100,y = Count,colour = "Simulated",fill = "Simulated",
+                group = paste(clade)),
+            size = 0.25,
+            alpha = 0.9) + 
+  geom_ribbon(data = bnpr_ss,
+              aes(x = time/100,ymin = quant0.025,ymax = quant0.975,
+                  group = paste(clade),fill = "BNPR estimate"),
+              alpha = 0.2,
+              size = 0) +
+  geom_line(data = bnpr_ss,
+            aes(x = time/100,y = mean,
+                group = paste(clade),colour = "BNPR estimate",fill = "BNPR estimate"),
             size = 0.25,
             alpha = 0.7) + 
-  geom_line(data = subset(bnpr_estimates_df,id %in% S),
-            aes(x = time/100,y = transformed_y,
-                group = paste(clade,driver),colour = "BNPR estimate"),
-            size = 0.25,
-            alpha = 0.5) + 
-  facet_wrap(~ id + driver,scales = "free") + 
+  facet_wrap(~ factor(paste(id,clade),levels = similarity$b),scales = "free") + 
   theme_gerstung(base_size = 6) + 
-  theme(strip.text = element_blank(),legend.position = "bottom") + 
+  theme(strip.text = element_blank(),legend.position = "bottom",
+        legend.key.size = unit(0.2,"cm"),legend.box.spacing = unit(0,"cm")) + 
   scale_y_continuous(trans = 'log10') + 
-  coord_cartesian(ylim = c(NA,2e8),c(0,8)) +
-  scale_colour_manual(values = c(Simulated = "grey50",`BNPR estimate` = "orchid"),name = NULL) + 
+  coord_cartesian(ylim = c(1,2e8),xlim = c(0,8)) +
+  scale_colour_manual(values = c(Simulated = "black",`BNPR estimate` = "orchid"),name = NULL) + 
+  scale_fill_manual(values = c(Simulated = "black",`BNPR estimate` = "orchid"),name = NULL) + 
   xlab("Generation (x100)") + 
-  ggsave("figures/simulations/trajectories_wf_bnpr_subset.pdf",height = 3,width = 4)
+  ggsave("figures/simulations/trajectories_wf_bnpr_subset.pdf",height = 2.2,width = 3)
 ```
 
 ## Sensitivity analysis - normal vs. trimmed
 
-Here we see if using trimmed leads to very different estimates. Trimming the data by 5 or even 10 years does not lead to very different estimations for the late growth rate as we propose here. Indeed, the average difference we can expect between trimmed-by-10-years and non-trimmed data is 0.5% growth per generation for late growth estimates and 0.3% growth per generation for early growth estimates.
+Here we see if using trimmed leads to very different estimates. Trimming the data by 5 or even 10 years does not lead to very different estimations for the late growth rate as we propose here. Indeed, the average difference we can expect between trimmed-by-10-years and non-trimmed data is 0.8% growth per generation for late growth estimates and 0.4% growth per generation for early growth estimates.
 
-```{r,fig.height=2,fig.width=4}
+```{r,fig.height=1,fig.width=2}
 all_fits_df <- all_fits %>%
   do.call(what = rbind) %>%
   mutate(fitness = str_match(obj_name,"[0-9.]+")) %>% 
@@ -1269,58 +1555,84 @@ all_fits_df <- all_fits %>%
 
 diff_fits <- rbind(
   all_bnpr_fits %>%
-    select(name,clade,early = cp_1,late = cp_late,earliest,latest) %>%
+    select(name,clade,early = cp_1,late = cp_late,earliest,latest,w_sum) %>%
     mutate(Preprocessing = "Original trajectory"),
   all_bnpr_fits_trimmed_5 %>%
-    select(name,clade,early = cp_1,late = cp_late,earliest,latest) %>%
+    select(name,clade,early = cp_1,late = cp_late,earliest,latest,w_sum) %>%
     mutate(Preprocessing = "Trimmed by 5 years"),
   all_bnpr_fits_trimmed %>%
-    select(name,clade,early = cp_1,late = cp_late,earliest,latest) %>%
+    select(name,clade,early = cp_1,late = cp_late,earliest,latest,w_sum) %>%
     mutate(Preprocessing = "Trimmed by 10 years")
 ) %>%
   mutate(Preprocessing = factor(Preprocessing,
                                 levels = c("Original trajectory",
                                            "Trimmed by 5 years",
-                                           "Trimmed by 10 years")))
+                                           "Trimmed by 10 years"))) %>%
+  group_by(clade,name) %>% 
+  filter(all(w_sum < 5))
 
-
-rbind(
+df_benchmark <- rbind(
   diff_fits %>% 
   select(late,Preprocessing,name,clade) %>%
   spread(value = "late",key = "Preprocessing") %>% 
   ungroup %>% 
   summarise(
-    `Original vs. 5 years` = mean(abs(`Original trajectory` - `Trimmed by 5 years`),na.rm = T),
-    `Original vs. 10 years` = mean(abs(`Original trajectory` - `Trimmed by 10 years`),na.rm = T),
-    `5 years vs. 10 years` = mean(abs(`Trimmed by 5 years` - `Trimmed by 10 years`),na.rm = T)) %>%
+    `Original-5 years` = (`Original trajectory` - `Trimmed by 5 years`),
+    `Original-10 years` = (`Original trajectory` - `Trimmed by 10 years`),
+    `5 years-10 years` = (`Trimmed by 5 years` - `Trimmed by 10 years`)) %>%
     mutate(id = "Changepoint late"),
   diff_fits %>% 
     select(early,Preprocessing,name,clade) %>%
     spread(value = "early",key = "Preprocessing") %>% 
     ungroup %>% 
     summarise(
-      `Original vs. 5 years` = mean(abs(`Original trajectory` - `Trimmed by 5 years`),na.rm = T),
-      `Original vs. 10 years` = mean(abs(`Original trajectory` - `Trimmed by 10 years`),na.rm = T),
-      `5 years vs. 10 years` = mean(abs(`Trimmed by 5 years` - `Trimmed by 10 years`),na.rm = T)) %>%
+      `Original-5 years` = (`Original trajectory` - `Trimmed by 5 years`),
+      `Original-10 years` = (`Original trajectory` - `Trimmed by 10 years`),
+      `5 years-10 years` = (`Trimmed by 5 years` - `Trimmed by 10 years`)) %>%
     mutate(id = "Changepoint early"),
   diff_fits %>% 
     select(latest,Preprocessing,name,clade) %>%
     spread(value = "latest",key = "Preprocessing") %>% 
     ungroup %>% 
     summarise(
-      `Original vs. 5 years` = mean(abs(`Original trajectory` - `Trimmed by 5 years`),na.rm = T),
-      `Original vs. 10 years` = mean(abs(`Original trajectory` - `Trimmed by 10 years`),na.rm = T),
-      `5 years vs. 10 years` = mean(abs(`Trimmed by 5 years` - `Trimmed by 10 years`),na.rm = T)) %>%
+      `Original-5 years` = (`Original trajectory` - `Trimmed by 5 years`),
+      `Original-10 years` = (`Original trajectory` - `Trimmed by 10 years`),
+      `5 years-10 years` = (`Trimmed by 5 years` - `Trimmed by 10 years`)) %>%
     mutate(id = "Last 150 generations"),
   diff_fits %>% 
     select(earliest,Preprocessing,name,clade) %>%
     spread(value = "earliest",key = "Preprocessing") %>% 
     ungroup %>% 
     summarise(
-      `Original vs. 5 years` = mean(abs(`Original trajectory` - `Trimmed by 5 years`),na.rm = T),
-      `Original vs. 10 years` = mean(abs(`Original trajectory` - `Trimmed by 10 years`),na.rm = T),
-      `5 years vs. 10 years` = mean(abs(`Trimmed by 5 years` - `Trimmed by 10 years`),na.rm = T)) %>%
-    mutate(id = "First 150 generations"))
+      `Original-5 years` = (`Original trajectory` - `Trimmed by 5 years`),
+      `Original-10 years` = (`Original trajectory` - `Trimmed by 10 years`),
+      `5 years-10 years` = (`Trimmed by 5 years` - `Trimmed by 10 years`)) %>%
+    mutate(id = "First 150 generations")) 
+
+df_benchmark %>%
+  group_by(id) %>%
+  summarise(`Original-5 years` = mean(abs(`Original-5 years`),na.rm=T),
+            `Original-10 years` = mean(abs(`Original-10 years`),na.rm=T),
+            `5 years-10 years` = mean(abs(`5 years-10 years`),na.rm=T))
+
+df_benchmark %>% 
+  gather(key = "key",value = "value",-id) %>% 
+  subset(id %in% c("Changepoint late","Changepoint early")) %>%
+  subset(grepl("Original",key)) %>% 
+  ggplot(aes(x = key, y = value,colour = id)) + 
+  geom_jitter(size = 0.25,position = position_dodge(width = 1),alpha = 0.25) +
+  geom_boxplot(outlier.alpha = 0,size = 0.25,position = position_dodge(width = 1)) + 
+  theme_gerstung(base_size = 6) + 
+  coord_flip() + 
+  theme(legend.position = "bottom") + 
+  scale_colour_aaas(name = NULL) +
+  xlab("") + 
+  ylab("Growth rate estimate") + 
+  guides(colour = guide_legend(nrow = 2)) + 
+  theme(legend.key.height = unit(0,"cm"),
+        legend.box.spacing = unit(0,"cm")) + 
+  scale_y_continuous(limits = c(NA,0)) +
+  ggsave("figures/simulations/benchmark_trim.pdf",height = 1,width = 2)
 ```
 
 ## Comparing inference of early and late growth between BNPR fits and driver fits from WF simulations
@@ -1328,7 +1640,7 @@ rbind(
 We define here a measure of excessive observed variance in the BNPR trajectory - whenever the average log-EPS variance is larger than 10 we define these trajectories as "high variance" trajectories, noting that they are trajectories which were obtained from fairly small clades (fewer than 10 tips).
 
 ```{r,fig.height=1.5,fig.width=1.5}
-bnpr_wf_merge_df <- merge(all_bnpr_fits,all_driver_fits_df,by = c("name","driver")) %>%
+bnpr_wf_merge_df <- merge(all_bnpr_fits,all_driver_fits_df,by = c("name","clade")) %>%
   mutate(vaf_at_detection_low = pop_at_detection_low/2e5,
          vaf_at_detection_high = pop_at_detection_high/2e5) %>%
   mutate(vaf_at_detection_low = ifelse(vaf_at_detection_low > 1,1,vaf_at_detection_low),
@@ -1374,11 +1686,11 @@ expected_late_growth <- function(vaf,id,clade) {
     last_eps <- max(tmp_df$Y_exp)
     tmp_df$normalized_Y <- tmp_df$Y_exp / last_eps * vaf
 
-    nl_fit <- nls(formula = normalized_Y ~ SSlogis(X,1,Xmid,b),
-                  start = list(Xmid = mean(tmp_df$X),b = 10),
-                  control = nls.control(maxiter = 1000,minFactor = 1/(1024^32),
-                                        warnOnly = T),
-                  data = tmp_df)
+    nl_fit <- nlsLM(formula = normalized_Y ~ SSlogis(X,1,Xmid,b),
+                    start = list(Xmid = mean(tmp_df$X),b = 100),
+                    control = nls.control(maxiter = 1000,minFactor = 1/(1024^32),
+                                          warnOnly = T),
+                    data = tmp_df)
     return(nl_fit$m$getAllPars()[2])
   } else {
     return(NA)
@@ -1400,7 +1712,8 @@ bnpr_wf_merge_df %>%
   mutate(expected_late_ratio_wf = late_growth/growth_rate,
          expected_late_ratio = cp_late / expected_nl) %>%
   mutate(expected_late_ratio = ifelse(expected_late_ratio < -1,-1,expected_late_ratio)) %>% 
-  ggplot(aes(x = ifelse(expected_late_ratio_wf < 0.8,"Saturating","Near constant"),y = expected_late_ratio)) +
+  ggplot(aes(x = ifelse(expected_late_ratio_wf < 0.8,"Saturating","Near constant"),
+             y = expected_late_ratio)) +
   geom_hline(yintercept = 0.5) +
   geom_jitter(width = 0.3,size = 0.5,alpha = 0.8) +
   geom_boxplot(outlier.alpha = 0,alpha = 0.8) + 
@@ -1429,97 +1742,6 @@ bnpr_wf_merge_df %>%
   theme(axis.text.x = element_blank(),
         axis.ticks.x = element_blank()) +
   ggsave("figures/simulations/expected_late_growth_ratio.pdf",height = 1.5,width = 0.7)
-```
-
-## Comparing inference of sigmoidal fit between BNPR fits and driver fits from WF simulations
-
-As mentioned, we also fit sigmoidal curves to each trajectory and here we assess whether they can be used for inference.
-
-```{r,fig.height=3.6,fig.width=4.8}
-bnpr_wf_merge_sigmoid_df <- bnpr_wf_merge_df
-asymptote_graph <- bnpr_wf_merge_sigmoid_df %>%
-  ggplot(aes(x = 2e5,y = nl_asym,colour = col)) + 
-  geom_point(size = 0.5) + 
-  scale_y_continuous(trans = 'log10') +
-  scale_x_continuous(trans = 'log10') +
-  theme_gerstung(base_size = 6) +
-  xlab("Simulated asymptote") +
-  ylab("BNPR asymptote") + 
-  theme(legend.position = "none") + 
-  coord_cartesian(ylim = c(NA,1e6)) + 
-  scale_color_lancet(name = NULL)
-
-midpoint_graph <- bnpr_wf_merge_sigmoid_df %>%
-  ggplot(aes(x = xmid,y = nl_xmid,colour = col)) + 
-  geom_abline(slope = 1,size = 0.25,linetype = 2) +
-  geom_smooth(method = "lm",size = 0.25,alpha = 0.25) +
-  geom_point(size = 0.5) + 
-  coord_cartesian(xlim = c(0,2000),ylim = c(0,2000)) + 
-  theme_gerstung(base_size = 6) +
-  xlab("Simulated midpoint") +
-  ylab("BNPR midpoint") + 
-  theme(legend.position = "none") + 
-  scale_color_lancet(name = NULL)
-
-point_of_saturation_plot <- bnpr_wf_merge_sigmoid_df %>%
-  subset(!is.infinite(point_of_saturation) & !is.infinite(point_of_saturation_wf)) %>%
-  ggplot(aes(x = point_of_saturation,y = point_of_saturation_wf,colour = col)) + 
-  geom_abline(slope = 1,size = 0.25,linetype = 2) +
-  geom_smooth(method = "lm",size = 0.25,alpha = 0.25) +
-  geom_point(size = 0.5) +
-  coord_cartesian(xlim = c(200,800),ylim = c(200,800)) + 
-  theme_gerstung(base_size = 6) + 
-  xlab("Simulated generation at saturation") +
-  ylab("BNPR generation at saturation") + 
-  theme(legend.position = "none") + 
-  scale_color_lancet(name = NULL)
-
-fitness_plot <- bnpr_wf_merge_sigmoid_df %>%
-  ggplot(aes(x = growth_rate,y = nl,colour = col)) +
-  geom_abline(slope = 1,size = 0.25,linetype = 2) +
-  geom_smooth(method = "lm",size = 0.25,alpha = 0.25) +
-  geom_point(size = 0.5) +
-  coord_cartesian() + 
-  theme_gerstung(base_size = 6) + 
-  xlab("Fitness inferred from simulation") +
-  ylab("Fitness inferred from BNPR") +
-  theme(legend.key.width = unit(0.1,"cm"),
-        legend.key.height = unit(0.3,"cm")) + 
-  scale_color_lancet(name = NULL) + 
-  coord_cartesian(ylim = c(NA,0.05),xlim = c(NA,NA))
-
-plot_grid(
-  asymptote_graph,midpoint_graph,point_of_saturation_plot,
-  fitness_plot + theme(legend.position = "none"),
-  nrow = 2,align = "hv",
-  rel_heights = c(1,1)
-) %>% 
-  plot_grid(plot_grid(ggplot() + theme_nothing(),
-                      get_legend(fitness_plot + theme(legend.position = "bottom")),
-                      ggplot() + theme_nothing(),nrow = 1),
-            rel_heights = c(1,0.1),ncol = 1) + 
-  ggsave("figures/simulations/compare_wf_bnpr.pdf",height = 3.6,width = 4.8)
-
-truth <- is.finite(bnpr_wf_merge_df$point_of_saturation_wf)
-pred <- is.finite(bnpr_wf_merge_df$point_of_saturation)
-acc <- sum(truth == pred) / length(truth)
-prec <- sum(truth == pred & truth == 1) / (sum(pred == 1))
-recall <- sum(truth == pred & truth == 1) / (sum(truth == 1))
-
-truth_low_var <- is.finite(
-  subset(bnpr_wf_merge_df,col == "Low variance")$point_of_saturation_wf)
-pred_low_var <- is.finite(
-  subset(bnpr_wf_merge_df,col == "Low variance")$point_of_saturation)
-acc_low_var <- sum(truth_low_var == pred_low_var) / length(truth_low_var)
-prec_low_var <- sum(truth_low_var == pred_low_var & truth_low_var == 1)/(sum(pred_low_var == 1))
-recall_low_var <- sum(truth_low_var == pred_low_var & truth_low_var == 1)/(sum(truth_low_var == 1))
-
-data.frame(
-  Accuracy = c(acc,acc_low_var),
-  Precision = c(prec,prec_low_var),
-  Recall = c(recall,recall_low_var),
-  Data = c("All trajectories","Low variance trajectories")
-)
 ```
 
 ## Benchmarking different models for BNPR fits
@@ -1606,7 +1828,7 @@ plot_grid(
   mse_plot,
   rel_heights = c(1,1,0.6),
   ncol = 2) + 
-  ggsave("figures/simulations/validation_BNPR.pdf",height = 5,width = 4.7)
+  ggsave("figures/simulations/validation_BNPR.pdf",height = 5,width = 4.7,useDingbats=FALSE)
 
 write.csv(bnpr_wf_merge_df,"data_output/simulated_bnpr_coefficients.csv",row.names = F)
 ```

@@ -4,7 +4,7 @@ R=20
 
 DIR=hsc_output_bnpr_complete # output directory
 mkdir -p $DIR
-rm -rf hsc_output_bnpr_complete/*
+#rm -rf hsc_output_bnpr_complete/*
 
 N=200000
 g=800 # ~ 80 years
@@ -31,7 +31,7 @@ do
             -M 2000 -n 1 \
             -o /dev/null -e /dev/null \
             -w "ended($job_name)" \
-            "clonex_trajectory $dir_name/r001.csv $N_DRIVERS > $dir_name/driver_trajectory"
+            "clonex_trajectory_2 $dir_name/r001.csv $N_DRIVERS > $dir_name/driver_trajectory"
         bsub \
             -J LAST_$job_name \
             -M 2000 -n 1 \

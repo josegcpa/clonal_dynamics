@@ -24,6 +24,7 @@ knitr::opts_chunk$set(echo = TRUE,dpi = 300)
 ```{r import_functions, include=FALSE}
 source("Scripts/vaf_dynamics_functions.R")
 model_file_name <- "models/model_ch.RDS"
+model_id <- gsub('\\.','',str_match(model_file_name,'model_.*\\.'))
 dir.create("figures/data_exploration/",showWarnings = F)
 dir.create("data_output/",showWarnings = F)
 set.seed(42)
@@ -417,10 +418,11 @@ prevalence_gene <- load_data_keep() %>%
   mutate(Gene = factor(Gene,levels = gene_order)) %>% 
   group_by(Gene,Total) %>%
   summarise(N = length(unique(SardID))) %>% 
-  ggplot(aes(x = Gene,y = N/Total)) + 
-  geom_bar(stat = "identity",fill = "black") + 
+  ggplot(aes(x = Gene,y = N/Total,fill = Gene)) + 
+  geom_bar(stat = "identity") + 
   scale_y_continuous(expand = c(0,0)) + 
   scale_x_discrete(expand = c(0,0)) + 
+  scale_fill_manual(values = gene_colours,guide=F) +
   theme_gerstung(base_size = 6) + 
   rotate_x_text() + 
   theme(axis.text.x = element_text(face = "italic")) + 
@@ -498,9 +500,138 @@ plot_grid(prevalence_gene + theme(panel.background = element_blank()),
           rel_heights = c(2,2,0.6),
           ncol = 1) + 
   ggsave(useDingbats=FALSE,"figures/data_exploration/prevalence_relative_prevalence.pdf",
-         width = 1.8,height = 2.8)
+         width = 1.7,height = 3)
 ```
 
+```{r,fig.width=1.8,fig.height=1}
+bootstrap_ci <- function(m,n,p=0.5,repeats=100) {
+  hits <- c(rep(1,m),rep(0,n-m))
+  trials <- rep(1,n)
+  sapply(
+    seq(1,repeats),
+    function(x) {
+      s <- sample(n,round(p*n),replace = F)
+      return(sum(hits[s]))
+    }
+  )
+}
+
+tmp_data <- load_data_keep() %>%
+  subset(VAF >= 0.005) %>% 
+  group_by(SardID) %>%
+  filter(Age == max(Age)) %>%
+  mutate(AgeGroup = cut(Age,c(0,75,80,85,200),c("<75","75-80","80-85",">85"))) %>% 
+  group_by(SardID,AgeGroup,Age,Gender) %>%
+  summarise(TET2 = sum(grepl("TET2",unique(AAChange.refGene))),
+            DNMT3A = sum(grepl("DNMT3A",unique(AAChange.refGene))),
+            Splicing = sum(grepl("SF3B1|U2AF1|SRSF2",unique(AAChange.refGene))),
+            TotalClones = length(unique(AAChange.refGene)),
+            Total = 1)
+
+tmp_data_splicing <- load_data_keep() %>%
+  subset(VAF >= 0.005) %>% 
+  group_by(SardID) %>%
+  filter(Age == max(Age)) %>%
+  mutate(AgeGroup = cut(Age,c(0,75,80,85,200),c("<75","75-80","80-85",">85"))) %>% 
+  group_by(SardID,AgeGroup,Age,Gender) %>%
+  summarise(SF3B1 = sum(grepl("SF3B1",unique(AAChange.refGene))),
+            U2AF1 = sum(grepl("U2AF1",unique(AAChange.refGene))),
+            SRSF2 = sum(grepl("SRSF2",unique(AAChange.refGene))),
+            TotalClones = length(unique(AAChange.refGene)),
+            Total = 1)
+
+tmp_data_regression <- load_data_keep() %>%
+  subset(VAF >= 0.005) %>% 
+  group_by(SardID) %>% 
+  mutate(Age = max(Age)) %>% 
+  group_by(SardID,Age,Gender) %>%
+  summarise(TET2 = any(grepl("TET2",unique(AAChange.refGene))),
+            DNMT3A = any(grepl("DNMT3A",unique(AAChange.refGene))),
+            Splicing = any(grepl("U2AF1|SRSF2|SF3B1",unique(AAChange.refGene)))) 
+
+tmp_data_agg <- tmp_data %>% 
+  group_by(AgeGroup) %>% 
+  summarise(TotalTET2 = sum(TET2),
+            TotalDNMT3A = sum(DNMT3A),
+            TotalSplicing = sum(Splicing),
+            TotalClones = sum(TotalClones),
+            Total = length(unique(paste(SardID,Age)))) %>%
+  gather(key = "key",value = "value",-AgeGroup,-Total,-TotalClones) %>%
+  rowwise() %>%
+  mutate(p05 = quantile(bootstrap_ci(m = value,n = TotalClones,p = 0.8)/(Total*0.8),0.05),
+         p95 = quantile(bootstrap_ci(m = value,n = TotalClones,p = 0.8)/(Total*0.8),0.95)) %>% 
+  mutate(key = factor(key, levels = c("TotalDNMT3A","TotalTET2","TotalSplicing"),
+                      labels = c("DNMT3A","TET2","Splicing"))) %>% 
+  mutate(AgeGroup = factor(AgeGroup,levels = c("<75","75-80","80-85",">85"))) %>%
+  mutate(AgeGroup_ = sprintf("%s\n(N=%s)",AgeGroup,Total)) 
+
+tmp_data_splicing_agg <- tmp_data_splicing %>% 
+  group_by(AgeGroup) %>% 
+  summarise(TotalSF3B1 = sum(SF3B1),
+            TotalSRSF2 = sum(SRSF2),
+            TotalU2AF1 = sum(U2AF1),
+            TotalClones = sum(TotalClones),
+            Total = length(unique(paste(SardID,Age)))) %>%
+  gather(key = "key",value = "value",-AgeGroup,-Total,-TotalClones) %>%
+  rowwise() %>%
+  mutate(p05 = quantile(bootstrap_ci(m = value,n = TotalClones,p = 0.8)/(Total*0.8),0.05),
+         p95 = quantile(bootstrap_ci(m = value,n = TotalClones,p = 0.8)/(Total*0.8),0.95)) %>% 
+  mutate(key = factor(key, levels = c("TotalSF3B1","TotalSRSF2","TotalU2AF1"),
+                      labels = c("SF3B1","SRSF2","U2AF1"))) %>% 
+  mutate(AgeGroup = factor(AgeGroup,levels = c("<75","75-80","80-85",">85"))) %>%
+  mutate(AgeGroup_ = sprintf("%s\n(N=%s)",AgeGroup,Total)) 
+
+lvls <- tmp_data_agg %>%
+  select(AgeGroup,Total) %>%
+  distinct %>%
+  arrange(AgeGroup) %>%
+  ungroup %>%
+  transmute(AgeGroup_ = sprintf("%s\n(N=%s)",AgeGroup,Total)) %>%
+  select(AgeGroup_) %>%
+  unlist
+
+mm <- tmp_data_agg$p95 %>%
+  max
+
+tmp_data_agg %>% 
+  ggplot(aes(x = factor(AgeGroup_,levels = lvls),y = value/Total,fill = key,group = key)) + 
+  geom_bar(stat = "identity",position = position_dodge(width = 0.9)) + 
+  geom_linerange(aes(ymin = p05,ymax = p95),position = position_dodge(width = 0.9),
+                 size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  scale_fill_manual(values = c(gene_colours,Splicing="grey50"),name = NULL,guide = F) + 
+  theme(axis.title.x = element_blank(),
+        legend.key.size = unit(0.2,"cm"),
+        legend.position = "bottom",
+        legend.box.spacing = unit(0,"cm")) + 
+  scale_y_continuous(expand = c(0,0),limits = c(0,mm)) + 
+  ylab("Average number of\nclones per individual") + 
+  ggsave(useDingbats=FALSE,sprintf("figures/data_exploration/dnmt3a_tet2_splicing_prevalence.pdf",model_id),
+         height = 1,width = 1.8)
+
+tmp_data_splicing_agg %>% 
+  ggplot(aes(x = factor(AgeGroup_,levels = lvls),y = value/Total,fill = key,group = key)) + 
+  geom_bar(stat = "identity") + 
+  theme_gerstung(base_size = 6) + 
+  scale_fill_manual(values = c(gene_colours,Splicing="grey50"),name = NULL,guide = F) + 
+  theme(axis.title.x = element_blank(),
+        legend.key.size = unit(0.2,"cm"),
+        legend.position = "bottom",
+        legend.box.spacing = unit(0,"cm")) + 
+  scale_y_continuous(expand = c(0,0),limits = c(0,mm)) + 
+  ylab("Average number of\nclones per individual") + 
+  ggsave(useDingbats=FALSE,sprintf("figures/data_exploration/splicing_prevalence.pdf",model_id),
+         height = 1,width = 1.8)
+
+glm(TET2 ~ Age + Gender,data = tmp_data_regression,family = stats::binomial()) %>%
+  summary
+
+glm(DNMT3A ~ Age + Gender,data = tmp_data_regression,family = stats::binomial()) %>%
+  summary
+
+glm(Splicing ~ Age + Gender,data = tmp_data_regression,family = stats::binomial()) %>%
+  summary
+```
 # Modelling 
 
 We model the counts of mutation $i$ in individual $j$ - clone $c_{ji}$ - at age $t$ as the product of a beta-binomial distribution such that $counts_{c_{ji}} \sim BB(cov_{c_{ji}}(t),\alpha_{c_{ji}}(t),\beta)$, where $cov_{c_{ji}}$ is the coverage for mutation $c_{ji}$ at timepoint $t$, $\beta$ is the technical overdispersion and $\alpha = \frac{\beta p}{1 - p(t)}$, where $p(t)$ is the expected value for the VAF at age $t$. 
@@ -531,7 +662,6 @@ The model specified in `Scripts/bb_gene_site_clone_model.R` was executed using `
 
 ```{r model_load_values}
 values_model <- readRDS(model_file_name)
-model_id <- gsub('\\.','',str_match(model_file_name,'model_.*\\.'))
 dir.create("figures/",showWarnings = F)
 dir.create(sprintf("figures/%s",model_id),showWarnings = F)
 c('age_at_clone_foundation','dynamic_coefficients',
@@ -758,9 +888,9 @@ variation_explained_plot <- r_values_full %>%
   group_by(genes) %>% 
   mutate(G = value[key == "Genetic"]) %>% 
   ggplot(aes(x = reorder(genes,G),y = value,fill = key)) + 
-  geom_bar(stat = "identity",color = "black",position = "dodge") + 
+  geom_bar(stat = "identity",color = "black",size = 0) + 
   theme_gerstung(base_size = 6) + 
-  scale_fill_manual(values = rev(pal_jama()(2)),name = NULL,breaks = c("Genetic","Unknown")) + 
+  scale_fill_manual(values = c("#79AF97FF","#374E55FF"),name = NULL,breaks = c("Genetic","Unknown")) + 
   #rotate_x_text() + 
   xlab("Driver gene") + 
   ylab("") + 
@@ -772,9 +902,7 @@ variation_explained_plot <- r_values_full %>%
         axis.text.y = element_text(face = 'italic'),
         legend.box.margin=margin(0,0,0,0)) +
   scale_x_discrete(expand = c(0,0)) +
-  scale_y_continuous(expand = c(0,0,0.01,0),
-                     limits = c(0,1),
-                     breaks = c(0,0.2,0.4,0.6,0.8,1.0)) +
+  scale_y_continuous(expand = c(0,0,0.01,0)) +
   coord_flip() + 
   guides(fill=guide_legend(nrow=1,byrow=TRUE))
 
@@ -830,6 +958,89 @@ variation_explained_plot <- r_values_full %>%
 ggsave(useDingbats=FALSE,filename = sprintf("figures/%s/statistical_analysis/variation_explained_site.pdf",model_id),
        variation_explained_plot,height = 4,width = 2)
 variation_explained_plot
+```
+
+```{r,fig.height=2,fig.width=2}
+var_exp_agg_plot <- r_values_full %>% 
+  mutate(genes = str_match(genes,"[A-Z0-9]+"),
+         site = str_match(site,"[A-Z0-9]+$")) %>%
+  summarise(Gene = rowSums(cov(data.frame(gene=b_gene*(age-values_model$min_age),
+                                          site=b_site*(age-values_model$min_age),
+                                          clone=b_clone*(age-values_model$min_age)))) %>% (function(x) x[1]),
+            Site = rowSums(cov(data.frame(gene=b_gene*(age-values_model$min_age),
+                                          site=b_site*(age-values_model$min_age),
+                                          clone=b_clone*(age-values_model$min_age)))) %>% (function(x) x[2]),
+            Unknown = rowSums(cov(data.frame(gene=b_gene*(age-values_model$min_age),
+                                             site=b_site*(age-values_model$min_age),
+                                             clone=b_clone*(age-values_model$min_age)))) %>% (function(x) x[3])) %>% 
+  # mutate(Gene = Gene / (Gene + Site + Unknown),
+  #        Site = Site / (Gene + Site + Unknown),
+  #        Unknown = Unknown / (Gene + Site + Unknown)) %>%
+  gather("key" = key,"value") %>% 
+  mutate(key = factor(key,levels = rev(unique(key)))) %>% 
+  mutate(ID = ifelse(key == "Unknown","Unknown","Genetic")) %>% 
+  ggplot(aes(x = ID,y = value,fill = key)) + 
+  geom_bar(stat = "identity",color = "black",size = 0) + 
+  geom_hline(yintercept = 0,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  scale_fill_manual(values = rev(pal_jama()(3)),name = NULL,breaks = c("Gene","Site","Unknown")) + 
+  #rotate_x_text() + 
+  xlab("") + 
+  ylab("Variance explained") + 
+  scale_x_discrete(expand = c(0,0)) +
+  coord_flip() + 
+  scale_y_continuous(expand = c(0,0)) +
+  theme(legend.position = "bottom",
+        legend.margin=margin(0,0,0,0),
+        legend.key.size = unit(0.1,"cm"),
+        legend.box.margin=margin(0,0,0,0)) +
+  guides(fill=guide_legend(nrow=1,byrow=TRUE))
+
+var_exp_agg_rec_plot <- r_values_full %>% 
+  subset(b_site != 0) %>% 
+  mutate(genes = str_match(genes,"[A-Z0-9]+"),
+         site = str_match(site,"[A-Z0-9]+$")) %>%
+  summarise(Gene = rowSums(cov(data.frame(gene=b_gene*(age-values_model$min_age),
+                                          site=b_site*(age-values_model$min_age),
+                                          clone=b_clone*(age-values_model$min_age)))) %>% (function(x) x[1]),
+            Site = rowSums(cov(data.frame(gene=b_gene*(age-values_model$min_age),
+                                          site=b_site*(age-values_model$min_age),
+                                          clone=b_clone*(age-values_model$min_age)))) %>% (function(x) x[2]),
+            Unknown = rowSums(cov(data.frame(gene=b_gene*(age-values_model$min_age),
+                                             site=b_site*(age-values_model$min_age),
+                                             clone=b_clone*(age-values_model$min_age)))) %>% (function(x) x[3])) %>% 
+  # mutate(Gene = Gene / (Gene + Site + Unknown),
+  #        Site = Site / (Gene + Site + Unknown),
+  #        Unknown = Unknown / (Gene + Site + Unknown)) %>%
+  gather("key" = key,"value") %>% 
+  mutate(key = factor(key,levels = rev(unique(key)))) %>% 
+  mutate(ID = ifelse(key == "Unknown","Unknown","Genetic")) %>% 
+  ggplot(aes(x = ID,y = value,fill = key)) + 
+  geom_bar(stat = "identity",color = "black",size = 0) + 
+  geom_hline(yintercept = 0,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  scale_fill_manual(values = rev(pal_jama()(3)),name = NULL,breaks = c("Gene","Site","Unknown")) + 
+  #rotate_x_text() + 
+  xlab("") + 
+  ylab("Variance explained") + 
+  scale_x_discrete(expand = c(0,0)) +
+  coord_flip() + 
+  scale_y_continuous(expand = c(0,0)) +
+  theme(legend.position = "bottom",
+        legend.margin=margin(0,0,0,0),
+        legend.key.size = unit(0.1,"cm"),
+        legend.box.margin=margin(0,0,0,0)) +
+  guides(fill=guide_legend(nrow=1,byrow=TRUE))
+
+plot_grid(
+  var_exp_agg_plot + theme(legend.position = "none") + ggtitle("All sites"),
+  var_exp_agg_rec_plot + theme(legend.position = "none") + ggtitle("Recurrent sites"),
+  get_legend(var_exp_agg_rec_plot + theme(legend.box.spacing = unit(0,"cm"))),
+  rel_heights = c(1,1,0.5),
+  ncol = 1
+) +
+  ggsave(useDingbats=FALSE,filename = sprintf("figures/%s/statistical_analysis/variation_explained_aggregate.pdf",model_id),
+         height = 1,width = 2)
 ```
 
 ### Assessing the goodness of fit with the residual effect
@@ -981,16 +1192,16 @@ r_values_merged %>%
 To better understand this at a higher resolution, by observing the trajectories below we can more finely comprehend what an outlier is in the context of this study, and we can observe how prediction works.
 
 ```{r model_dynamic_visualization,warning=F,fig.width = 4,fig.height = 2.5}
-site_subset <- c("DNMT3Ant-R882H","SF3B1-K700E","JAK2-V617F",
-                 "SF3B1-K666N","SRSF2-P95H","U2AF1-Q157P")
+full_data %>% subset(amino_acid_change == "SF3B1-K666N") %>% select(SardID) %>% distinct()
 site_subset_individuals <- list(
   `DNMT3Ant-R882H` = c(4240,1172,12467),
   `SF3B1-K700E` = c(26841,1905,25209),
-  `SF3B1-K666N` = c(2259,4546,4319),
+  `SF3B1-K666N` = c(2259,3877,4546),
   `JAK2-V617F` = c(11184,3200,2141),
   `SRSF2-P95H` = c(5247,11449,500),
-  `U2AF1-Q157P` = c(2800,12467,40724)
+  `U2AF1-Q157R` = c(3877,10094,30271)
 )
+site_subset <- names(site_subset_individuals)
 
 r_values_merged %>%
   select(-tail_prob_005,-tail_prob_095) %>% 
@@ -1419,7 +1630,7 @@ ggsave(useDingbats=FALSE,plot = gridExtra::grid.arrange(g),
        width = 5.6,height = 2.4) 
 ```
 
-```{r model_f2_full_effects_simplified, fig.width=5.4, fig.height=2.2,warning=F}
+```{r model_f2_full_effects_simplified, fig.width=3, fig.height=2,warning=F}
 label_p95h <- plot_growth_per_year_data %>%
   subset(gene == 'SRSF2') %>%
   mutate(site_name = ifelse(site_name == 'P95H',site_name,NA))
@@ -1486,7 +1697,7 @@ plot_growth_per_year <- gene_intervals %>%
                      guide = F) +
   scale_fill_manual(values = gene_colours,
                     guide = F) +
-  theme(legend.position = c(0.13,0.8),
+  theme(legend.position = c(0.2,0.8),
         legend.background = element_rect(colour = NA,fill = "white"),
         strip.text = element_text(face = "bold.italic"),
         legend.key.height = unit(0,"cm"),
@@ -1544,7 +1755,7 @@ grid.draw(g)
 
 ggsave(useDingbats=FALSE,plot = gridExtra::grid.arrange(g),
        sprintf("figures/%s/dynamic_coefficients/driver_coefficients_simplified.pdf",model_id),
-       width = 3.7,height = 2) 
+       width = 3.2,height = 2) 
 ```
 
 #### Inspecting driver genetic effects
@@ -2078,17 +2289,18 @@ ggplot(Parameters,aes(x = exp(b_genetic_mean + b_clone_mean) * 100 - 100,
   scale_colour_manual(values = c(gene_colours,gene_colours_lighter),
                       guide = F) + 
   ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_vs_driver.pdf",model_id),
-         height = 1.9,width = 1.9)
+         height = 1.7,width = 1.7)
 ```
 
-```{r mutation_independent_per_gene,fig.width=1.9,fig.height=1.6,dpi=300}
+```{r mutation_independent_per_gene,fig.width=1.3,fig.height=2,dpi=300}
 mutation_independent_coefficients <- r_values %>%
   group_by(individual,site,b_clone,genes) %>%
   summarise(age = min(age)) %>% 
   ungroup %>% 
   mutate(genes = str_match(genes,'[A-Z0-9]+'))
 mutation_independent_coefficients %>% 
-  ggplot(aes(x = genes,y = exp(b_clone)*100-100,colour = genes)) + 
+  ggplot(aes(x = factor(genes,levels = rev(gene_order)),
+             y = exp(b_clone)*100-100,colour = genes)) + 
   geom_jitter(alpha = 0.5,width = 0.3,height = 0,size = 0.5) +
   geom_boxplot(outlier.colour = NA,fill = NA,
                colour = "black",size = 0.25) +
@@ -2098,13 +2310,32 @@ mutation_independent_coefficients %>%
   scale_color_manual(values = gene_colours,name = "Gene") + 
   guides(colour=guide_legend(ncol=2,byrow=F)) +
   theme(legend.position = 'none',
-        axis.text.x = element_text(face = 'italic')) +
+        axis.text.y = element_text(face = 'italic'),
+        axis.title.y = element_blank()) +
   scale_y_continuous(breaks = seq(-20,80,by = 10),
                      labels = paste0(seq(-20,80,by = 10),'%'),
                      expand = c(0.05,0,0.0,0)) +
   rotate_x_text() +
+  coord_flip() +
   ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_gene.pdf",model_id),
-         height = 1.6,width = 1.9)
+         height = 1.85,width = 1.3)
+```
+
+```{r mutation_independent_per_gene_distribution,fig.width=1.9,fig.height=1.6,dpi=300}
+mutation_independent_coefficients %>% 
+  ggplot(aes(x = exp(b_clone)*100-100,colour = genes)) + 
+  geom_density(outlier.colour = NA,fill = NA,size = 0.25) +
+  theme_gerstung(base_size = 6) + 
+  xlab("Unknown cause effect") + 
+  ylab("Density") + 
+  scale_color_manual(values = gene_colours,name = "Gene") + 
+  guides(colour=guide_legend(ncol=2,byrow=F)) +
+  theme(legend.position = 'none') +
+  scale_x_continuous(breaks = seq(-20,80,by = 10),
+                     labels = paste0(seq(-20,80,by = 10),'%'),
+                     expand = c(0.05,0,0.0,0)) +
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_gene_density.pdf",model_id),
+         height = 1,width = 1.5)
 ```
 
 ##### Driver effect vs. unknown cause effect at the gene level
@@ -2752,6 +2983,7 @@ Parameters_Age %>%
     Gene = gene,
     CloneID = clone_numeric,
     AgeAtStudyEntry = minAge,
+    maxVAF = maxVAF,
     EstimatedAgeAtOnset_Mean = Mean,
     EstimatedAgeAtOnset_Q05 = Q05,
     EstimatedAgeAtOnset_Q10 = Q10,
@@ -2935,8 +3167,8 @@ estimates_from_samples %>%
   ggplot(aes(x = factor(gene,levels = gene_order),
              y = values,
              fill = gene)) +
-  geom_violin(#scale = "width",
-              size = 0.25) +
+  geom_violin(#scale = "width", 
+              size = 0) +
   geom_tile(aes(y = Threshold,
                 x = gene,
                 width = 0.8,height = 1),
@@ -3047,7 +3279,7 @@ Parameters_Age %>%
   ylab("Age*annual growth") + 
   scale_x_continuous(trans = 'log10') +
   ggsave(useDingbats=FALSE,
-         sprintf("figures/%s/age_at_clone_foundation/size_vs_growth.pdf",model_id),width = 1.3,height = 1.0)
+         sprintf("figures/%s/age_at_clone_foundation/size_vs_growth_exp.pdf",model_id),width = 1.3,height = 1.0)
 ```
 
 #### Assessing the technical determinants of the age at onset
@@ -3782,6 +4014,398 @@ global_picture_out %>%
   ylab("logVAF") +
   ggsave(useDingbats=FALSE,sprintf("figures/%s/inferred_trajectories/fiugre_like_mckerrel2015.pdf",model_id),
          height = 4,width = 5) 
+```
+
+### DNMT3A and TET2
+
+Here we present a systematic comparison of *DNMT3A* and *TET2* clones to better assess whether there is any real difference between them.
+
+```{r,fig.height=2,fig.width=3}
+Parameters_Age_DNMT3A_TET2 <- subset(Parameters_Age,gene %in% c("DNMT3A","TET2"))
+
+Parameters_Age %>%
+  mutate(AgeGroup = cut(maxAge,c(0,60,70,80,90,200),c("<60","60-70","70-80","80-90",">90"))) %>% 
+  group_by(individual) %>%
+  summarise(TET2 = "TET2" %in% gene,
+            DNMT3A = "DNMT3A" %in% gene) %>%
+  summarise(TotalTET2 = sum(TET2),
+            TotalDNMT3A = sum(DNMT3A),
+            TotalBoth = sum(TET2 == T & DNMT3A == T),
+            TotalNone = sum(TET2 == F & DNMT3A == F)) %>%
+  mutate(TotalTET2 = TotalTET2 - TotalBoth,
+         TotalDNMT3A = TotalDNMT3A - TotalBoth) %>% 
+  gather(key = "key",value = "value") %>% 
+  mutate(key = factor(key,levels = c("TotalTET2","TotalDNMT3A","TotalBoth","TotalNone"))) %>% 
+  ggplot(aes(x = "",y = value,fill = key)) + 
+  geom_bar(stat = "identity") + 
+  coord_polar("y",start = 0) + 
+  theme_gerstung(base_size = 6) +
+  theme(axis.line = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank()) +
+  scale_fill_manual(values = c(TotalTET2 = "goldenrod",TotalDNMT3A = "red4",TotalBoth = "orange",TotalNone = "white"),
+                    labels = c("Only TET2","Only DNMT3A","TET2 & DNMT3A",""),
+                    name = NULL) + 
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/prevalence/dnmt3a_vs_tet2_prevalence.pdf",model_id),
+         height = 2,width = 3) 
+```
+
+```{r,fig.height=6,fig.width=3}
+plot_grid(
+  load_data_keep() %>%
+    subset(VAF > 0.005) %>%
+    group_by(SardID) %>% 
+    mutate(Age = max(Age)) %>% 
+    mutate(AgeGroup = cut(Age,c(0,70,80,90,200),c("<70","70-80","80-90",">90"))) %>% 
+    group_by(SardID,AgeGroup) %>%
+    summarise(TET2 = sum(grepl("TET2",unique(AAChange.refGene))),
+              DNMT3A = sum(grepl("DNMT3A",unique(AAChange.refGene))),
+              Total = 1) %>%
+    group_by(AgeGroup) %>% 
+    summarise(TotalTET2 = sum(TET2),
+              TotalDNMT3A = sum(DNMT3A),
+              Total = sum(Total)) %>%
+    gather(key = "key",value = "value",-AgeGroup,-Total) %>%
+    group_by(AgeGroup) %>% 
+    mutate(p05 = qbeta(0.05,value,Total - value),
+           p95 = qbeta(0.95,value,Total - value)) %>% 
+    mutate(key = factor(key, levels = c("TotalDNMT3A","TotalTET2","TotalBoth","TotalNone"),
+                        labels = c("DNMT3A","TET2","DNMT3A+TET2","None"))) %>% 
+    ggplot(aes(x = key,y = value/Total,fill = AgeGroup,group = AgeGroup)) + 
+    geom_bar(stat = "identity",position = position_dodge(width = 0.9)) + 
+    geom_linerange(aes(ymin = p05,ymax = p95),position = position_dodge(width = 0.9)) +
+    theme_gerstung(base_size = 6) + 
+    scale_fill_brewer(name = NULL,palette = 3) + 
+    theme(axis.title.x = element_blank()) + 
+    scale_y_continuous(labels = function(x) return(sprintf("%s%%",x*100)),
+                       expand = c(0,0)) + 
+    ylab("Prevalence") + 
+    ggtitle("Considering all individuals only once\nand all clones"),
+  load_data_keep() %>%
+    subset(VAF > 0.005) %>% 
+    mutate(AgeGroup = cut(Age,c(0,70,80,90,200),c("<70","70-80","80-90",">90"))) %>% 
+    group_by(SardID,AgeGroup) %>%
+    summarise(TET2 = sum(grepl("TET2",unique(AAChange.refGene))),
+              DNMT3A = sum(grepl("DNMT3A",unique(AAChange.refGene))),
+              Total = 1) %>%
+    group_by(AgeGroup) %>% 
+    summarise(TotalTET2 = sum(TET2),
+              TotalDNMT3A = sum(DNMT3A),
+              Total = sum(Total)) %>%
+    gather(key = "key",value = "value",-AgeGroup,-Total) %>%
+    group_by(AgeGroup) %>% 
+    mutate(p05 = qbeta(0.05,value,Total - value),
+           p95 = qbeta(0.95,value,Total - value)) %>% 
+    mutate(key = factor(key, levels = c("TotalDNMT3A","TotalTET2","TotalBoth","TotalNone"),
+                        labels = c("DNMT3A","TET2","DNMT3A+TET2","None"))) %>% 
+    ggplot(aes(x = key,y = value/Total,fill = AgeGroup,group = AgeGroup)) + 
+    geom_bar(stat = "identity",position = position_dodge(width = 0.9)) + 
+    geom_linerange(aes(ymin = p05,ymax = p95),position = position_dodge(width = 0.9)) +
+    theme_gerstung(base_size = 6) + 
+    scale_fill_brewer(name = NULL,palette = 3) + 
+    theme(axis.title.x = element_blank()) + 
+    scale_y_continuous(labels = function(x) return(sprintf("%s%%",x*100)),
+                       expand = c(0,0)) + 
+    ylab("Prevalence") + 
+    ggtitle("Considering all individuals across all timepoints\nand all clones"),
+  load_data_keep() %>%
+    subset(VAF > 0.005) %>% 
+    group_by(SardID) %>% 
+    mutate(Age = max(Age)) %>% 
+    mutate(AgeGroup = cut(Age,c(0,70,80,90,200),c("<70","70-80","80-90",">90"))) %>% 
+    group_by(SardID,AgeGroup) %>%
+    summarise(TET2 = any(grepl("TET2",unique(AAChange.refGene))),
+              DNMT3A = any(grepl("DNMT3A",unique(AAChange.refGene)))) %>%
+    group_by(AgeGroup) %>% 
+    summarise(TotalTET2 = sum(TET2),
+              TotalDNMT3A = sum(DNMT3A),
+              TotalBoth = sum(TET2 == T & DNMT3A == T),
+              TotalNone = sum(TET2 == F & DNMT3A == F)) %>%
+    mutate(TotalTET2 = TotalTET2 - TotalBoth,
+           TotalDNMT3A = TotalDNMT3A - TotalBoth) %>%
+    gather(key = "key",value = "value",-AgeGroup) %>%
+    group_by(AgeGroup) %>% 
+    mutate(Total = sum(value)) %>% 
+    mutate(p05 = qbeta(0.05,value,Total - value),
+           p95 = qbeta(0.95,value,Total - value)) %>% 
+    mutate(key = factor(key, levels = c("TotalDNMT3A","TotalTET2","TotalBoth","TotalNone"),
+                        labels = c("DNMT3A","TET2","DNMT3A+TET2","None"))) %>% 
+    ggplot(aes(x = key,y = value/Total,fill = AgeGroup,group = AgeGroup)) + 
+    geom_bar(stat = "identity",position = position_dodge(width = 0.9)) + 
+    geom_linerange(aes(ymin = p05,ymax = p95),position = position_dodge(width = 0.9)) +
+    theme_gerstung(base_size = 6) + 
+    scale_fill_brewer(name = NULL,palette = 3) + 
+    theme(axis.title.x = element_blank()) + 
+    scale_y_continuous(labels = function(x) return(sprintf("%s%%",x*100)),
+                       expand = c(0,0)) + 
+    ylab("Prevalence") + 
+    ggtitle("Considering all individuals only once\nand without considering more than one clone per individual"),
+  load_data_keep() %>%
+    subset(VAF > 0.005) %>% 
+    mutate(AgeGroup = cut(Age,c(0,70,80,90,200),c("<70","70-80","80-90",">90"))) %>% 
+    group_by(SardID,AgeGroup) %>%
+    summarise(TET2 = any(grepl("TET2",unique(AAChange.refGene))),
+              DNMT3A = any(grepl("DNMT3A",unique(AAChange.refGene)))) %>%
+    group_by(AgeGroup) %>% 
+    summarise(TotalTET2 = sum(TET2),
+              TotalDNMT3A = sum(DNMT3A),
+              TotalBoth = sum(TET2 == T & DNMT3A == T),
+              TotalNone = sum(TET2 == F & DNMT3A == F)) %>%
+    mutate(TotalTET2 = TotalTET2 - TotalBoth,
+           TotalDNMT3A = TotalDNMT3A - TotalBoth) %>%
+    gather(key = "key",value = "value",-AgeGroup) %>%
+    group_by(AgeGroup) %>% 
+    mutate(Total = sum(value)) %>% 
+    mutate(p05 = qbeta(0.05,value,Total - value),
+           p95 = qbeta(0.95,value,Total - value)) %>% 
+    mutate(key = factor(key, levels = c("TotalDNMT3A","TotalTET2","TotalBoth","TotalNone"),
+                        labels = c("DNMT3A","TET2","DNMT3A+TET2","None"))) %>% 
+    ggplot(aes(x = key,y = value/Total,fill = AgeGroup,group = AgeGroup)) + 
+    geom_bar(stat = "identity",position = position_dodge(width = 0.9)) + 
+    geom_linerange(aes(ymin = p05,ymax = p95),position = position_dodge(width = 0.9)) +
+    theme_gerstung(base_size = 6) + 
+    scale_fill_brewer(name = NULL,palette = 3) + 
+    theme(axis.title.x = element_blank()) + 
+    scale_y_continuous(labels = function(x) return(sprintf("%s%%",x*100)),
+                       expand = c(0,0)) + 
+    ylab("Prevalence") + 
+    ggtitle("Considering all individuals across all timepoints\nand without considering more than one clone per individual"),
+  ncol = 1) + 
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/prevalence/dnmt3a_vs_tet2_prevalence.pdf",model_id),
+         height = 6,width = 3)
+```
+
+```{r,fig.height=3,fig.width=4}
+plot_grid(
+  full_data %>%
+    mutate(AgeGroup = cut(Age,c(0,60,70,80,90,200),c("<60","60-70","70-80","80-90",">90"))) %>% 
+    group_by(SardID,AgeGroup) %>%
+    summarise(TET2 = sum(grepl("TET2",unique(amino_acid_change))),
+              DNMT3A = sum(grepl("DNMT3A",unique(amino_acid_change)))) %>%
+    mutate(TET2 = cut(TET2,c(-1,0,1,3,5,20),c("None","1","2-3","4-5","6+"))) %>%
+    mutate(DNMT3A = cut(DNMT3A,c(-1,0,1,3,5,20),c("None","1","2-3","4-5","6+"))) %>%
+    gather(key = "Gene",value = "value",TET2,DNMT3A) %>%
+    group_by(AgeGroup,Gene,value) %>% 
+    summarise(N = length(unique(SardID))) %>%
+    group_by(AgeGroup,Gene) %>%
+    mutate(Total = sum(N)) %>% 
+    mutate(p05 = qbeta(0.05,N,Total - N),
+           p95 = qbeta(0.95,N,Total - N)) %>% 
+    na.omit() %>% 
+    mutate(value = factor(value,levels = c("None","1","2-3","4-5","6+"))) %>% 
+    ggplot(aes(x = AgeGroup,y = N/Total,fill = value,group = value)) + 
+    geom_bar(stat = "identity",position = position_dodge(width = 0.9)) + 
+    geom_linerange(aes(ymin = p05,ymax = p95),position = position_dodge(width = 0.9)) +
+    theme_gerstung(base_size = 6) + 
+    scale_fill_brewer(palette = 5,name = "Number of mutations") + 
+    theme(axis.title.x = element_blank()) + 
+    scale_y_continuous(labels = function(x) return(sprintf("%s%%",x*100)),
+                       expand = c(0,0)) + 
+    ylab("Prevalence") + 
+    facet_wrap(~ Gene) +
+    ggtitle("Considering all individuals across all timepoints"),
+  full_data %>%
+    group_by(SardID) %>% 
+    mutate(Age = max(Age)) %>% 
+    mutate(AgeGroup = cut(Age,c(0,60,70,80,90,200),c("<60","60-70","70-80","80-90",">90"))) %>% 
+    group_by(SardID,AgeGroup) %>%
+    summarise(TET2 = sum(grepl("TET2",unique(amino_acid_change))),
+              DNMT3A = sum(grepl("DNMT3A",unique(amino_acid_change)))) %>%
+    mutate(TET2 = cut(TET2,c(-1,0,1,3,5,20),c("None","1","2-3","4-5","6+"))) %>%
+    mutate(DNMT3A = cut(DNMT3A,c(-1,0,1,3,5,20),c("None","1","2-3","4-5","6+"))) %>%
+    gather(key = "Gene",value = "value",TET2,DNMT3A) %>%
+    group_by(AgeGroup,Gene,value) %>% 
+    summarise(N = length(unique(SardID))) %>%
+    group_by(AgeGroup,Gene) %>%
+    mutate(Total = sum(N)) %>% 
+    mutate(p05 = qbeta(0.05,N,Total - N),
+           p95 = qbeta(0.95,N,Total - N)) %>% 
+    na.omit() %>% 
+    mutate(value = factor(value,levels = c("None","1","2-3","4-5","6+"))) %>% 
+    ggplot(aes(x = AgeGroup,y = N/Total,fill = value,group = value)) + 
+    geom_bar(stat = "identity",position = position_dodge(width = 0.9)) + 
+    geom_linerange(aes(ymin = p05,ymax = p95),position = position_dodge(width = 0.9)) +
+    theme_gerstung(base_size = 6) + 
+    scale_fill_brewer(palette = 5,name = "Number of mutations") + 
+    theme(axis.title.x = element_blank()) + 
+    scale_y_continuous(labels = function(x) return(sprintf("%s%%",x*100)),
+                       expand = c(0,0)) + 
+    ylab("Prevalence") + 
+    facet_wrap(~ Gene) +
+    ggtitle("Considering all individuals only once"),
+  ncol = 1) +
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/prevalence/dnmt3a_vs_tet2_prevalence_n_mutations.pdf",model_id),
+         height = 3,width = 4) 
+```
+
+```{r,fig.height=1.2,fig.width=3}
+Parameters_Age %>%
+  group_by(individual) %>%
+  filter(length(unique(site)) > 1) %>% 
+  summarise(TET2IsFastest = any((b_clone_mean + b_genetic_mean)[gene == "TET2"]==max(b_clone_mean + b_genetic_mean)),
+            DNMT3AIsFastest = any((b_clone_mean + b_genetic_mean)[gene == "DNMT3A"]==max(b_clone_mean + b_genetic_mean)),
+            TET2 = "TET2" %in% gene,
+            DNMT3A = "DNMT3A" %in% gene) %>%
+  #filter(TET2 == T | DNMT3A == T) %>% 
+  group_by(TET2,DNMT3A) %>%
+  summarise(TET2Fastest = sum(TET2IsFastest),
+            DNMT3AFastest = sum(DNMT3AIsFastest),
+            N = length(TET2IsFastest)) %>%
+  mutate(Other = N - TET2Fastest - DNMT3AFastest) %>% 
+  rowwise() %>%
+  mutate(label = paste(c("TET2","DNMT3A")[c(TET2,DNMT3A)],collapse = " & ")) %>%
+  mutate(label = ifelse(label == "","None",label)) %>%
+  mutate(label = factor(label,rev(c("TET2","DNMT3A","TET2 & DNMT3A","None")))) %>% 
+  gather(key = "key",value = "value",TET2Fastest,DNMT3AFastest,Other) %>% 
+  mutate(key = factor(key,levels = c("TET2Fastest","DNMT3AFastest","Other"),
+                      labels = c("TET2","DNMT3A","Other"))) %>% 
+  ggplot(aes(x = label,y = value,fill = key)) + 
+  geom_bar(stat = "identity") + 
+  coord_flip() + 
+  theme_gerstung(base_size = 6) +
+  theme(legend.position = "bottom",legend.key.size = unit(0.2,"cm")) + 
+  scale_fill_aaas(name = "Fastest clone") + 
+  scale_y_continuous(expand = c(0,0)) + 
+  ylab("Number of individuals\nwith two or more mutations") + 
+  xlab("") +
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/dnmt3a_vs_tet2_fastest.pdf",model_id),
+         height = 1.2,width = 3) 
+```
+
+```{r,fig.height=3,fig.width=6}
+plot_grid(
+  Parameters_Age_DNMT3A_TET2 %>%
+    ggplot(aes(x = maxAge,y = maxVAF,colour = gene)) +
+    geom_point(size = 0.5) + 
+    scale_y_continuous(trans = 'log10') + 
+    scale_color_manual(values = gene_colours) + 
+    theme_gerstung(base_size = 6) + 
+    theme(legend.position = "none") + 
+    xlab("Age") + 
+    ylab("Maximum VAF"),
+  Parameters_Age_DNMT3A_TET2 %>%
+    ggplot(aes(x = maxVAF,y = (b_genetic_mean + b_clone_mean)*maxAge,colour = gene)) +
+    geom_point(size = 0.5) + 
+    scale_x_continuous(trans = 'log10') +
+    scale_color_manual(values = gene_colours) + 
+    theme_gerstung(base_size = 6) + 
+    theme(legend.position = "none") + 
+    xlab("Maximum VAF") + 
+    ylab("Age * Growth rate"),
+  Parameters_Age_DNMT3A_TET2 %>%
+    ggplot(aes(x = maxVAF,y = b_genetic_mean + b_clone_mean,colour = gene)) +
+    geom_point(size = 0.5) + 
+    geom_smooth(size = 0.25,method = "lm") +
+    scale_color_manual(values = gene_colours) + 
+    theme_gerstung(base_size = 6) + 
+    theme(legend.position = "none") + 
+    scale_x_continuous(trans = 'log10') + 
+    xlab("Maximum VAF") + 
+    ylab("Growth rate"),
+  Parameters_Age_DNMT3A_TET2 %>%
+    ggplot(aes(x = maxVAF,y = b_clone_mean,colour = gene)) +
+    geom_point(size = 0.5) + 
+    geom_smooth(size = 0.25,method = "lm") +
+    scale_color_manual(values = gene_colours) + 
+    theme_gerstung(base_size = 6) + 
+    theme(legend.position = "none") + 
+    scale_x_continuous(trans = 'log10') + 
+    xlab("Maximum VAF") + 
+    ylab("Unknown cause effect"),
+  Parameters_Age_DNMT3A_TET2 %>%
+    ggplot(aes(x = maxVAF,y = b_genetic_mean,colour = gene)) +
+    geom_point(size = 0.5) + 
+    geom_smooth(size = 0.25,method = "lm") +
+    scale_color_manual(values = gene_colours) + 
+    theme_gerstung(base_size = 6) + 
+    theme(legend.position = "none") + 
+    scale_x_continuous(trans = 'log10') + 
+    xlab("Maximum VAF") + 
+    ylab("Genetic effect"),
+  plot_grid(
+    Parameters_Age_DNMT3A_TET2 %>%
+      ggplot(aes(x = gene,y = maxVAF,fill = gene)) +
+      geom_boxplot(size = 0.5) + 
+      scale_y_continuous(trans = 'log10') + 
+      scale_fill_manual(values = gene_colours) + 
+      theme_gerstung(base_size = 6) + 
+      theme(legend.position = "none") + 
+      xlab("Gene") + 
+      ylab("Maximum VAF") + 
+      theme(axis.text.x = element_text(face = "italic")),
+    Parameters_Age_DNMT3A_TET2 %>%
+      ggplot(aes(x = gene,y = b_genetic_mean + b_clone_mean,fill = gene)) +
+      geom_boxplot(size = 0.5) + 
+      scale_fill_manual(values = gene_colours) + 
+      theme_gerstung(base_size = 6) + 
+      theme(legend.position = "none") + 
+      xlab("Gene") + 
+      ylab("Growth rate") + 
+      theme(axis.text.x = element_text(face = "italic")),
+    nrow = 1),
+  nrow = 2
+) + 
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/dnmt3a_vs_tet2_size_growth.pdf",model_id),
+         height = 3,width = 6) 
+
+glm(log(maxVAF) ~ b_genetic_mean + b_clone_mean + gene + maxAge,data = Parameters_Age_DNMT3A_TET2) %>%
+  summary()
+
+cor.test(Parameters_Age_DNMT3A_TET2$maxVAF,Parameters_Age_DNMT3A_TET2$b_clone_mean,method = "kendall")
+```
+
+```{r,fig.height=1.5,fig.width=4}
+plot_grid(
+  full_data %>%
+    subset(grepl("DNMT3A|TET2",Gene)) %>% 
+    mutate(Gene = str_match(Gene,"[A-Z0-9]+")) %>%
+    group_by(Gene) %>% 
+    summarise(N = length(unique(SardID))) %>%
+    ggplot(aes(x = Gene,y = N,fill = Gene)) +
+    geom_bar(stat = "identity") + 
+    scale_fill_manual(values = gene_colours) + 
+    scale_y_continuous(expand = c(0,0)) +
+    theme_gerstung(base_size = 6) + 
+    theme(legend.position = "none") + 
+    xlab("Gene") + 
+    ylab("Age") + 
+    theme(axis.text.x = element_text(face = "italic")),
+  full_data %>%
+    subset(grepl("DNMT3A|TET2",Gene)) %>% 
+    mutate(Gene = str_match(Gene,"[A-Z0-9]+")) %>%
+    group_by(SardID,Gene) %>% 
+    summarise(Age = min(Age[VAF > 0.005])) %>%
+    ggplot(aes(x = Gene,y = Age,fill = Gene)) +
+    geom_boxplot(size = 0.5,outlier.size = 0.25) + 
+    scale_fill_manual(values = gene_colours) + 
+    theme_gerstung(base_size = 6) + 
+    theme(legend.position = "none") + 
+    xlab("Gene") + 
+    ylab("Age") + 
+    theme(axis.text.x = element_text(face = "italic")),
+  Parameters_Age_DNMT3A_TET2 %>%
+    ggplot(aes(x = gene,y = maxVAF,fill = gene)) +
+    geom_boxplot(size = 0.5,outlier.size = 0.25) + 
+    scale_y_continuous(trans = 'log10') + 
+    scale_fill_manual(values = gene_colours) + 
+    theme_gerstung(base_size = 6) + 
+    theme(legend.position = "none") + 
+    xlab("Gene") + 
+    ylab("Maximum VAF") + 
+    theme(axis.text.x = element_text(face = "italic")),
+  Parameters_Age_DNMT3A_TET2 %>%
+    ggplot(aes(x = gene,y = b_genetic_mean + b_clone_mean,fill = gene)) +
+    geom_boxplot(size = 0.5,outlier.size = 0.25) + 
+    scale_fill_manual(values = gene_colours) + 
+    theme_gerstung(base_size = 6) + 
+    theme(legend.position = "none") + 
+    xlab("Gene") + 
+    ylab("Growth rate") + 
+    theme(axis.text.x = element_text(face = "italic")),
+  nrow = 1) + 
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/dnmt3a_vs_tet2_summary.pdf",model_id),
+         height = 1.5,width = 4) 
 ```
 
 ## Statistical analysis 
@@ -4658,13 +5282,34 @@ lm(formula = lm_formula,data = jak2_genotype_and_effect) %>%
   summary
 ```
 
-## Is the U2AF1 prevalence in blood cells we observe in our cohort normal or explained by the old age?
+## Is the U2AF1 and SRSF2 prevalence we observe in our cohort normal or explained by the old age?
 
-To assess this we need to get the prevalence of U2AF1 in blood cells, which we obtain by marginalising over AML, CMML, MDS and CH.
+```{r}
+n_sites <- Parameters_Age %>% 
+  subset(site == "SRSF2-P95H" | gene == "U2AF1") %>%
+  subset(sum_stat == T) %>%
+  mutate(gene = ifelse(gene == "SRSF2","SRSF2-P95H",gene)) %>% 
+  group_by(gene) %>%
+  summarise(N = length(unique(individual)))
+
+n_muts_uniform <- estimates_from_samples %>% 
+  subset(gene %in% c("SRSF2-P95H","U2AF1")) %>% 
+  subset(!is.na(values)) %>%
+  group_by(gene) %>%
+  summarise(Q025 = quantile(values,0.025),
+            Q975 = quantile(values,0.975)) %>%
+  merge(n_sites,by = "gene") %>%
+  mutate(rate = N / (Q975 - Q025)) %>%
+  mutate(over_70_years = rate * 70)
+```
+
+### *U2AF1*
+
+To assess this we need to get the prevalence of U2AF1 of myeloid origin, which we obtain by marginalising over AML, CMML, MDS and CH.
 
 The incidence of U2AF1 mutations in our cohort is quite higher than what would be expected in a sample of individuals over 70. As such, we can, to some extent, validate our findings regarding the late appearance of most U2AF1 clones.
 
-```{r checking_U2AF1_prevalence}
+```{r checking_U2AF1_prevalence,fig.height=1,fig.width=3}
 u2af1_CH_list <- list(
   "Jaiswal 2014" = c(n_mutations = 0,ch_individuals = 805,
                      total_individuals = 17182),
@@ -4682,8 +5327,8 @@ u2af1_CH_list <- list(
                    total_individuals = 20),
   "Young 2019" = c(n_mutations = 1,ch_individuals = 63,
                    total_individuals = 69), # 3 more U2AF1 mutations in AML
-  "Desai 2018" = c(n_mutations = 0,ch_individuals = 56,
-                   total_individuals = 181), # 6 U2AF1 mutations in MAL
+  # "Desai 2018" = c(n_mutations = 0,ch_individuals = 56,
+  #                  total_individuals = 181), # 6 U2AF1 mutations in MAL
   "Midic 2020" = c(n_mutations = 1,ch_individuals = 13,
                    total_individuals = 50)
 )
@@ -4700,11 +5345,298 @@ p_aml <- 19.8 / 1e5
 # marginalise P(U2AF1)
 o <- p_u2af1_c_ch * p_ch + p_u2af1_c_mds * p_mds + p_u2af1_c_aml * p_aml + p_u2af1_c_cml * p_cmml
 
-load_data() %>% 
+S_u2af1 <- load_data() %>% 
   select(Gene,SardID) %>% 
   distinct %>% 
-  summarise(`U2AF1 incidence in our cohort` = length(unique(SardID[Gene == 'U2AF1'])) / length(unique(SardID)),
-            `Expected U2AF1 mutation of myeloid origin incidence` = o) 
+  summarise(`U2AF1 in our cohort` = length(unique(SardID[Gene == 'U2AF1'])) / length(unique(SardID)),
+            `U2AF1 mutation in CH (other studies)` = p_u2af1_c_ch,
+            `U2AF1 mutation in MDS` = p_u2af1_c_mds,
+            `U2AF1 mutation in CML` = p_u2af1_c_cml,
+            `U2AF1 mutation in AML` = p_u2af1_c_aml,
+            `U2AF1 mutation of myeloid origin` = o,
+            `U2AF1 in our cohort at constant mutation rate` = n_muts_uniform$over_70_years[2] / length(unique(SardID))) %>%
+  gather(key = "Condition",value = "Expected prevalence") %>%
+  mutate(Condition = factor(
+    Condition,
+    levels = c("U2AF1 in our cohort at constant mutation rate",
+               "U2AF1 in our cohort","U2AF1 mutation of myeloid origin",
+               "U2AF1 mutation in CH (other studies)","U2AF1 mutation in MDS",
+               "U2AF1 mutation in CML","U2AF1 mutation in AML")))
+
+S_u2af1
+
+S_u2af1 %>%
+  ggplot(aes(x = Condition,y = `Expected prevalence`)) +
+  geom_bar(stat = "identity",fill = gene_colours[["U2AF1"]]) + 
+  coord_flip() + 
+  theme_gerstung(base_size = 6) + 
+  geom_text(aes(label = sprintf("%s%%",round(`Expected prevalence`*100,2))),
+            size = 2.6,hjust = -0.1) +
+  xlab("") +
+  scale_y_continuous(expand = c(0,0,0.4,0),
+                     labels = function(x) sprintf("%s%%",x*100)) + 
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/prevalence/u2af1.pdf",model_id),
+         height = 1,width = 3)
+```
+
+### *SRSF2*-P95H
+
+To assess this we need to get the prevalence of SRSF2-P95H in blood cells, which we obtain by marginalising over AML, CMML, MDS and CH.
+
+In Genovese *et al.*, 3 individuals with SRSF2-P95H CH contracted some form of myeloid malignancy upon follow-up (ages: 73, 71, 85), one of which died of leukaemia ~2 years later (age: 85).
+
+In Desai *et al.*, 13 individuals with SRSF2-P95H CH contracted AML upon follow-up. No individuals which did not develop AML had SRSF2-P95H mutations.
+
+The incidence of SRSF2-P95H mutations in our cohort, much like that of U2AF1 mutations, is quite higher than what would be expected in a sample of individuals over 70. As such, we can, to some extent, validate our findings regarding the late appearance of most SRSF2-P95H clones.
+
+```{r checking_SRSF2_P95H_prevalence,fig.height=1,fig.width=3}
+srsf2_p95h_CH_list <- list(
+  "Jaiswal 2014" = c(n_mutations = 4,ch_individuals = 805,
+                     total_individuals = 17182),
+  "Genovese 2014" = c(n_mutations = 2,ch_individuals = 2113,
+                      total_individuals = 11845), 
+  "McKerrell 2015" = c(n_mutations = 5,ch_individuals = 105,
+                       total_individuals = 4219),
+  "Zink 2017" = c(n_mutations = 2, ch_individuals = 1403,
+                  total_individuals = 11262),
+  "Acuna-Hidalgo 2017" = c(n_mutations = 1, ch_individuals = 192,
+                           total_individuals = 2007),
+  "Young 2016" = c(n_mutations = NA,ch_individuals = 19,
+                   total_individuals = 20),
+  "Young 2019" = c(n_mutations = 1,ch_individuals = 63,
+                   total_individuals = 69), 
+  # "Desai 2018" = c(n_mutations = 0,ch_individuals = 56,
+  #                  total_individuals = 181),
+  "Midic 2020" = c(n_mutations = 0,ch_individuals = 13,
+                   total_individuals = 50))
+
+srsf2_p95h_CH_ages <- rbind(
+  data.frame(ages = rep(NA,4),
+             study = "Jaiswal 2014",
+             average_age = 57),
+  data.frame(ages = rep(NA,2),
+             study = "Genovese 2014",
+             average_age = 55),
+  data.frame(ages = c(73,77,80,82,88),
+             study = "McKerrell 2015",
+             average_age = NA),
+  data.frame(ages = c(68,70),
+             study = "Zink 2017",
+             average_age = NA),
+  data.frame(ages = c(65),
+             study = "Acuna-Hidalgo 2017",
+             average_age = NA),
+  data.frame(ages = c(NA),
+             study = "Young 2016",
+             average_age = NA),
+  data.frame(ages = c(NA),
+             study = "Young 2019",
+             average_age = 75),
+  data.frame(ages = c(NA),
+             study = "Desai 2018",
+             average_age = NA),
+  data.frame(ages = c(NA),
+             study = "Midic 2020",
+             average_age = NA)
+)
+
+p_srsf2_p95h_c_ch <- sum(sapply(srsf2_p95h_CH_list,function(x) x[1]),na.rm = T) / sum(sapply(srsf2_p95h_CH_list,function(x) x[2]))
+p_srsf2_p95h_c_mds <- 11.5/100 # Jafari 2018 (for SRSF2 mutations)
+p_srsf2_p95h_c_cml <- 39.8/100 # Jafari 2018 (for SRSF2 mutations)
+p_srsf2_p95h_c_aml <- 69/1119 # Bamopoulos 2020
+p_srsf2_p95h_c_aml <- 10/100 # Bamopoulos 2020 (SRSF2 mutations)
+p_ch <- sum(sapply(srsf2_p95h_CH_list,function(x) x[2]),na.rm = T) / sum(sapply(srsf2_p95h_CH_list,function(x) x[3]))
+p_mds <- 0.0002
+p_cmml <- 0.34 / 1e5
+p_aml <- 19.8 / 1e5
+
+# marginalise P(SRSF2_p95h)
+o <- p_srsf2_p95h_c_ch * p_ch + p_srsf2_p95h_c_mds * p_mds + p_srsf2_p95h_c_aml * p_aml + p_srsf2_p95h_c_cml * p_cmml
+
+S <- load_data() %>% 
+  select(Gene,SardID,amino_acid_change) %>% 
+  distinct %>% 
+  summarise(`SRSF2-P95H in our cohort` = length(unique(SardID[amino_acid_change == 'SRSF2-P95H'])) / length(unique(SardID)),
+            `SRSF2-P95H mutation in CH (other studies)` = p_srsf2_p95h_c_ch,
+            `SRSF2 mutation in MDS` = p_srsf2_p95h_c_mds,
+            `SRSF2 mutation in CMML` = p_srsf2_p95h_c_cml,
+            `SRSF2 mutation in AML` = p_srsf2_p95h_c_aml,
+            `SRSF2-P95H mutation of myeloid origin` = o,
+            `SRSF2-P95H in our cohort at constant mutation rate` = n_muts_uniform$over_70_years[1] / length(unique(SardID))) %>%
+  gather(key = "Condition",value = "Expected prevalence") %>%
+  mutate(Condition = factor(
+    Condition,
+    levels = c("SRSF2-P95H in our cohort at constant mutation rate",
+               "SRSF2-P95H in our cohort","SRSF2-P95H mutation of myeloid origin",
+               "SRSF2-P95H mutation in CH (other studies)","SRSF2 mutation in MDS",
+               "SRSF2 mutation in CMML","SRSF2 mutation in AML")))
+
+S
+```
+
+### Figure for *U2AF1* and *SRSF2*-P95H
+
+```{r,fig.height=2,fig.width=4}
+plot_grid(
+  S %>% 
+    ggplot(aes(x = Condition,y = `Expected prevalence`)) +
+    geom_bar(stat = "identity",fill = gene_colours[["SRSF2"]]) + 
+    coord_flip() + 
+    theme_gerstung(base_size = 6) + 
+    geom_text(aes(label = sprintf("%s%%",round(`Expected prevalence`*100,2))),
+              size = 2.6,hjust = -0.1) +
+    xlab("") +
+    scale_y_continuous(expand = c(0,0,0.25,0),
+                       labels = function(x) sprintf("%s%%",x*100)),
+  S_u2af1 %>% 
+    ggplot(aes(x = Condition,y = `Expected prevalence`)) +
+    geom_bar(stat = "identity",fill = gene_colours[["U2AF1"]]) + 
+    coord_flip() + 
+    theme_gerstung(base_size = 6) + 
+    geom_text(aes(label = sprintf("%s%%",round(`Expected prevalence`*100,2))),
+              size = 2.6,hjust = -0.1) +
+    xlab("") +
+    scale_y_continuous(expand = c(0,0,0.25,0),
+                       labels = function(x) sprintf("%s%%",x*100)),
+  align = "v",
+  ncol = 1) + 
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/prevalence/u2af1_srsf2.pdf",model_id),
+         height = 2,width = 4)
+```
+
+### Considering age
+
+The problem with the previous analysis is that we do not account for the dependence that prevalence has on age. As such, in this next code block we simply calculate what the prevalence of leukaemia and AML would be after 60 years of age and compare it with the prevalence of *U2AF1* and *SRSF2*-P95H - this gives us a maximum (yet unlikely) prevalence possible for *U2AF1* and *SRSF2-P95H* mutations in blood cells.
+
+This analysis shows that even if all the leukaemias were characterised by mutations in either *SRSF2*-P95H or *U2AF1* we would never see a prevalence this high for either driver, implying that the main cause for this high prevalence is age rather than myeloid disease and that the reason why we observe it not connected with other cases of mutations in these drivers being flagged as leukaemia.
+
+```{r}
+aml_incidence <- read_csv("data/aml_incidence.csv",progress = F)[1:12,] %>%
+  summarise(prevalence_after_60 = sum(female_incidence + male_incidence)/100000)
+
+leukaemia_incidence <- read_csv("data/leukaemia_incidence.csv",progress = F)[1:12,] %>%
+  summarise(prevalence_after_60 = sum(female_incidence + male_incidence)/100000)
+
+data.frame(`Prevalence` = c(round(100*S_u2af1[c(1,7),2],2),
+                            round(100*S[c(1,7),2],2),
+                            100*aml_incidence$prevalence_after_60,100*leukaemia_incidence$prevalence_after_60) %>%
+             sprintf(fmt = "%s%%"),
+           id = c("U2AF1 in our cohort",
+                  "U2AF1 in our cohort at constant mutation rate",
+                  "SRSF2-P95H in our cohort",
+                  "SRSF2-P95H in our cohort at constant mutation rate",
+                  "AML incidence (at 60yo)",
+                  "All leukaemia incidence (at 60yo)"))
+```
+
+## Is growth rate associated with dNdS in AML and MDS?
+
+```{r,fig.height=1.5,fig.width=2.5}
+all_samples <- sampling_idxs %>%
+  group_by(site) %>%
+  mutate(re = length(unique(individual)) > 1) %>%
+  subset(re == T) %>% 
+  subset(sum_stat == T) %>%
+  apply(1,function(x) {
+    site_numeric <- as.numeric(x[3])
+    gene_numeric <- as.numeric(x[4])
+    clone_numeric <- as.numeric(x[5])
+    site <- x[2]
+    S <- grab_samples(site_numeric,gene_numeric,clone_numeric,2500)
+    return(data.frame(samples = S$site + S$clone + S$gene,site = site))
+  }) %>%
+  do.call(what = rbind) %>%
+  mutate(gene = str_match(site,"[A-Z0-9]+"),
+         aachange = gsub("-","",str_match(site,"-.+"))) %>%
+  mutate(site = paste(gene,aachange,sep = "-")) %>% 
+  group_by(site) %>%
+  summarise(mean = mean(samples),
+            s = sd(samples,0.025))
+
+dnds <- read.csv("data/dnds_aml_mds.csv") %>%
+  mutate(site = paste(gene,gsub("\\*","X",aachange),sep = "-"))
+
+dd <- all_samples %>% 
+  merge(dnds,by = "site",all = F) %>% 
+  as.data.frame
+
+dd %>% 
+  ggplot(aes(y = dnds,x = exp(mean)-1,colour = gene,shape = condition)) + 
+  geom_point(size = 1) + 
+  geom_errorbarh(aes(xmin = exp(mean-s*1.96)-1,xmax = exp(mean+s*1.96)-1),size = 0.1) + 
+  geom_linerange(aes(ymin = CI_low,ymax = CI_high),size = 0.1) + 
+  geom_smooth(method = "lm",colour = "black",alpha = 0.2,size = 0.5) + 
+  scale_colour_manual(values = gene_colours,guide = F) + 
+  ylab("dN/dS") +
+  xlab("Annual driver growth rate in CH") +
+  scale_x_continuous(labels = function(x) sprintf("%s%%",x*100)) + 
+  scale_y_continuous(trans = 'log10') + 
+  theme_gerstung(base_size = 6) +
+  #coord_cartesian(ylim = c(NA,0.5)) +
+  ggsave(useDingbats=FALSE,
+         filename = sprintf("figures/%s/dynamic_coefficients/dnds_association.pdf",model_id),
+         width = 3.5,height = 2)
+
+lm(formula = dnds ~ mean,data = dd) %>%
+  summary
+
+lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "AML") %>%
+  summary
+
+lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "MDS") %>%
+  summary
+
+lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "AML" & dd$gene == "DNMT3A") %>%
+  summary
+
+lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "MDS" & dd$gene == "DNMT3A") %>%
+  summary
+
+lm(formula = dnds ~ mean + condition,data = dd) %>%
+  summary
+```
+
+## Is growth rate associated with AML risk?
+
+```{r,fig.height=1.5,fig.width=2.5}
+all_samples <- sampling_idxs %>%
+  apply(1,function(x) {
+    site_numeric <- as.numeric(x[3])
+    gene_numeric <- as.numeric(x[4])
+    clone_numeric <- as.numeric(x[5])
+    site <- x[2]
+    S <- grab_samples(site_numeric,gene_numeric,clone_numeric,2500)
+    return(data.frame(samples = S$site + S$clone + S$gene,site = site))
+  }) %>%
+  do.call(what = rbind) %>%
+  mutate(gene = str_match(site,"[A-Z0-9]+")) %>%
+  group_by(gene) %>%
+  summarise(mean = mean(samples),
+            s = sd(samples,0.025))
+
+dd <- all_samples %>% 
+  merge(read.csv("data/aml-risk-coef.csv"),by = "gene",all = F) %>% 
+  as.data.frame
+
+dd %>% 
+  ggplot(aes(y = coef,x = exp(mean)-1,colour = gene)) + 
+  geom_point(size = 1) + 
+  geom_errorbarh(aes(xmin = exp(mean-s*1.96)-1,xmax = exp(mean+s*1.96)-1),size = 0.1) + 
+  geom_linerange(aes(ymin = coef - sd*1.96,ymax = coef + sd*1.96),size = 0.1) + 
+  geom_smooth(method = "lm",colour = "black",alpha = 0.2,size = 0.5) + 
+  scale_colour_manual(values = gene_colours,guide = F) + 
+  xlab("Annual driver growth rate in CH") +
+  ylab("AML risk") +
+  scale_x_continuous(labels = function(x) sprintf("%s%%",x*100)) + 
+  theme_gerstung(base_size = 6) +
+  coord_cartesian(xlim = c(NA,0.5)) +
+  ggsave(useDingbats=FALSE,
+         filename = sprintf("figures/%s/dynamic_coefficients/aml_risk.pdf",model_id),
+         width = 3.5,height = 2)
+
+j <- cor.test(dd$mean,dd$coef)
+
+sprintf("R^2 = %s (p-value = %s)",round(j$estimate^2,4),round(j$p.value,4))
 ```
 
 # Session details

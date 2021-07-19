@@ -70,6 +70,7 @@ good_sites_individual <- statistics_data %>%
 ```{r calculate_historical_estimates}
 historical_estimates <- sampling_idxs %>%
   apply(1,function(x) {
+    individual <- x[1]
     site_numeric <- as.numeric(x[3])
     gene_numeric <- as.numeric(x[4])
     clone_numeric <- as.numeric(x[5])
@@ -91,8 +92,7 @@ historical_estimates <- sampling_idxs %>%
     Q <- quantile(historical_b,c(0.05,0.5,0.95),na.rm = T)
     Q_observed <- quantile(b,c(0.05,0.5,0.95),na.rm = T)
     names(Q) <- c("Q05","Q50","Q95")
-    return(data.frame(individual=x[1],
-                      site=x[2],
+    return(data.frame(
                       ages_Q50 = quantile(ages_at_onset_corrected,0.5,na.rm = T)[1],
                       observed_growth_q05=Q_observed[1],
                       observed_growth_q50=Q_observed[2],
@@ -101,15 +101,30 @@ historical_estimates <- sampling_idxs %>%
                       historical_growth_q05=Q[1],
                       historical_growth_q50=Q[2],
                       historical_growth_q95=Q[3],
-                      historical_growth_mean=mean(historical_b,na.rm=T),
-                      min_age=minAge))
+                      historical_growth_mean=mean(historical_b,na.rm=T)))
   }) %>%
-  do.call(what=rbind)
+  do.call(what=rbind) 
+historical_estimates <- cbind(
+  as.data.frame(sampling_idxs),as.data.frame(historical_estimates))
 historical_estimates$gene <- str_match(historical_estimates$site,"[A-Z0-9]+")
 historical_estimates <- historical_estimates %>%
-  filter(paste(individual,site) %in% paste(good_sites_individual$individual,good_sites_individual$site))
+  filter(
+    paste(individual,as.character(site)) %in% paste(
+      good_sites_individual$individual,good_sites_individual$site))
+historical_estimates %>%
+  select(SardID = individual,
+         Site = site,
+         Gene = gene,
+         ObservedGrowthQ05 = observed_growth_q05,
+         ObservedGrowthQ50 = observed_growth_q50,
+         ObservedGrowthQ95 = observed_growth_q95,
+         ObservedGrowthMean = observed_growth_mean,
+         HistoricalGrowthQ05 = historical_growth_q05,
+         HistoricalGrowthQ50 = historical_growth_q50,
+         HistoricalGrowthQ95 = historical_growth_q95,
+         HistoricalGrowthMean = historical_growth_mean) %>% 
+  write.csv("data_output/historical_growth.csv")
 ```
-
 
 ```{r,fig.height=0.65,fig.width=1.4}
 idxs <- sampling_idxs %>% 
@@ -441,6 +456,11 @@ growth_per_year_gene_plot <- growth_per_year_gene_plot_data %>%
              colour = str_match(gene,"[A-Z0-9]+"))) +  
   geom_linerange(aes(ymin = average_observed_growth,ymax = average_historical_growth),
                  colour = "black") + 
+  geom_text(aes(y = average_historical_growth,
+                label = sprintf("%s%%",100*round(average_observed_growth/average_historical_growth,3))),
+            colour = "black",
+            size = 2.7,
+            hjust = -0.2) + 
   geom_point(aes(y = average_observed_growth),size = 1) + 
   geom_point(aes(y = average_historical_growth),size = 1) + 
   geom_point(aes(y = average_historical_growth),size = 0.5,colour = 'white') + 
@@ -489,7 +509,8 @@ tree_coefficients <- read.csv("data_output/tree_bnpr_coefficients.csv") %>%
   mutate(source = "Fabre et al. 2021") %>%
   mutate(colour = str_match(clade,"[A-Z0-9]+")) %>%
   mutate(colour = ifelse(grepl("UD",colour),"No known driver",colour))
-simulation_coefficients_full <- read.csv("data_output/simulated_bnpr_coefficients.csv")
+simulation_coefficients_full <- read.csv("data_output/simulated_bnpr_coefficients.csv") %>%
+  subset(w_sum < 5)
   
 simulation_coefficients <-  simulation_coefficients_full %>% 
   subset(col == "Low variance") %>% 
@@ -551,8 +572,8 @@ all_bnpr_coefficients %>%
                                  `Other driver` = "#18A558",
                                  `No known driver` = "grey50"),guide = F) + 
   coord_flip(ylim = c(NA,NA)) + 
-  scale_y_continuous(breaks = c(-1,0,0.5,1,2),
-                     labels = c("<-1","0","0.5","1","2")) +
+  scale_y_continuous(breaks = c(-1,0,0.5,seq(1,10)),
+                     labels = c("<-1","0","0.5",seq(1,10))) +
   theme(legend.position = "top",
         legend.key.size = unit(0,"cm"),legend.box.spacing = unit(0.1,"cm")) +
   guides(shape = guide_legend(nrow = 2)) +
@@ -719,16 +740,36 @@ tmp <- historical_estimates %>%
 anvar_test <- anova(glm(ratio_q50 ~ f,data = tmp),
                     test = "F")
 tmp %>%
+  mutate(ratio_q50 = ifelse(ratio_q50 < -1,-1,ratio_q50)) %>%
   ggplot(aes(x = f,y = ratio_q50)) + 
   geom_boxplot(outlier.size = 0.5,size = 0.25) + 
-  ylab("Ratio of historical and observed annual fold change") + 
+  ylab("Historical and observed annual fold change") + 
   xlab("") +
   theme_gerstung(base_size = 6) + 
-  coord_flip() + 
-  scale_y_continuous() +
+  coord_flip(ylim = c(-1,NA)) + 
+  scale_y_continuous(breaks = c(-1,0,0.5,1),labels = c("<-1",0,0.5,1)) +
   ggsave(useDingbats=FALSE,sprintf("figures/%s/other_associations/uc_tnt_rec.pdf",model_id),
          height = 1.2,width = 2.0) 
 anvar_test
+```
+
+```{r historical_recurrence_truncation_dnmt3a_hs,fig.width=2.5,fig.height=1}
+tmp_dnmt3a <- tmp %>%
+  subset(gene == "DNMT3A") %>%
+  mutate(f = ifelse(grepl("Recurring",f),"Hot-spot","Normal mutation"))
+
+wilcox.test(ratio_q50 ~ f, data = tmp_dnmt3a)
+
+tmp_dnmt3a %>%
+  ggplot(aes(x = f,y = ratio_q50)) + 
+  geom_boxplot(outlier.size = 0.5,size = 0.25) + 
+  ylab("Observed vs. historical annual fold change") + 
+  xlab("") +
+  theme_gerstung(base_size = 6) + 
+  coord_flip(ylim = c(-1,NA)) + 
+  scale_y_continuous() +
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/other_associations/uc_tnt_rec_dnmt3a.pdf",model_id),
+         height = 1.2,width = 2.5) 
 ```
 
 ### Association with gender and smoking
@@ -747,6 +788,7 @@ historical_estimates_gender_smoking <- merge(
   by = c("individual")) 
 
 tmp <- historical_estimates_gender_smoking %>%
+  mutate(min_age = minAge) %>% 
   filter(!is.na(ratio_q50) & !is.na(HasSmoked) & !is.na(Gender) & !is.na(min_age))
 all_models <- list(
   `All genes` = list(
@@ -777,10 +819,11 @@ tmp %>%
               ifelse(HasSmoked == T,"\nhas smoked","\nnever smoked"),
               sep = '')
   ) %>%
+  mutate(ratio_q50 = ifelse(ratio_q50 < -1,-1,ratio_q50)) %>%
   ggplot(aes(x = L,y = ratio_q50, colour = Gender)) + 
   geom_boxplot(size = 0.2,outlier.size = 0.5) + 
   theme_gerstung(base_size = 6) + 
-  coord_flip() +
+  coord_flip(ylim = c(-1,NA)) + 
   xlab("") + 
   ylab("Ratio of historical and observed annual fold change") +
   scale_y_continuous() +
@@ -980,6 +1023,149 @@ all_comparisons %>%
   ggsave(useDingbats=FALSE,
          filename = sprintf("figures/%s/other_associations/blood_count_significance.pdf",model_id),
          width = 3,height = 2)
+```
+
+### dNdS in AML and MDS
+
+```{r dnds_aml_mds,fig.height=2,fig.width=3.5}
+all_samples <- sampling_idxs %>%
+  group_by(site) %>%
+  mutate(re = length(unique(individual)) > 1) %>%
+  subset(re == T) %>% 
+  apply(1,function(x) {
+    individual <- x[1]
+    site_numeric <- as.numeric(x[3])
+    gene_numeric <- as.numeric(x[4])
+    clone_numeric <- as.numeric(x[5])
+    minAge <- as.numeric(x[6])
+    
+    if (is.na(site_numeric)) {
+      b_site <- 0} else {
+        b_site <- site_samples[,site_numeric]
+      }
+    b_gene <- gene_samples[,gene_numeric]
+    b_clone <- clone_samples[,clone_numeric]
+    b <- b_gene + b_clone + b_site
+    u_values <- offset_samples[,clone_numeric]
+    ages_at_onset <- t0_adjusted(u_values,b,g=2,n=pop_size) + values_model$min_age
+    ages_at_onset_corrected <- ifelse(ages_at_onset < -1,-1,ages_at_onset)
+    ages_at_onset_corrected <- ifelse(ages_at_onset > minAge,minAge,ages_at_onset)
+    biologically_feasible <- ages_at_onset > -1 & ages_at_onset < minAge
+    historical_b <- b[biologically_feasible] %>%
+      unlist
+    return(tibble(
+      historical_samples = historical_b,
+      aachange = gsub("-","",str_match(x[2],"-.+")),
+      gene = str_match(x[2],"[A-Z0-9]+")
+    ))
+  }) %>%
+  do.call(what = rbind) %>%
+  group_by(gene,aachange) %>%
+  summarise(mean = mean(historical_samples,na.rm = T),
+            s = sd(historical_samples,na.rm = T)) %>%
+  mutate(site = sprintf("%s-%s",gene,aachange))
+
+dnds <- read.csv("data/dnds_aml_mds.csv") %>%
+  subset(qval <= 1e-1) %>% 
+  mutate(site = paste(gene,gsub("\\*","X",aachange),sep = "-")) %>%
+  select(-gene)
+
+dd <- all_samples %>% 
+  merge(dnds,by = "site",all = F) %>% 
+  as.data.frame
+
+dd %>% 
+  #subset(gene == "DNMT3A") %>% 
+  ggplot(aes(y = dnds,x = exp(mean)-1,colour = gene,shape = condition)) + 
+  geom_point(size = 1) + 
+  geom_errorbarh(aes(xmin = exp(mean-s*1.96)-1,xmax = exp(mean+s*1.96)-1),size = 0.1,height = 0) + 
+  geom_linerange(aes(ymin = CI_low,ymax = CI_high),size = 0.1) + 
+  geom_smooth(method = "lm",colour = "black",alpha = 0.2,size = 0.5) + 
+  scale_colour_manual(values = gene_colours,guide = F) + 
+  xlab("Annual driver growth rate in CH") +
+  ylab("dN/dS") +
+  scale_x_continuous(labels = function(x) sprintf("%s%%",x*100)) + 
+  scale_y_continuous(trans = 'log10') +
+  theme_gerstung(base_size = 6) +
+  #coord_cartesian(xlim = c(NA,0.5)) +
+  ggsave(useDingbats=FALSE,
+         filename = sprintf("figures/%s/dynamic_coefficients/dnds_association_hist.pdf",model_id),
+         width = 3.5,height = 2)
+
+lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "AML") %>%
+  summary
+
+lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "MDS") %>%
+  summary
+
+lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "AML" & dd$gene == "DNMT3A") %>%
+  summary
+
+lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "MDS" & dd$gene == "DNMT3A") %>%
+  summary
+
+lm(formula = dnds ~ mean + condition,data = dd) %>%
+  summary
+```
+
+### AML risk
+
+```{r aml_risk,fig.height=2,fig.width=3.5}
+all_samples <- sampling_idxs %>%
+  apply(1,function(x) {
+    individual <- x[1]
+    site_numeric <- as.numeric(x[3])
+    gene_numeric <- as.numeric(x[4])
+    clone_numeric <- as.numeric(x[5])
+    minAge <- as.numeric(x[6])
+    
+    if (is.na(site_numeric)) {
+      b_site <- 0} else {
+        b_site <- site_samples[,site_numeric]
+      }
+    b_gene <- gene_samples[,gene_numeric]
+    b_clone <- clone_samples[,clone_numeric]
+    b <- b_gene + b_clone + b_site
+    u_values <- offset_samples[,clone_numeric]
+    ages_at_onset <- t0_adjusted(u_values,b,g=2,n=pop_size) + values_model$min_age
+    ages_at_onset_corrected <- ifelse(ages_at_onset < -1,-1,ages_at_onset)
+    ages_at_onset_corrected <- ifelse(ages_at_onset > minAge,minAge,ages_at_onset)
+    biologically_feasible <- ages_at_onset > -1 & ages_at_onset < minAge
+    historical_b <- b[biologically_feasible] %>%
+      unlist
+    return(tibble(
+      historical_samples = historical_b,
+      gene = str_match(x[2],"[A-Z0-9]+")
+    ))
+  }) %>%
+  do.call(what = rbind) %>%
+  group_by(gene) %>%
+  summarise(mean = mean(historical_samples,na.rm = T),
+            s = sd(historical_samples,na.rm = T))
+
+dd <- all_samples %>% 
+  merge(read.csv("data/aml-risk-coef.csv"),by = "gene",all = F) %>% 
+  as.data.frame
+
+dd %>% 
+  ggplot(aes(y = coef,x = exp(mean)-1,colour = gene)) + 
+  geom_point(size = 1) + 
+  geom_errorbarh(aes(xmin = exp(mean-s*1.96)-1,xmax = exp(mean+s*1.96)-1),size = 0.1,height = 0) + 
+  geom_linerange(aes(ymin = coef - sd*1.96,ymax = coef + sd*1.96),size = 0.1) + 
+  geom_smooth(method = "lm",colour = "black",alpha = 0.2,size = 0.5) + 
+  scale_colour_manual(values = gene_colours,guide = F) + 
+  xlab("Annual driver growth rate in CH") +
+  ylab("AML risk") +
+  scale_x_continuous(labels = function(x) sprintf("%s%%",x*100)) + 
+  theme_gerstung(base_size = 6) +
+  coord_cartesian(xlim = c(NA,0.5)) +
+  ggsave(useDingbats=FALSE,
+         filename = sprintf("figures/%s/dynamic_coefficients/aml_risk_hist.pdf",model_id),
+         width = 3.5,height = 2)
+
+cor.test(dd$mean,dd$coef)
+
+cor.test(dd$mean,dd$coef,method = "kendall")
 ```
 
 # Poor fits

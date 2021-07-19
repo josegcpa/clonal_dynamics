@@ -210,10 +210,18 @@ bnpr_estimates <- trees %>%
   )
 
 # calculate linear fits ---------------------------------------------------
+par(mfrow = c(4,4),mar=c(1,1,1,1))
 for (item_name in names(bnpr_estimates)) {
   tree_size <- length(trees[[item_name]]$tree_ultra$tip.label)
   for (clade_name in names(bnpr_estimates[[item_name]][["clade_dynamics"]])) {
     clade <- bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]
+    sard_id <- item_name
+    age_range <- full_data %>% 
+      subset(SardID == sard_id) %>%
+      summarise((min(Age)-ages[[item_name]]),(max(Age)-ages[[item_name]])) %>%
+      unlist %>%
+      c
+    
     bnpr_estimate <- clade$bnpr_estimate
     vaf <- length(clade$clade) / tree_size
     Y <- log(bnpr_estimate$summary$quant0.5)
@@ -254,12 +262,30 @@ for (item_name in names(bnpr_estimates)) {
     
     b <- -log(200e3 - 1)
     expected_vaf <- inv.logit(change_point_regression$par[2] * diff(range(X)) + b)
+    pp <- change_point_regression$par
+    cp <- pp[4]
+    ff <- change_point(X,pp[1],pp[2],pp[3],pp[4])
+    se <- sqrt(sum((Y[X>cp]-ff[X>cp])^2)/(sum(X>cp)-2)/sqrt(sum((X[X>cp]-mean(X[X>cp]))^2)))
+    ci_95 <- c(pp[2]+pp[3]-1.96*se,pp[2] + pp[3]+1.96*se)
+    
+    relevant_growth_df <- data.frame(
+      X = X[X > age_range[1] & X < age_range[2]],
+      Y = Y[X > age_range[1] & X < age_range[2]],
+      W = 1/W[X > age_range[1] & X < age_range[2]])
+    relevant_growth <- lm(Y ~ X,data = relevant_growth_df,
+                          weights = relevant_growth_df$W)
+    plot(X,Y)
+    points(relevant_growth_df$X,relevant_growth_df$Y,col="red")
+    lines(relevant_growth_df$X,predict(relevant_growth),col="blue")
+    
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$linear_estimate <- linear_estimate
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$non_linear_estimate <- non_linear_estimate
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$change_point_regression <- change_point_regression
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$non_linear_estimate_vaf <- non_linear_estimate_vaf
+    bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$late_ci <- ci_95
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$vaf <- vaf
     bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$expected_vaf <- expected_vaf
+    bnpr_estimates[[item_name]][["clade_dynamics"]][[clade_name]]$relevant_growth <- relevant_growth
   }
 }
 
@@ -489,9 +515,13 @@ for (curr_id in c("2259","500","3877")) {
     
     bnpr_x <- -clade$bnpr_estimate$summary$time + max_age
     bnpr_y <- clade$bnpr_estimate$summary$mean
+    bnpr_y_low <- clade$bnpr_estimate$summary$quant0.025
+    bnpr_y_high <- clade$bnpr_estimate$summary$quant0.975
+    W <- (log(clade$bnpr_estimate$summary$quant0.975) - log(clade$bnpr_estimate$summary$quant0.025))^2/16
     cp <- clade$change_point_regression$par
     observed_vaf <- clade$vaf
     expected_vaf <- clade$expected_vaf
+    clade_frequency <- length(clade$tree_subset$tip.label) / length(trees[[curr_id]]$tree_ultra$tip.label)
     if (!grepl("Unknown driver",driver_id)) {
       tmp <- Parameters_Age %>% 
         subset(individual == as.numeric(curr_id) & site == driver_id)
@@ -572,27 +602,39 @@ for (curr_id in c("2259","500","3877")) {
       ) %>% 
         na.omit()
       
-      y_ <- approx(X$x+values_model$min_age,X$y_,xout=bnpr_at_coalescence$x)$y
+      # bnpr_x <- Filter(f = function(x) {
+      #   tmp_data$Age
+      # })
+      y_ <- approx(X$x+values_model$min_age,X$y_,
+                   xout = bnpr_x)$y
 
       optim_func <- function(params) {
         scaling_factor <- params[1]
-        return(mean((y_ * scaling_factor - bnpr_at_coalescence$y)^2))
+        return(mean(1/W * (y_ * scaling_factor - bnpr_y)^2))
       }
       solution <- optim(par = c(scaling_factor = 1e3),optim_func,method = "Brent",
                         lower = 100, upper = 1e10)
       
-      vaf_trajectory$y <- vaf_trajectory$y * solution$par
-      vaf_trajectory$y_05 <- vaf_trajectory$y_05 * solution$par
-      vaf_trajectory$y_95 <- vaf_trajectory$y_95 * solution$par
+      scaling_factor <- solution$par
+      scaling_factor <- bnpr_y[1] / clade_frequency
+      print(c(bnpr_y[1] / clade_frequency,
+              bnpr_y_low[1] / clade_frequency,
+              bnpr_y_high[1] / clade_frequency,
+              tmp_data$SardID[1],
+              tmp_data$amino_acid_change[1]))
+      vaf_trajectory$y <- vaf_trajectory$y * scaling_factor
+      vaf_trajectory$y_05 <- vaf_trajectory$y_05 * scaling_factor
+      vaf_trajectory$y_95 <- vaf_trajectory$y_95 * scaling_factor
     
       tmp_data <- tmp_data %>%
-        mutate(VAF = solution$par * VAF) %>%
-        mutate(VAF005 = qbeta(0.05,MUTcount_Xadj+1,TOTALcount - MUTcount_Xadj) * solution$par,
-               VAF095 = qbeta(0.95,MUTcount_Xadj+1,TOTALcount - MUTcount_Xadj) * solution$par)
+        mutate(VAF = scaling_factor * VAF) %>%
+        mutate(VAF005 = qbeta(0.05,MUTcount_Xadj,TOTALcount - MUTcount_Xadj) * scaling_factor,
+               VAF095 = qbeta(0.95,MUTcount_Xadj,TOTALcount - MUTcount_Xadj) * scaling_factor)
       y_lims <- c(
         min(vaf_trajectory$y[vaf_trajectory$y>0],na.rm = T),
-        max(c(y * solution$par,bnpr_y,tmp_data$VAF)) * 5
+        max(c(y * scaling_factor,bnpr_y,tmp_data$VAF)) * 5
       )
+      y_lims <- c(1,1e6)
       
       x_axis_at <- unique(floor(bnpr_x / 10) * 10) %>%
         Filter(f = function(x) x > min(bnpr_x))
@@ -638,9 +680,9 @@ for (curr_id in c("2259","500","3877")) {
         eval()
 
       trajectory_plot_ <- data.frame(
-        y = y * solution$par,
-        y_05 = y_05 * solution$par,
-        y_95 = y_95 * solution$par,
+        y = y * scaling_factor,
+        y_05 = y_05 * scaling_factor,
+        y_95 = y_95 * scaling_factor,
         bnpr_x = bnpr_x,
         bnpr_y = bnpr_y,
         bnpr_y025 = clade$bnpr_estimate$summary$quant0.025,
@@ -652,26 +694,19 @@ for (curr_id in c("2259","500","3877")) {
                   size = 3,
                   colour = colorspace::lighten(colour_for_trajectory,0.7),
                   aes(x = x,y = y)) + 
+        geom_hline(yintercept = 2e5,colour = "black",linetype = 2) +
         geom_ribbon(aes(x = bnpr_x,
                         ymin = bnpr_y025,
                         ymax = bnpr_y975,
                         fill = "EPS (fit and 95% CI)",
                         shape = "EPS (fit and 95% CI)",
                         linetype = "EPS (fit and 95% CI)")) +
-        geom_line(aes(x = x,y = y,
+        geom_line(aes(x = bnpr_x,y = bnpr_y,
                       fill = "EPS (fit and 95% CI)",
                       shape = "EPS (fit and 95% CI)",
                       colour = "EPS (fit and 95% CI)",
                       linetype = "EPS (fit and 95% CI)",
-                      size = "EPS (fit and 95% CI)"),
-                  data = bnpr_inferred_trajectory) +
-        geom_point(aes(x = x,y = y,
-                       colour = "EPS (at coalescence)",
-                       shape = "EPS (at coalescence)",
-                       linetype = "EPS (at coalescence)",
-                       size = "EPS (at coalescence)",
-                       fill = "EPS (at coalescence)"),
-                   data = bnpr_at_coalescence) +
+                      size = "EPS (fit and 95% CI)")) +
         geom_line(data = vaf_trajectory,
                   aes(x = x,y = y,
                       fill = "VAF (inferred)",
@@ -705,12 +740,13 @@ for (curr_id in c("2259","500","3877")) {
                            shape = "Data",
                            fill = "Data",
                            colour = "Data")) +
+        geom_hline(yintercept = 2e5,colour = "black",linetype = 2) +
         theme_gerstung(base_size = 6) + 
         scale_y_continuous(
           trans = 'log10',
           sec.axis = sec_axis(trans = ~ .,
                               name = "Variant allele frequency",
-                              breaks = y_axis_at_vaf * solution$par,
+                              breaks = y_axis_at_vaf * scaling_factor,
                               labels = scientific(y_axis_at_vaf)),
           breaks = y_axis_at,
           labels = scientific) + 
@@ -803,6 +839,7 @@ for (curr_id in c("2259","500","3877")) {
                  vjust = 0.9)
       
       C <- as.data.frame(coefficients(summary(linear_estimate)))
+      rg <- summary(clade$relevant_growth)$coefficients
       coefficient_df <- data.frame(
         b_mean = c(exp(b)-1,C$Estimate[2]),
         b_q05 = c(exp(b_05)-1,C$Estimate[2] - C$`Std. Error`[2]),
@@ -811,7 +848,11 @@ for (curr_id in c("2259","500","3877")) {
         expected_late = c(NA,1/clade$non_linear_estimate_vaf$m$getPars()[2]),
         b_early = c(NA,cp[2]),
         b_late = c(NA,cp[3]),
+        ci_late_low = clade$late_ci[1],
+        ci_late_high = clade$late_ci[2],
         midpoint = c(NA,cp[4]),
+        relevant_growth = rg[2,1],
+        relevant_growth_se = rg[2,2],
         observed_vaf = observed_vaf,
         expected_vaf = expected_vaf,
         age_mean = c(tmp$Mean,mean(mutation_timing$x)),
@@ -851,6 +892,7 @@ for (curr_id in c("2259","500","3877")) {
         1,
         max(bnpr_y) * 5
       )
+      y_lims <- c(1,1e6)
       x_axis_at <- unique(floor(bnpr_x / 10) * 10) %>%
         Filter(f = function(x) x > min(bnpr_x))
       if (length(x_axis_at) < 4) {
@@ -890,18 +932,10 @@ for (curr_id in c("2259","500","3877")) {
         geom_ribbon(aes(x = bnpr_x,ymin = bnpr_y025,ymax = bnpr_y975,
                         fill = "EPS (fit and 95% CI)",
                         shape = "EPS (fit and 95% CI)")) +
-        geom_point(aes(x = x,y = y,
-                       size = "EPS (at coalescence)",
-                       shape = "EPS (at coalescence)",
-                       linetype = "EPS (at coalescence)",
-                       fill = "EPS (at coalescence)",
-                       colour = "EPS (at coalescence)"),
-                   data = bnpr_at_coalescence) +
-        geom_line(aes(x = x,y = y,
+        geom_line(aes(x = bnpr_x,y = bnpr_y,
                       colour = "EPS (fit and 95% CI)",
                       size = "EPS (fit and 95% CI)",
-                      linetype = "EPS (fit and 95% CI)"),
-                  data = bnpr_inferred_trajectory) +
+                      linetype = "EPS (fit and 95% CI)")) +
         theme_gerstung(base_size = 6) + 
         scale_y_continuous(
           breaks = y_axis_at,
@@ -914,6 +948,7 @@ for (curr_id in c("2259","500","3877")) {
         ylab("Effective population size") + 
         xlab("Age") + 
         coord_cartesian(ylim = y_lims) + 
+        geom_hline(yintercept = 2e5,colour = "black",linetype = 2) +
         scale_colour_manual(values = c(`EPS (fit and 95% CI)` = "grey60",
                                        `EPS (at coalescence)` = "grey60"),
                             name = NULL,
@@ -970,6 +1005,7 @@ for (curr_id in c("2259","500","3877")) {
       C <- summary(linear_estimate) %>% 
         coefficients %>%
         as.data.frame()
+      rg <- summary(clade$relevant_growth)$coefficients
       coefficient_df <- data.frame(
         b_mean = c(C$Estimate[2]),
         b_q05 = c(C$Estimate[2] - C$`Std. Error`[2]),
@@ -978,7 +1014,11 @@ for (curr_id in c("2259","500","3877")) {
         expected_late = 1/c(clade$non_linear_estimate_vaf$m$getPars()[2]),
         b_early = c(cp[2]),
         b_late = c(cp[3]),
+        ci_late_low = clade$late_ci[1],
+        ci_late_high = clade$late_ci[2],
         midpoint = c(cp[4]),
+        relevant_growth = rg[2,1],
+        relevant_growth_se = rg[2,2],
         observed_vaf = observed_vaf,
         expected_vaf = expected_vaf,
         age_mean = c(mean(mutation_timing$x)),
@@ -1060,28 +1100,11 @@ coefficients_df <- plot_list %>%
   mutate(colour_code = ifelse(gene != "",names(gene_colours[as.character(gene)]),"Unknown")) %>%
   mutate(source = ifelse(source == "EPS","Colonies","Longitudinal")) %>%
   mutate(age_q05 = age_q05 - ifelse(source == "Colonies",0.75,0),
-         age_q95 = age_q95 - ifelse(source == "Colonies",0.75,0))
-
-coefficients_df_coalescence <- bnpr_estimates_coalescence %>%
-  lapply(function(x) {
-    lapply(x$clade_dynamics,function(y) {
-      driver <- which(names(clone_assignment[[x$ID]]) %in% x$tree_ultra$tip.label[y$clade])
-      driver <- clone_assignment[[x$ID]][[driver]]
-      data.frame(
-        linear = y$linear_estimate$coefficients[2],
-        expected_late = 1/y$non_linear_estimate_vaf$m$getPars()[2],
-        b_early = y$change_point_regression$par[2],
-        b_late = sum(y$change_point_regression$par[c(2,3)]),
-        CP = sum(y$change_point_regression$par[4]),
-        individual = x$ID,
-        plot_label = driver,
-        colour_code = str_match(driver,'[A-Z0-9]+')
-      ) %>%
-        return
-    }) %>%
-      do.call(what = rbind)
-  }) %>%
-  do.call(what = rbind)
+         age_q95 = age_q95 - ifelse(source == "Colonies",0.75,0)) %>%
+  mutate(late_growth = b_early + b_late) %>%
+  mutate(b = ifelse(source == "Longitudinal",b_mean,relevant_growth),
+         b05 = ifelse(source == "Longitudinal",b_q05,relevant_growth-relevant_growth_se*1.96),
+         b95 = ifelse(source == "Longitudinal",b_q95,relevant_growth+relevant_growth_se*1.96))
 
 site_labels <- sapply(
   strsplit(rev(c("SF3B1-K666N","U2AF1-Q157R","UD1","UD2","UD3")), "-"), 
@@ -1095,9 +1118,9 @@ site_labels <- sapply(
 coefficients_df_long <- rbind(
   transmute(
     coefficients_df,
-    mean = b_mean,
-    q05 = b_q05,
-    q95 = b_q95,
+    mean = b,
+    q05 = b05,
+    q95 = b95,
     source,gene,site,individual,plot_label,colour_code,
     id = "Growth per year"
   ),
@@ -1154,6 +1177,100 @@ coefficient_age_comparison_plot <- coefficients_df_long %>%
   ylab("") +
   theme(strip.text.y = element_text(angle = 0))
 
+linear_coefficients_only_plot <- coefficients_df %>% 
+  mutate(plot_label = factor(plot_label,
+    levels = rev(c("SF3B1-K666N","U2AF1-Q157R","UD1","UD2","UD3")))) %>%
+  mutate(individual = factor(individual,levels = c(2259,3877,500))) %>% 
+  ggplot(aes(x = as.numeric(as.factor(plot_label)),
+             y = b_mean,
+             ymin = b_q05,
+             ymax = b_q95,
+             group = paste(individual,source,site),
+             colour = colour_code)) + 
+  geom_point(aes(shape = source),position = position_dodge(width = 0.8),
+             size = 1.5) + 
+  geom_linerange(position = position_dodge(width = 0.8)) + 
+  theme_gerstung(base_size = 6) + 
+  xlab("Driver") + 
+  ylab("Growth per year") + 
+  scale_shape_discrete(name = NULL) +
+  scale_colour_manual(values = c(gene_colours,Unknown = "black"),
+                      guide = F) + 
+  scale_x_continuous(labels = site_labels,
+                     breaks = c(1,2,3,4,5),
+                     trans = "reverse",
+                     expand = c(0,0)) + 
+  facet_grid( ~ individual,
+             scales = "free",switch = "y",space = "free_x") + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme(strip.background = element_blank(),
+        strip.text = element_text(size = 6),
+        strip.placement = "outside",
+        legend.position = "bottom",
+        legend.spacing = unit(0,"cm"),
+        legend.box.margin = margin(),
+        legend.margin = margin(),
+        legend.background = element_blank(),
+        axis.text = element_text(size = 6),
+        legend.text = element_text(size = 6),
+        plot.title = element_text(size = 6,margin = margin(b = 0))) + 
+  xlab("") + 
+  ylab("") +
+  theme(strip.text.y = element_text(angle = 0))
+
+load_data_6th_tp() %>%
+  subset(SardID %in% c(names(trees))) %>% 
+  mutate(site = as.character(str_match(amino_acid_change,"[A-Z0-9]+$")),
+         individual = as.character(SardID)) %>% 
+  merge(mutate(coefficients_df,individual = as.character(individual),
+               site = as.character(site)),
+        by = c("individual","site"),all = F) %>% 
+  select(gene,site,individual,observed_vaf,VAF) %>%
+  distinct %>%
+  mutate(observed_vaf = observed_vaf / 2) %>%
+  rowwise() %>%
+  mutate(tree_size = length(trees[[as.character(individual)]]$tree_ultra$tip.label)) %>% 
+  transmute(
+    site = site,
+    gene = gene,
+    individual = individual,
+    tree = observed_vaf,
+    tree_05 = qbeta(0.05,observed_vaf*tree_size,tree_size-observed_vaf*tree_size),
+    tree_95 = qbeta(0.95,observed_vaf*tree_size,tree_size-observed_vaf*tree_size),
+    long = VAF,
+    long_05 = qbeta(0.05,VAF*1e3,1e3-VAF*1e3),
+    long_95 = qbeta(0.95,VAF*1e3,1e3-VAF*1e3)
+  ) %>% 
+  rbind(
+    data.frame(
+      site = "P95H",
+      gene = "SRSF2",
+      individual = "500",
+      tree = 1 / 92,
+      tree_05 = qbeta(0.05,1,92-1),
+      tree_95 = qbeta(0.95,1,92-1),
+      long = 0.07355,
+      long_05 = qbeta(0.05,0.07355*1e3,1e3-0.07355*1e3),
+      long_95 = qbeta(0.95,0.07355*1e3,1e3-0.07355*1e3)
+    )
+  ) %>% 
+  ggplot(aes(x = long,y = tree)) + 
+  geom_abline(slope = 1) +
+  geom_point(size = 0.5) +
+  geom_linerange(aes(ymin = tree_05,ymax = tree_95)) +
+  geom_errorbarh(aes(xmin = long_05,xmax = long_95),height = 0) +
+  geom_text_repel(aes(label = sprintf("%s-%s (%s)",gene,site,individual)),
+                  size = 2.7) + 
+  coord_cartesian(xlim = c(0.001,0.5),ylim = c(0.001,0.5)) + 
+  scale_x_continuous(trans = 'log10') +
+  scale_y_continuous(trans = 'log10') + 
+  xlab("Clone size (sequencing)") + 
+  ylab("Clone size (fraction of tips in clade)") + 
+  theme_gerstung(base_size = 6) +
+  ggsave(filename = sprintf("figures/%s/trees/compare_vaf.pdf",model_id),
+         width = 2,height = 2,
+         useDingbats = F)
+
 output_width = 12
 output_height = 4.5
 
@@ -1192,15 +1309,29 @@ pos_adjust = "none"
 ts <- 6
 tree_plot_reordered <- plot_grid(
   plot_grid(
+    plot_list$`2259`$tree + theme(plot.title = element_text(size = ts),
+                                  axis.text = element_text(size = ts),
+                                  plot.margin = margin(0.3,0.3,0.3,0.3)),
+    plot_list$`2259`$`SF3B1-K666N` + theme(legend.position = pos_adjust,
+                                           axis.text = element_text(size = ts),
+                                           axis.title = element_text(size = ts)),
+    get_legend(plot_list$`2259`$`SF3B1-K666N` + theme(legend.key.height = unit(0.6,"cm"))),
+    ncol = 1,
+    align = "v",
+    axis = "tblr",
+    rel_heights = c(2,1,1)
+  ),
+  ggplot() + theme_nothing(),
+  plot_grid(
     plot_list$`3877`$tree + theme(plot.title = element_text(size = ts),
                                   axis.text = element_text(size = ts),
                                   plot.margin = margin(0.3,0.3,0.3,0.3)),
     plot_list$`3877`$`SF3B1-K666N` + theme(legend.position = pos_adjust,
-                                               axis.text = element_text(size = ts),
-                                               axis.title = element_text(size = ts)),
+                                           axis.text = element_text(size = ts),
+                                           axis.title = element_text(size = ts)),
     plot_list$`3877`$`U2AF1-Q157R` + theme(legend.position = pos_adjust,
-                                               axis.text = element_text(size = ts),
-                                               axis.title = element_text(size = ts)),
+                                           axis.text = element_text(size = ts),
+                                           axis.title = element_text(size = ts)),
     ncol = 1,
     align = "v",
     axis = "tblr",
@@ -1212,32 +1343,18 @@ tree_plot_reordered <- plot_grid(
                                  axis.text = element_text(size = ts),
                                  plot.margin = margin(0.3,0.3,0.3,0.3)),
     plot_list$`500`$`Unknown driver 1` + theme(legend.position = pos_adjust,
-                                                   axis.text = element_text(size = ts),
-                                                   axis.title = element_text(size = ts)),
-    plot_list$`500`$`Unknown driver 3` + theme(legend.position = pos_adjust,
-                                                   axis.text = element_text(size = ts),
-                                                   axis.title = element_text(size = ts)),
-    ncol = 1,
-    align = "v",
-    axis = "tblr",
-    rel_heights = c(2,1,1)
-  ),
-  ggplot() + theme_nothing(),
-  plot_grid(
-    plot_list$`2259`$tree + theme(plot.title = element_text(size = ts),
-                                  axis.text = element_text(size = ts),
-                                  plot.margin = margin(0.3,0.3,0.3,0.3)),
-    plot_list$`2259`$`SF3B1-K666N` + theme(legend.position = pos_adjust,
                                                axis.text = element_text(size = ts),
                                                axis.title = element_text(size = ts)),
-    get_legend(plot_list$`2259`$`SF3B1-K666N` + theme(legend.key.height = unit(0.6,"cm"))),
+    plot_list$`500`$`Unknown driver 3` + theme(legend.position = pos_adjust,
+                                               axis.text = element_text(size = ts),
+                                               axis.title = element_text(size = ts)),
     ncol = 1,
     align = "v",
     axis = "tblr",
     rel_heights = c(2,1,1)
   ),
   ncol = 5,
-  rel_widths = c(1,0.04,0.82,0.04,1)
+  rel_widths = c(1,0.04,1,0.04,0.84)
 ) 
 
 tree_plot_reordered %>% 
@@ -1251,12 +1368,14 @@ tree_plot_reordered %>%
          width = 5,
          useDingbats = F)
 
-ggsave(plot = coefficient_age_comparison_plot + theme(axis.title = element_text(size = ts),
-                                                      axis.text = element_text(size = ts),
-                                                      strip.text = element_text(size = ts),
-                                                      legend.position = "none"),
+ggsave(plot = coefficient_age_comparison_plot,
        filename = sprintf("figures/%s/trees/coef_age_plot.pdf",model_id),
        width = 8.6 / 3,height = 2.7,
+       useDingbats = F)
+
+ggsave(plot = linear_coefficients_only_plot + ylab("Growth per year"),
+       filename = sprintf("figures/%s/trees/linear_coef_only_plot.pdf",model_id),
+       width = 2.7,height = 2,
        useDingbats = F)
 
 write.csv(coefficients_df,"data_output/tree_bnpr_coefficients.csv",row.names = T)

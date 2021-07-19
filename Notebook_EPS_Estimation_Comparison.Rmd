@@ -231,6 +231,10 @@ if (file.exists(file_name) == T) {
   names(all_driver_trajectories) <- gsub('/driver_trajectory','',all_driver_file_paths)
   saveRDS(object = list(trees,all_driver_trajectories),file = file_name)
 }
+
+for (tree_name in names(trees)) {
+  trees[[tree_name]]$tree_ultra$edge.length <- trees[[tree_name]]$tree_ultra$edge.length * 800
+}
 ```
 
 ```{r}
@@ -319,7 +323,10 @@ for (name in 1:length(all_estimates_trees)) {
 ```{r}
 file_name <- "data_output/simulated_bnpr_clades.RDS"
 if (file.exists(file_name) == T) {
-  all_estimates <- readRDS(file_name)
+  all_estimates_full <- readRDS(file_name)
+  all_estimates <- all_estimates_full[[1]]
+  all_estimates_trimmed_5_years <- all_estimates_full[[2]]
+  all_estimates_trimmed_10_years <- all_estimates_full[[3]]
 } else {
   all_estimates <- list()
   i <- 1
@@ -540,7 +547,7 @@ data_for_plot <- samples_to_plot %>%
       
       if (length(obj) > 0) {
         for (j in 1:length(obj)) {
-          try({
+          try(silent = T,{
             bnpr_traj <- obj[[j]]$bnpr
             mcmc_traj <- obj_mcmc[[j]]$pop_size_eps
             skyl_traj <- obj_skyl[[j]]$skyline
@@ -623,37 +630,76 @@ for (x in names(all_estimates)) {
       try(
         {
           bnpr_data <- data.frame(
-            X = (1 - obj[[i]]$bnpr$summary$time),
-            Y = log(obj[[i]]$bnpr$summary$quant0.5))
+            X = (800 - obj[[i]]$bnpr$summary$time),
+            Y = log(obj[[i]]$bnpr$summary$mean),
+            W = (log(obj[[i]]$bnpr$summary$quant0.975)-log(obj[[i]]$bnpr$summary$quant0.025))^2/16)
           ps <- extract.popsize(obj_mcmc[[i]]$pop_size_eps)
           X_ <- seq(min(obj_skyl[[i]]$skyline$time),max(obj_skyl[[i]]$skyline$time),length.out = 100)
           sk_Y <- obj_skyl[[i]]$skyline$population.size[as.numeric(cut(X_,c(0,obj_skyl[[i]]$skyline$time)))]
           skyl_data <- data.frame(
-            X = (1 - X_),
+            X = (800 - X_),
             Y = log(sk_Y)
             ) %>% 
             na.omit
           mcmc_data <- data.frame(
-            X = (1 - ps[,1]),
+            X = (800 - ps[,1]),
             Y = log(ps[,3])) %>%
             na.omit
+          
           linear_estimates[[x]][[i]] <- list(
             id = idx,
             bnpr = lm(Y ~ X,data = bnpr_data),
             skyl = lm(Y ~ X,data = skyl_data),
             mcmc = lm(Y ~ X,data = mcmc_data)
           )
+
+          opt_fn_bnpr <- function(par) {
+            se <- (bnpr_data$Y - change_point(bnpr_data$X,par[1],par[2],par[3],par[4]))^2
+            return(mean(se / bnpr_data$W))
+          }
+          cpr_bnpr <- optim(
+            par = c(linear_estimates[[x]][[i]]$bnpr$coefficients[1],
+                    linear_estimates[[x]][[i]]$bnpr$coefficients[2],
+                    0,
+                    mean(bnpr_data$X)),
+            method = "L-BFGS-B",
+            lower = c(NA,0,NA,min(bnpr_data$X) + diff(range(bnpr_data$X)) * 0.25),
+            upper = c(NA,NA,NA,max(bnpr_data$X) - diff(range(bnpr_data$X)) * 0.25),
+            fn = opt_fn_bnpr)
+          
+          opt_fn_skyl <- function(par) {
+            se <- (skyl_data$Y - change_point(skyl_data$X,par[1],par[2],par[3],par[4]))^2
+            return(mean(se))
+          }
+          cpr_skyl <- optim(
+            par = c(linear_estimates[[x]][[i]]$skyl$coefficients[1],
+                    linear_estimates[[x]][[i]]$skyl$coefficients[2],
+                    0,
+                    mean(bnpr_data$X)),
+            method = "L-BFGS-B",
+            lower = c(NA,0,NA,min(bnpr_data$X) + diff(range(bnpr_data$X)) * 0.25),
+            upper = c(NA,NA,NA,max(bnpr_data$X) - diff(range(bnpr_data$X)) * 0.25),
+            fn = opt_fn_skyl)
+
+          opt_fn_mcmc <- function(par) {
+            se <- (mcmc_data$Y - change_point(mcmc_data$X,par[1],par[2],par[3],par[4]))^2
+            return(mean(se))
+          }
+          cpr_mcmc <- optim(
+            par = c(linear_estimates[[x]][[i]]$mcmc$coefficients[1],
+                    linear_estimates[[x]][[i]]$mcmc$coefficients[2],
+                    0,
+                    mean(bnpr_data$X)),
+            method = "L-BFGS-B",
+            lower = c(NA,0,NA,min(bnpr_data$X) + diff(range(bnpr_data$X)) * 0.25),
+            upper = c(NA,NA,NA,max(bnpr_data$X) - diff(range(bnpr_data$X)) * 0.25),
+            fn = opt_fn_mcmc)
           early_late_estimates[[x]][[i]] <- list(
             id = idx,
-            bnpr = list(
-              late = lm(Y ~ X,data = bnpr_data[1:20,]),
-              early = lm(Y ~ X,data = bnpr_data[nrow(bnpr_data) - c(19:0),])),
-            skyl = list(
-              late = lm(Y ~ X,data = skyl_data[1:20,]),
-              early = lm(Y ~ X,data = skyl_data[nrow(skyl_data) - c(19:0),])),
-            mcmc = list(
-              late = lm(Y ~ X,data = mcmc_data[1:40,]),
-              early = lm(Y ~ X,data = mcmc_data[nrow(mcmc_data) - c(39:0),]))
+            bnpr = cpr_bnpr,
+            skyl = cpr_skyl,
+            mcmc = cpr_mcmc,
+            W_sum = mean(bnpr_data$W)
             )
           }
       )
@@ -679,12 +725,13 @@ linear_estimates_bnpr_mcmc_skyl$fitness <- linear_estimates_bnpr_mcmc_skyl$id %>
 early_estimates_bnpr_mcmc_skyl <- early_late_estimates %>% 
     lapply(function(x) do.call(rbind,
                                lapply(x, function(y) c(y$id,
-                                                       y$bnpr$early$coefficient[2],
-                                                       y$mcmc$early$coefficient[2],
-                                                       y$skyl$early$coefficient[2])))) %>%
+                                                       y$bnpr$par[2],
+                                                       y$mcmc$par[2],
+                                                       y$skyl$par[2],
+                                                       y$W_sum)))) %>%
   do.call(what = rbind) %>%
   as.data.frame()
-colnames(early_estimates_bnpr_mcmc_skyl) <- c("id","BNPR","mcmc.popsize","Skyline")
+colnames(early_estimates_bnpr_mcmc_skyl) <- c("id","BNPR","mcmc.popsize","Skyline","W_sum")
 early_estimates_bnpr_mcmc_skyl$id <- names(all_estimates)[early_estimates_bnpr_mcmc_skyl$id]
 early_estimates_bnpr_mcmc_skyl$fitness <- early_estimates_bnpr_mcmc_skyl$id %>%
   str_match("[0-9.]+") %>% 
@@ -692,15 +739,16 @@ early_estimates_bnpr_mcmc_skyl$fitness <- early_estimates_bnpr_mcmc_skyl$id %>%
 
 late_estimates_bnpr_mcmc_skyl <- early_late_estimates %>% 
   Filter(f = function(f) !is.null(x)) %>% 
-  lapply(function(x) do.call(rbind,
-                             lapply(x, function(y) c(y$id,
-                                                     y$bnpr$late$coefficient[2],
-                                                     ifelse(!is.null(y$bnpr$late),summary(y$bnpr$late)$coefficients[2,2],NA),
-                                                     y$mcmc$late$coefficient[2],
-                                                     y$skyl$late$coefficient[2])))) %>%
+  lapply(function(x) do.call(
+    rbind,
+    lapply(x, function(y) c(y$id,
+                            ifelse(!is.null(y$bnpr),
+                                   sum(y$bnpr$par[2:3]),NA),
+                            sum(y$mcmc$par[2:3]),
+                            sum(y$skyl$par[2:3]))))) %>%
   do.call(what = rbind) %>%
   as.data.frame()
-colnames(late_estimates_bnpr_mcmc_skyl) <- c("id","BNPR","BNPR_se","mcmc.popsize","Skyline")
+colnames(late_estimates_bnpr_mcmc_skyl) <- c("id","BNPR","mcmc.popsize","Skyline")
 late_estimates_bnpr_mcmc_skyl$id <- names(all_estimates)[late_estimates_bnpr_mcmc_skyl$id]
 late_estimates_bnpr_mcmc_skyl$fitness <- late_estimates_bnpr_mcmc_skyl$id %>%
   str_match("[0-9.]+") %>% 
@@ -778,6 +826,7 @@ data.frame(
   gather(key = "key",value = "value",BNPR,Skyline,mcmc.popsize) %>%
   ggplot(aes(x = key,y = fit,fill = value)) +
   geom_tile() + 
+  geom_text(aes(label = round(value,2)),size = 2.6,colour = "white") +
   theme_gerstung(base_size = 6) + 
   theme(legend.position = "bottom",legend.key.height = unit(0.1,"cm"),
         legend.key.width = unit(0.4,"cm"),
