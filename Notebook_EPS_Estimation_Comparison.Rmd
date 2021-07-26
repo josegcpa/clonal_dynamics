@@ -535,7 +535,7 @@ for (name in names(all_estimates)) {
 
 ```{r}
 set.seed(4242)
-samples_to_plot <- sample(names(all_estimates),replace = F,size = 15)
+samples_to_plot <- sample(names(all_estimates),replace = F,size = 9)
 
 data_for_plot <- samples_to_plot %>%
   lapply(
@@ -584,7 +584,7 @@ data_for_plot <- samples_to_plot %>%
   )
 ```
 
-```{r}
+```{r,fig.width=5.5,fig.height=3}
 data_for_plot %>%
   do.call(what = rbind) %>%
   mutate(fitness = str_match(id,pattern = "[0-9.]+")) %>%
@@ -595,7 +595,7 @@ data_for_plot %>%
   geom_ribbon(aes(ymin = MCMC_Y025,ymax = MCMC_Y975,fill = "mcmc.popsize"),alpha = 0.3) + 
   geom_line(aes(y = MCMC_Y,colour = "mcmc.popsize"),size = 0.25) + 
   geom_line(aes(y = SKYL_Y,colour = "skyline",fill = "skyline"),size = 0.25) + 
-  facet_wrap(~ reorder(sprintf("id=%s (N=%s; s=%s)",traj_id, clade_size,fitness),clade_size)) + 
+  facet_wrap(~ reorder(sprintf("id=%s (N=%s;s=%s)",traj_id, clade_size,fitness),clade_size)) + 
   scale_y_continuous(trans = 'log10') + 
   coord_cartesian(ylim = c(1e-1,1e8)) + 
   scale_colour_aaas(name = NULL) +
@@ -608,7 +608,7 @@ data_for_plot %>%
   ylab("Neff") + 
   ggsave(filename = sprintf("figures/simulations/eps_comparison.pdf"),
          useDingbats = F,
-         width = 5,height = 3)
+         width = 5.5,height = 3)
 ```
 
 ## Comparing fits derived from BNPR, `mcmc.popsize` and skyline

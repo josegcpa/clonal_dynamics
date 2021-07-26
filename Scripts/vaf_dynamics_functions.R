@@ -382,7 +382,7 @@ load_smoking_data <- function() {
 #' 
 #' @returns Returns the time of death for all individuals.
 load_survival_data <- function() {
-  read.xlsx("data/AliveDead_final_forJose.xlsx")
+  read.xlsx("data/AliveDead_final.xlsx")
 }
 
 #' Load comorbidity data.
