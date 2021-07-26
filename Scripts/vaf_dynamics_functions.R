@@ -1,4 +1,4 @@
-#' Function and constant library for "The Natural History of Clonal Haematopoiesis"
+#' Function and constant library for "The Natural History and Dynamics of Clonal Haematopoiesis"
 
 library(reticulate)
 use_python('/homes/josegcpa/r-python/bin/python3',required = T)

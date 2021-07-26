@@ -1,6 +1,20 @@
 ---
-title: "Trees in Emily's data"
-output: html_document
+title: "The Natural History and Dynamics of Clonal Haematopoiesis"
+subtitle: "Phylogeny and phylodynamics in Mitchell et al. (2021)"
+author: 
+    - José Guilherme de Almeida
+    - Moritz Gerstung
+output: 
+  html_document:
+    theme: lumen
+    highlight: tango
+    code_folding: hide
+    df_print: paged
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 4
+    number_sections: true
 ---
 
 ```{r setup, include=FALSE}

@@ -4,7 +4,7 @@ R=20
 
 DIR=hsc_output_bnpr_complete # output directory
 mkdir -p $DIR
-#rm -rf hsc_output_bnpr_complete/*
+rm -rf hsc_output_bnpr_complete/*
 
 N=200000
 g=800 # ~ 80 years
@@ -12,7 +12,7 @@ G=20 # every 2 years
 NP=7500
 MR="20e-6"
 
-for fmr in 0.005_200 0.01_50 0.015_20 0.02_15 0.025_10 0.03_6
+for fmr in 0.005_200 0.01_50 0.015_20 0.02_15 0.025_8 0.03_5
 do
     fitness=$(echo $fmr | cut -d '_' -f 1)
     mutation_rate=$(echo $fmr | cut -d '_' -f 2)

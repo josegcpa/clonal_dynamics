@@ -1,5 +1,5 @@
 ---
-title: "The Natural History of Clonal Haematopoiesis"
+title: "The Natural History and Dynamics of Clonal Haematopoiesis"
 subtitle: "Investigating fit to BNPR"
 author: 
     - José Guilherme de Almeida
@@ -1205,7 +1205,7 @@ all_bnpr_fits_coalescence <- names(all_estimates_coalescence) %>%
 all_bnpr_fits_trimmed_5 <- names(all_estimates_trimmed_5_years) %>%
   lapply(
     function(x) {
-      if (length(all_estimates[[x]]) > 0) {
+      if (length(all_estimates_trimmed_5_years[[x]]) > 0) {
         lapply(1:length(all_estimates_trimmed_5_years[[x]]),function(y) {
           y <- as.numeric(y)
           nle <- all_estimates_trimmed_5_years[[x]][[y]]$non_linear_estimate
@@ -1253,7 +1253,7 @@ all_bnpr_fits_trimmed_5 <- names(all_estimates_trimmed_5_years) %>%
 all_bnpr_fits_trimmed <- names(all_estimates_trimmed_10_years) %>%
   lapply(
     function(x) {
-      if (length(all_estimates[[x]]) > 0) {
+      if (length(all_estimates_trimmed_10_years[[x]]) > 0) {
         lapply(1:length(all_estimates_trimmed_10_years[[x]]),function(y) {
           y <- as.numeric(y)
           nle <- all_estimates_trimmed_10_years[[x]][[y]]$non_linear_estimate

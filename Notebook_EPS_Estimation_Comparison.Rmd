@@ -1,5 +1,5 @@
 ---
-title: "The Natural History of Clonal Haematopoiesis"
+title: "The Natural History and Dynamics of Clonal Haematopoiesis"
 subtitle: "Investigating different methods to estimate EPS"
 author: 
     - José Guilherme de Almeida

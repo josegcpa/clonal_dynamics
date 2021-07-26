@@ -1,8 +1,12 @@
-# The Natural History of Clonal Haematopoiesis
+# The Natural History Dynamics of Clonal Haematopoiesis
 
 ## Motivation
 
-This is the repository for [The Natural History of Clonal Haematopoiesis](). In this work, we investigate the fitness differences between genes, sites and individual clones using longitudinal sequencing data from >300 individuals between 54 and 103 years old.
+This is the repository for [The Natural History and Dynamics of Clonal Haematopoiesis](). In this work, we investigate the fitness differences between genes, sites and individual clones using longitudinal sequencing data from >300 individuals between 54 and 103 years old.
+
+## Data
+
+The data required to run the code in this repository is available in https://doi.org/10.6084/m9.figshare.15029118.
 
 ## Code map
 
@@ -20,13 +24,7 @@ This is the repository for [The Natural History of Clonal Haematopoiesis](). In 
 
 ### Accessing the analysis
 
-1. [Estimating the technical overdispersion]()
-2. [Validating the approach to estimate annual growth from longitudinal data with Wright-Fisher simulations]()
-3. [Validating the approach to estimate annual growth from single-cell phylogenies with Wright-Fisher simulations]()
-4. [Growth rate coefficients and age at onset inference, possible associations with phenotype]()
-5. [Analysing the trees obtained from single cell colonies in old individuals in Mitchell et al. (2021)]()
-6. [Investigating the historical growth effect and poor fits]()
-7. [Comparing different methods for effective population size estimation]()
+You can access the analysis in [this dedicated webpage](https://ch-dynamics.netlify.app/).
 
 ### Running the analysis
 
@@ -56,8 +54,9 @@ This is the repository for [The Natural History of Clonal Haematopoiesis](). In 
     2. Run `Notebook_BNPRFit.Rmd` (in `Rstudio`)
 
 4. Data analysis - growth rate coefficient and age at onset inference, possible associations with phenotype
-    1. Run `Scripts/run_model.R` (`Rscript Scripts/run_model.R`) - this runs the model that infers all growth rate coefficients
-    2. Run `Notebook_GrowthCoefficients_AgeAtOnset_PossibleAssociations.Rmd` (in `Rstudio`) - this is the notebook containing the bulk of the analysis
+    1. Run `calculate_theoretical_lod.R` - this runs the analysis to determine an acceptable value for the theoretical limit of detection
+    2. Run `Scripts/run_model.R` (`Rscript Scripts/run_model.R`) - this runs the model that infers all growth rate coefficients
+    3. Run `Notebook_GrowthCoefficients_AgeAtOnset_PossibleAssociations.Rmd` (in `Rstudio`) - this is the notebook containing the bulk of the analysis
 
 5. Phylogenetic trees from single cell colonies, the determination of growth per year and age at onset from these trees and comparison with estimates from longitudinal data
     1. Run `Scripts/plot_tree.R` (`Rscript Scripts/plot_tree.R`) - this runs all of the aforementioned analysis and plots it as displayed in the manuscript

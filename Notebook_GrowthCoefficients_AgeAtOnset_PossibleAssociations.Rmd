@@ -1,5 +1,5 @@
 ---
-title: "The Natural History of Clonal Haematopoiesis"
+title: "The Natural History and Dynamics of Clonal Haematopoiesis"
 subtitle: "Growth coefficient inference, age at onset estimation and possible associations"
 author: 
     - José Guilherme de Almeida
@@ -5565,17 +5565,17 @@ dd %>%
   geom_point(size = 1) + 
   geom_errorbarh(aes(xmin = exp(mean-s*1.96)-1,xmax = exp(mean+s*1.96)-1),size = 0.1) + 
   geom_linerange(aes(ymin = CI_low,ymax = CI_high),size = 0.1) + 
-  geom_smooth(method = "lm",colour = "black",alpha = 0.2,size = 0.5) + 
+  geom_smooth(aes(group = NA),method = "lm",colour = "black",alpha = 0.2,size = 0.5) + 
   scale_colour_manual(values = gene_colours,guide = F) + 
   ylab("dN/dS") +
   xlab("Annual driver growth rate in CH") +
   scale_x_continuous(labels = function(x) sprintf("%s%%",x*100)) + 
   scale_y_continuous(trans = 'log10') + 
   theme_gerstung(base_size = 6) +
-  #coord_cartesian(ylim = c(NA,0.5)) +
+  scale_shape(guide = F) +
   ggsave(useDingbats=FALSE,
          filename = sprintf("figures/%s/dynamic_coefficients/dnds_association.pdf",model_id),
-         width = 3.5,height = 2)
+         width = 2.5,height = 1.5)
 
 lm(formula = dnds ~ mean,data = dd) %>%
   summary
@@ -5632,7 +5632,7 @@ dd %>%
   coord_cartesian(xlim = c(NA,0.5)) +
   ggsave(useDingbats=FALSE,
          filename = sprintf("figures/%s/dynamic_coefficients/aml_risk.pdf",model_id),
-         width = 3.5,height = 2)
+         width = 2.5,height = 1.5)
 
 j <- cor.test(dd$mean,dd$coef)
 

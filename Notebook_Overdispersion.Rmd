@@ -1,5 +1,5 @@
 ---
-title: "The Natural History of Clonal Haematopoiesis"
+title: "The Natural History and Dynamics of Clonal Haematopoiesis"
 subtitle: "Modelling the technical overdispersion"
 author: 
     - José Guilherme de Almeida
