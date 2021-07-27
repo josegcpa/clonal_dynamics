@@ -1797,7 +1797,7 @@ effect_distribution_gender <- full_data %>%
   scale_x_discrete(breaks = c("Female","Male"),
                    labels = c(sprintf("Female\n(n=%s)",N$N[1]),
                               sprintf("Male\n(n=%s)",N$N[2]))) +
-  xlab("Sex") + 
+  xlab("Gender") + 
   theme(axis.text = element_text(size = 6))
 
 gene_mutation_distribution_gender <- load_data_keep() %>%
