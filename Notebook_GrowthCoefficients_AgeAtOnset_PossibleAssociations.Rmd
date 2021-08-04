@@ -1047,7 +1047,7 @@ plot_grid(
 
 The goodness of fit is purely qualitative and is assessed by assessing whether a trajectory has any outliers. If a single outlier is present, we consider this trajectory to be unexplained. Outliers are defined as any point with a tail probability of less than 2.5% according to our model. Following this simple measure of goodness of fit, we estimate that our model explains 92.4% of all trajectories.
 
-```{r model_f2_summary_statistic, fig.height=5,fig.width=6}
+```{r model_ch_summary_statistic, fig.height=5,fig.width=6}
 beta_value <- values_model$beta_values[[1]][1,1]
 
 statistic_full_tails <- r_values_ %>%
@@ -1145,11 +1145,63 @@ r_values %>%
   write.csv(sprintf("data_output/gene_coefficients_%s.csv",model_id),quote = F,row.names = F)
 ```
 
+### Visualising all trajectories
+
+```{r model_ch_dynamic_visualization_all_full,fig.width = 16,fig.height = 8}
+r_values_merged <- merge(statistic_full,
+                         r_values_,
+                         all_y = F,
+                         all.x = F,
+                         by = c("site","individual")) %>%
+  merge(select(statistic_full_tails,site,individual,tail_prob,tail_prob_005,tail_prob_095,age),
+        all = F,
+        by = c("site","individual","age")) %>%
+  mutate(site_plot = gsub('t|nt','',site)) %>%
+  mutate(group = as.factor(paste0(as.character(individual),key,site)))
+
+r_values_merged_prediction_only <- r_values_merged %>%
+  subset(key == 'VAFpred') %>% 
+  mutate(`Inferred VAF` = value)
+
+r_values_merged_data_only <- r_values_merged %>%
+  subset(key == "VAFtrue") %>%
+  mutate(`Observed VAF` = value) 
+
+ggplot(data = NULL) +
+  geom_ribbon(data = r_values_merged_prediction_only,
+              aes(ymin = pred_005,
+                  ymax = pred_095,
+                  x = age,
+                  group = group,
+                  alpha = 0.1),
+              na.rm = T) +
+  geom_point(data = r_values_merged_data_only,
+             aes(x = age,y = `Observed VAF`,colour = key),
+             size = 0.3) +
+  geom_line(data = r_values_merged_prediction_only,
+            aes(x = age,y = `Inferred VAF`,colour = key,group = group),
+            size = 0.25) +
+  facet_wrap(~ individual,scales = "free",ncol = 22) + 
+  scale_color_manual(guide=F,
+                     values = c("red4","goldenrod1")) +
+  theme_gerstung(base_size = 6) + 
+  theme(legend.position = 'bottom') +
+  xlab("Age") + 
+  ylab("VAF") + 
+  scale_alpha(range = c(0.05,0.05),guide=F) +
+  scale_y_continuous(n.breaks = 4) +
+  scale_x_continuous(breaks = seq(0,200,by = 5)) +
+  ggtitle("Inferred (dark red) and observed (golden) trajectories for recurrent sites") +
+  ggsave(useDingbats=FALSE,
+         sprintf("figures/%s/inferred_trajectories/plot_all_trajectories_full.pdf",model_id),
+         width = 16,height = 8)
+```
+
 ### Visualising example trajectories
 
 We can see how the previous statistic becomes clearer as soon as we plot these trajectories.
 
-```{r model_f2_dynamic_visualization_all,fig.width = 6,fig.height = 5}
+```{r model_ch_dynamic_visualization_all,fig.width = 6.5,fig.height = 3.4}
 r_values_merged <- merge(statistic_full,
                          r_values_,
                          all_y = F,
@@ -1175,7 +1227,7 @@ r_values_merged %>%
               na.rm = T) +
   geom_line(aes(colour = key,group = as.factor(paste0(as.character(individual),key))),
             size = 0.25) +
-  facet_wrap(~ site_plot,scales = "free",ncol = 6) + 
+  facet_wrap(~ site_plot,scales = "free",ncol = 8) + 
   scale_color_manual(guide=F,
                      values = c("red4","goldenrod1")) +
   theme_gerstung(base_size = 6) + 
@@ -1184,9 +1236,10 @@ r_values_merged %>%
   ylab("VAF") + 
   scale_x_continuous(n.breaks = 4,
                      breaks = function(x) floor(x[1]) + seq(1,x[2],by = round((x[2] - x[1])/4))) +
+  scale_y_continuous(trans = 'log10') +
   ggtitle("Inferred (dark red) and observed (golden) trajectories for recurrent sites") +
   ggsave(useDingbats=FALSE,sprintf("figures/%s/inferred_trajectories/plot_all_trajectories.pdf",model_id),
-         width = 6,height = 5)
+         width = 6.5,height = 3.4)
 ```
 
 To better understand this at a higher resolution, by observing the trajectories below we can more finely comprehend what an outlier is in the context of this study, and we can observe how prediction works.
@@ -1319,7 +1372,7 @@ We can now inspect the coefficients for all genomic resolutions (gene and site) 
 
 The most relevant aspects are the wide range of dynamics observable for all genes and the seemingly weak influence of site identity in dynamics, with a clear exception being P95H in *SRSF2*, which grows much faster than mutations on the site site for different amino acids (P95A and P95L). Mutations in U2AF1 are unusually fast growers when compared with other genes. Another striking aspect of this analysis is how the prevalence of mutations is quite a poor predictor of their clonal dynamics - the two most frequently mutated genes, *TET2* and *DNMT3A*, do not grow anywhere near as fast as the fastest growing mutations, namely those in *U2AF1*, *PTPN11* and *SRSF2*-P95H.
 
-```{r model_f2_gene_coefficients, fig.width=5.6, fig.height=2.4}
+```{r model_ch_gene_coefficients, fig.width=5.6, fig.height=2.4}
 values_b_gene <- values_model$b_gene_values[[1]]
 values_b_gene$site_name <- rep(unique_gene,
                                each = length(unique(values_model$b_gene_values[[1]]$labels)))
@@ -1388,7 +1441,7 @@ tnt_diff %>%
          height = 2,width = 1.5)
 ```
 
-```{r model_f2_site_coefficients, fig.width=5.6, fig.height=2.4}
+```{r model_ch_site_coefficients, fig.width=5.6, fig.height=2.4}
 values_b_site <- values_model$b_site_values[[1]]
 values_b_site$site_name <- rep(unique_site_multiple,
                                each = length(unique(values_model$b_values[[1]]$labels)))
@@ -1414,7 +1467,7 @@ values_b_site %>% spread(key = labels,value = values) %>%
          height = 2.4,width = 5.6)
 ```
 
-```{r model_f2_full_effects, fig.width=5.6, fig.height=2.4,warning=F}
+```{r model_ch_full_effects, fig.width=5.6, fig.height=2.4,warning=F}
 min_max_plots <- c(min(c(r_values$coefficient_005,r_values$b_clone_005)),max(c(r_values$coefficient_095,r_values$b_clone_095)))
 min_max_plots <- exp(min_max_plots) * 100 - 100
 min_max_plots_growth <- sign(min_max_plots) * ceiling(abs(min_max_plots))
@@ -1630,7 +1683,7 @@ ggsave(useDingbats=FALSE,plot = gridExtra::grid.arrange(g),
        width = 5.6,height = 2.4) 
 ```
 
-```{r model_f2_full_effects_simplified, fig.width=3, fig.height=2,warning=F}
+```{r model_ch_full_effects_simplified, fig.width=3, fig.height=2,warning=F}
 label_p95h <- plot_growth_per_year_data %>%
   subset(gene == 'SRSF2') %>%
   mutate(site_name = ifelse(site_name == 'P95H',site_name,NA))

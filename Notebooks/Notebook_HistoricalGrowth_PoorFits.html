@@ -1931,11 +1931,11 @@ mt_statistics <span class="op">%&gt;%</span>
 <div id="session-details" class="section level1">
 <h1><span class="header-section-number">3</span> Session details</h1>
 <div class="sourceCode"><pre class="sourceCode r"><code class="sourceCode r"><span class="kw">cat</span>(<span class="kw">system</span>(<span class="st">&quot;git log -n1&quot;</span>, <span class="dt">intern=</span><span class="ot">TRUE</span>), <span class="dt">sep=</span><span class="st">&quot;</span><span class="ch">\n</span><span class="st">&quot;</span>)</code></pre></div>
-<pre><code>## commit f91aee4960fe195b4cee1dcc7244e77030e60921
+<pre><code>## commit 110847d95a71eefe6156e992e8a0c244ecac01f3
 ## Author: josegcpa &lt;josegcpa@ebi.ac.uk&gt;
-## Date:   Mon Jul 26 13:10:38 2021 +0100
+## Date:   Tue Jul 27 14:07:14 2021 +0100
 ## 
-##     updated README and added theoretical LOD calculations</code></pre>
+##     finalising a few things</code></pre>
 <div class="sourceCode"><pre class="sourceCode r"><code class="sourceCode r">l &lt;-<span class="st"> </span><span class="kw">ls</span>()
 <span class="kw">data.frame</span>(<span class="dt">variable=</span>l, <span class="kw">Reduce</span>(<span class="st">&quot;rbind&quot;</span>,<span class="kw">lapply</span>(l, <span class="cf">function</span>(x) <span class="kw">data.frame</span>(<span class="dt">classes=</span><span class="kw">paste</span>(<span class="kw">class</span>(<span class="kw">get</span>(x)),<span class="dt">collapse =</span> <span class="st">','</span>), <span class="dt">size=</span><span class="kw">format</span>(<span class="kw">object.size</span>(<span class="kw">get</span>(x)), <span class="dt">units=</span><span class="st">&quot;auto&quot;</span>)))))</code></pre></div>
 <div data-pagedtable="false">
