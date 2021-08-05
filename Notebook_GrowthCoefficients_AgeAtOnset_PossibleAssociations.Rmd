@@ -1825,7 +1825,7 @@ N <- full_data %>%
   summarise(N = length(unique(SardID))) %>%
   arrange(Gender)
   
-effect_distribution_gender <- full_data %>%
+effect_distribution_sex <- full_data %>%
   select(individual = SardID,Gender) %>% 
   distinct %>%
   merge(r_values %>% select(individual,site,coefficient,b_clone,genes),by = c('individual')) %>%
@@ -1853,7 +1853,7 @@ effect_distribution_gender <- full_data %>%
   xlab("Gender") + 
   theme(axis.text = element_text(size = 6))
 
-gene_mutation_distribution_gender <- load_data_keep() %>%
+gene_mutation_distribution_sex <- load_data_keep() %>%
   select(SardID,Gender,Gene,AAChange.refGene) %>% 
   subset(Gene %in% load_included_genes() | is.na(Gene)) %>% 
   group_by(Gender) %>% 
@@ -1880,8 +1880,8 @@ gene_mutation_distribution_gender <- load_data_keep() %>%
         legend.key.width = unit(0.2,"cm")) +
   scale_y_continuous(expand = c(0,0))
 
-effect_distribution_gender %>% 
-  ggsave(useDingbats=FALSE,filename = sprintf("figures/%s/dynamic_coefficients/gender_driver_effect.pdf",model_id),
+effect_distribution_sex %>% 
+  ggsave(useDingbats=FALSE,filename = sprintf("figures/%s/dynamic_coefficients/sex_driver_effect.pdf",model_id),
          width = 2,height = 2)
 
 D <- load_data_keep() %>% 
@@ -1895,10 +1895,10 @@ D <- load_data_keep() %>%
 glm(HasU2AF1 ~ Gender + Age, data = D,
     family = stats::binomial()) %>% summary
 
-plot_grid(effect_distribution_gender,gene_mutation_distribution_gender,
+plot_grid(effect_distribution_sex,gene_mutation_distribution_sex,
           nrow = 1,rel_widths = c(0.6,1)) + 
   ggsave(useDingbats=FALSE,
-         filename = sprintf("figures/%s/dynamic_coefficients/gender_driver_effect_barplot.pdf",model_id),
+         filename = sprintf("figures/%s/dynamic_coefficients/sex_driver_effect_barplot.pdf",model_id),
          width = 3,height = 2)
 ```
 
@@ -2141,11 +2141,11 @@ subset(n_mut_r_values,gene == "U2AF1") %>%
          height = 1.5,width = 1) 
 ```
 
-##### Age, gender and smoking status
+##### Age, sex and smoking status
 
-To explain the greater prevalence of CH in older ages, it could be postulated that clone development is accelerated by age, dependent on gender or accelerated by previous smoking experience. Here, we find no evidence for such an effect. As such, it is unlikely that either of these factors plays a role in accelerating clonal dynamics in a senior population.
+To explain the greater prevalence of CH in older ages, it could be postulated that clone development is accelerated by age, dependent on sex or accelerated by previous smoking experience. Here, we find no evidence for such an effect. As such, it is unlikely that either of these factors plays a role in accelerating clonal dynamics in a senior population.
 
-```{r mutation_independent_age_association, fig.width=2,fig.height=1.3}
+```{r unknown_cause_sex_smoked_association, fig.width=2,fig.height=1.3}
 good_stat_sites <- statistic_full %>%
   subset(sum_stat == T) %>% 
   mutate(X = paste(individual,site)) %>% 
@@ -2190,7 +2190,7 @@ pearson_correlations <- rbind(
   )
 )
 
-smoking_gender_data <- load_smoking_data() %>% 
+smoking_sex_data <- load_smoking_data() %>% 
   group_by(SardID) %>%
   summarise(HasSmoked = any(PackYears>0)) %>%
   merge(distinct(select(full_data,SardID,Gender))) %>%
@@ -2204,14 +2204,14 @@ tmp <- r_values %>%
   summarise(age = mean(age)) %>% 
   ungroup %>% 
   mutate(genes = str_match(genes,'[A-Z0-9]+')) %>% 
-  merge(smoking_gender_data,by = "individual") %>% 
+  merge(smoking_sex_data,by = "individual") %>% 
   na.omit
 
 D <- tmp %>%
   na.omit %>% 
   group_by(individual,HasSmoked,Gender,age) %>% 
   summarise(b_clone = mean(b_clone))
-anova_age_gender_smoking <- list(
+anova_age_sex_smoking <- list(
   `All genes` = anova(
     glm(b_clone ~ 1,data = D),
     glm(b_clone ~ age + Gender + HasSmoked,data = D),test = "F")
@@ -2223,18 +2223,18 @@ for (G in unique(tmp$genes)) {
     group_by(individual,HasSmoked,Gender,age) %>% 
     summarise(b_clone = mean(b_clone))
   if (nrow(D) > 5) {
-    anova_age_gender_smoking[[G]] <- anova(
+    anova_age_sex_smoking[[G]] <- anova(
       glm(b_clone ~ 1,data = D),
       glm(b_clone ~ age + Gender + HasSmoked,data = D),test = "F")
   }
   }
 
-p_values <- anova_age_gender_smoking %>% 
+p_values <- anova_age_sex_smoking %>% 
   lapply(function(x) x$`Pr(>F)`[2]) %>% 
   unlist %>%
   as.tibble %>% 
-  mutate(Gene = names(anova_age_gender_smoking)) %>%
-  mutate(`F-statistic` = sapply(anova_age_gender_smoking,function(x) x$F[2]))
+  mutate(Gene = names(anova_age_sex_smoking)) %>%
+  mutate(`F-statistic` = sapply(anova_age_sex_smoking,function(x) x$F[2]))
 
 adjusted_pvalues <- p.adjust(c(p_values$value,pearson_correlations$p.val),
                              method = "BH") < 0.05
@@ -2257,7 +2257,7 @@ uc_age_plot <- tmp %>%
                      labels = paste0(seq(-10,100,by = 10),'%'),
                      expand = c(0.05,0,0.0,0))
 
-uc_gender_smoker_plot <- tmp %>% 
+uc_sex_smoker_plot <- tmp %>% 
   mutate(
     L = paste(ifelse(Gender == "M","Male","Female"),
               ifelse(HasSmoked == T,"\nhas smoked","\nnever smoked"),
@@ -2273,12 +2273,15 @@ uc_gender_smoker_plot <- tmp %>%
                      labels = sprintf("%s%%",c(-10,0,10,20))) +
   scale_colour_aaas(guide = F)
 
-uc_gender_smoker_plot + 
-  ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_gender_smoked.pdf",model_id),
+uc_sex_smoker_plot + 
+  ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_sex_smoked.pdf",model_id),
          height = 1.3,width = 2) 
+```
+
+```{r unknown_cause_age_association,fig.width=2,fig.height=1.3}
 uc_age_plot + 
   ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_age.pdf",model_id),
-         height = 1,width = 1.5) 
+         height = 1.3,width = 2) 
 ```
 
 ```{r uc_age_pearson,fig.width=1.3,fig.height=1}
@@ -2290,6 +2293,7 @@ Parameters %>%
   ggplot(aes(x = age, y = fraction,colour = gene)) +
   geom_point(size = 0.5) + 
   geom_point(size = 0.5,alpha = 0.01,colour = "black") + 
+  geom_smooth(method = "lm",formula = y ~ x,colour = "black",size = 0.25) +
   ylab("TET2 UC effect") +
   xlab("Age at mutation detection") + 
   scale_colour_manual(values = gene_colours,guide = F) + 
@@ -2299,7 +2303,7 @@ Parameters %>%
   scale_y_continuous(breaks = c(-0.1,0,0.1,0.2),
                      labels = sprintf("%s%%",c(-10,0,10,20))) +
   ggsave(useDingbats=FALSE,sprintf("figures/%s/dynamic_coefficients/uc_age_pearson.pdf",model_id),
-         height = 1,width = 1.5) 
+         height = 1.3,width = 2) 
 ```
 
 ##### Driver effect vs. unknown cause effect at the clone level
@@ -4800,303 +4804,6 @@ save(r_values,statistics_data,Parameters_Age,r_values_full,
 ```
 
 # Post-hoc analysis
-
-## Maximum VAF and dynamics and their association with blood indices
-
-Here, we test the association between blood indices and the maximum VAF and clonal dynamics inferred in this study. We study only a few relevant blood indices to ensure higher statistical power - haemoglobin concentration (Hb), mean corpuscular volume (MCV), red cell distribution width (RDW), white blood cell count (WBC), neutrophyle, lymphocyte and monocyte absolute counts (Neut, Lymph and Mono, respectively), and platelet counts (Plt). To characterise these blood indices over time, we calculate their average value (Mean) and their dynamics assuming they follow a linear trend through time (Slope).
-
-```{r load data and merge}
-stat_sign_individuals <- statistics_data %>%
-  group_by(individual,site) %>%
-  summarise(sig = sum(sum_stat == T) > 0) 
-
-blood_count_data <- load_blood_count_data()
-fuller_data <- merge(load_data_keep(),blood_count_data,by = c("SardID","Phase"),all.y = T) %>%
-  subset(!(SardID %in% c(load_excluded_individuals(),load_excluded_individuals_lymph()))) 
-```
-
-```{r data preprocessing}
-complete_blood_counts <- fuller_data %>%
-  group_by(SardID) %>%
-  mutate(relative_timepoint = Phase - min(Phase) + 1) %>% 
-  transmute(
-    Phase,Age,relative_timepoint,Gender,
-    HB,
-    MCV,
-    RDW,
-    WBC,
-    NEUT = NEUT_PERC*WBC,
-    LYMPH = LYMPH_PERC*WBC,
-    MONO = MONO_PERC*WBC,
-    PLT,
-    Phase,Age,
-    VAF) %>%
-  distinct %>% 
-  gather(key = "par",value = "val",-SardID,-Phase,-Age,-relative_timepoint,-Gender,-VAF) 
-
-blood_counts_effects <- complete_blood_counts %>% 
-  select(-VAF) 
-
-id_par_df <- blood_counts_effects %>%
-  select(SardID,par) %>% 
-  distinct
-
-max_vaf <- full_data %>%
-  group_by(SardID,amino_acid_change) %>%
-  summarise(
-    maxVAF = VAF[which.max(Age)]) %>%
-  transmute(maxVAF = maxVAF,
-            SardID = SardID,
-            site = amino_acid_change)
-
-pre_slope_intercept_blood <- id_par_df %>%
-  apply(1,function(x) {
-    S <- gsub(' ','',x[1])
-    P <- x[2]
-    sub_data <- blood_counts_effects %>%
-      subset(SardID == S & par == P) %>%
-      distinct %>%
-      subset(!is.na(Age))
-    age_val <- sub_data %>%
-      ungroup() %>% 
-      select(Age,val) %>%
-      na.omit() %>% 
-      distinct
-    Age <- age_val$Age
-    val <- age_val$val
-    Formula <- 'Age ~ val'
-
-    M <- data.frame(
-      SardID = S,
-      Slope = ifelse(
-        length(Age) > 1,
-        sum((Age - mean(Age))*(val - mean(val))) / sum((Age-mean(Age))^2),
-        NA),
-      par = P,
-      meanAge = mean(Age),
-      Mean = mean(val),
-      Gender = sub_data$Gender[1]
-    )
-    return(M)
-  }) %>%
-  Filter(f = function(x) !is.null(x)) %>%
-  do.call(what = rbind) %>% 
-  mutate(
-    par = factor(
-      par,
-      levels = c("MCV","HB","RDW",
-                 "PLT",
-                 "WBC","LYMPH","MONO","NEUT"),
-      labels = c("MCV","Hb","RDW",
-                 "Plt",
-                 "WBC","Lymph","Mono","Neut")
-    )
-  )
-
-slope_intercept_blood_full_ <- pre_slope_intercept_blood %>%
-  merge(max_vaf,by = c("SardID"),all.x = T) %>%
-  merge(select(Parameters_Age,SardID = individual,site,gene,b_clone_mean,b_genetic_mean),
-        by = c("SardID","site"),all.x = T) %>%
-  mutate(total_effect = b_genetic_mean + b_clone_mean) %>%
-  mutate(maxVAF = ifelse(is.na(maxVAF),0,maxVAF),
-         b_clone_mean = ifelse(is.na(b_clone_mean),0,b_clone_mean),
-         total_effect = ifelse(is.na(total_effect),0,total_effect)) %>%
-  merge(stat_sign_individuals,by.x = c("SardID","site"),by.y = c("individual","site"))
-
-slope_intercept_blood_full <- slope_intercept_blood_full_ %>%
-  subset(sig == T)
-```
-
-### Association between unknown cause growth effect and blood index slope and mean
-
-To test this, as an initial step we assess whether there is a monotonic relationship between the unknown cause effect and each blood index, doing so separately for *DNMT3A* and *TET2*. We find no relevant associations between UC effect and blood indices, something which may be associated with low statistical power.
-
-```{r uc_blood_effect_tet2}
-slope_intercept_blood <- slope_intercept_blood_full %>%
-  subset(gene == "TET2") %>% 
-  group_by(SardID) %>%
-  mutate(clauseSite = maxVAF == max(maxVAF),
-         clauseTotal = total_effect == max(total_effect)) %>%
-  mutate(clauseSite = ifelse(is.na(clauseSite),T,clauseSite),
-         clauseTotal = ifelse(is.na(clauseTotal),T,clauseTotal)) %>%
-  subset(clauseSite)  %>% 
-  mutate(logMaxVAF = log(maxVAF)) %>%
-  ungroup()
-
-blood_effect_models <- list()
-for (x in unique(slope_intercept_blood$par)) {
-  tmp <- list(
-    mean = list(),
-    slope = list()
-  )
-  if (x == "RDW") {
-    sub_data <- slope_intercept_blood %>%
-      ungroup %>% 
-      subset(par == x) %>%
-      subset(!is.na(Mean)) %>%
-      mutate(gene = str_match(site,'[A-Z0-9]+')) %>%
-      select(Mean,meanAge,Gender,maxVAF,total_effect,b_clone_mean)
-    tmp$mean$model <- glm(Mean ~ maxVAF + Gender*meanAge + b_clone_mean,data=sub_data)
-    tmp$mean$model_null <- glm(Mean ~ maxVAF + Gender*meanAge,data=sub_data)
-    tmp$slope$model <- NULL
-    tmp$slope$model_null <- NULL
-    tmp$mean$data <- cbind(sub_data,
-                           Pred = predict(tmp$mean$model,newdata=sub_data))
-    tmp$slope$data <- NULL
-    tmp$slope$coefficients <- NULL
-    tmp$mean$rank_correlation <- cor.test(sub_data$Mean,sub_data$b_clone_mean,method = "spearman")
-  } else {
-    sub_data <- slope_intercept_blood %>%
-      ungroup %>%
-      subset(par == x) %>%
-      subset(!is.na(Mean) & !is.na(Slope) & !is.na(maxVAF) & !is.na(b_clone_mean)) %>%
-      mutate(gene = str_match(site,'[A-Z0-9]+')) %>%
-      select(Mean,Slope,meanAge,Gender,maxVAF,total_effect,b_clone_mean)
-    tmp$mean$model <- glm(Mean ~ maxVAF + Gender*meanAge + b_clone_mean,data=sub_data)
-    tmp$mean$model_null <- glm(Mean ~ maxVAF + Gender*meanAge,data=sub_data)
-    tmp$slope$model <- glm(Slope ~ maxVAF + Gender*meanAge + b_clone_mean,data=sub_data)
-    tmp$slope$model_null <- glm(Slope ~ maxVAF + Gender*meanAge,data=sub_data)
-    tmp$mean$data <- cbind(sub_data,Pred = predict(tmp$mean$model,newdata=sub_data))
-    tmp$slope$data <- cbind(sub_data,Pred = predict(tmp$slope$model,newdata=sub_data))
-    tmp$mean$rank_correlation <- cor.test(sub_data$Mean,sub_data$b_clone_mean,method = "spearman")
-    tmp$slope$rank_correlation <- cor.test(sub_data$Slope,sub_data$b_clone_mean,method = "spearman")
-  }
-  blood_effect_models[[x]] <- tmp
-}
-
-all_model_significance_tet2 <- lapply(names(blood_effect_models),function(x) {
-  if (x == "RDW") {
-    c(p.val=blood_effect_models[[x]]$mean$rank_correlation$p.value,
-      rho=blood_effect_models[[x]]$mean$rank_correlation$estimate,
-      par = x,coef = "mean") %>%
-      return
-  } else {
-    rbind(
-          c(p.val=blood_effect_models[[x]]$mean$rank_correlation$p.value,
-            rho=blood_effect_models[[x]]$mean$rank_correlation$estimate,
-            par = x,coef = "mean"),
-          c(p.val=blood_effect_models[[x]]$slope$rank_correlation$p.value,
-            rho=blood_effect_models[[x]]$slope$rank_correlation$estimate,
-            par = x,coef = "slope")
-    ) %>%
-      return
-  }
-}) %>% 
-  do.call(what = rbind) %>%
-  as.data.frame() %>%
-  mutate(p.val = as.numeric(as.character(p.val)),
-         rho = as.numeric(as.character(rho.rho)))
-```
-
-```{r uc_blood_effect_dnmt3a}
-slope_intercept_blood <- slope_intercept_blood_full %>%
-  subset(gene == "DNMT3A") %>% 
-  group_by(SardID) %>%
-  mutate(clauseSite = maxVAF == max(maxVAF),
-         clauseTotal = total_effect == max(total_effect)) %>%
-  mutate(clauseSite = ifelse(is.na(clauseSite),T,clauseSite),
-         clauseTotal = ifelse(is.na(clauseTotal),T,clauseTotal)) %>%
-  subset(clauseSite)  %>% 
-  mutate(logMaxVAF = log(maxVAF)) %>%
-  ungroup()
-
-blood_effect_models <- list()
-for (x in unique(slope_intercept_blood$par)) {
-  tmp <- list(
-    mean = list(),
-    slope = list()
-  )
-  if (x == "RDW") {
-    sub_data <- slope_intercept_blood %>%
-      ungroup %>% 
-      subset(par == x) %>%
-      subset(!is.na(Mean)) %>%
-      mutate(gene = str_match(site,'[A-Z0-9]+')) %>%
-      select(Mean,meanAge,Gender,maxVAF,total_effect,b_clone_mean)
-    tmp$mean$model <- glm(Mean ~ maxVAF + Gender*meanAge + b_clone_mean,data=sub_data)
-    tmp$mean$model_null <- glm(Mean ~ maxVAF + Gender*meanAge,data=sub_data)
-    tmp$slope$model <- NULL
-    tmp$slope$model_null <- NULL
-    tmp$mean$data <- cbind(sub_data,
-                           Pred = predict(tmp$mean$model,newdata=sub_data))
-    tmp$slope$data <- NULL
-    tmp$slope$coefficients <- NULL
-    tmp$mean$rank_correlation <- cor.test(sub_data$Mean,sub_data$b_clone_mean,method = "spearman")
-  } else {
-    sub_data <- slope_intercept_blood %>%
-      ungroup %>%
-      subset(par == x) %>%
-      subset(!is.na(Mean) & !is.na(Slope) & !is.na(maxVAF) & !is.na(b_clone_mean)) %>%
-      mutate(gene = str_match(site,'[A-Z0-9]+')) %>%
-      select(Mean,Slope,meanAge,Gender,maxVAF,total_effect,b_clone_mean)
-    tmp$mean$model <- glm(Mean ~ maxVAF + Gender*meanAge + b_clone_mean,data=sub_data)
-    tmp$mean$model_null <- glm(Mean ~ maxVAF + Gender*meanAge,data=sub_data)
-    tmp$slope$model <- glm(Slope ~ maxVAF + Gender*meanAge + b_clone_mean,data=sub_data)
-    tmp$slope$model_null <- glm(Slope ~ maxVAF + Gender*meanAge,data=sub_data)
-    tmp$mean$data <- cbind(sub_data,Pred = predict(tmp$mean$model,newdata=sub_data))
-    tmp$slope$data <- cbind(sub_data,Pred = predict(tmp$slope$model,newdata=sub_data))
-    tmp$mean$rank_correlation <- cor.test(sub_data$Mean,sub_data$b_clone_mean,method = "spearman")
-    tmp$slope$rank_correlation <- cor.test(sub_data$Slope,sub_data$b_clone_mean,method = "spearman")
-  }
-  blood_effect_models[[x]] <- tmp
-}
-
-all_model_significance_dnmt3a <- lapply(names(blood_effect_models),function(x) {
-  if (x == "RDW") {
-    c(p.val=blood_effect_models[[x]]$mean$rank_correlation$p.value,
-      rho=blood_effect_models[[x]]$mean$rank_correlation$estimate,
-      par = x,coef = "mean") %>%
-      return
-  } else {
-    rbind(
-          c(p.val=blood_effect_models[[x]]$mean$rank_correlation$p.value,
-            rho=blood_effect_models[[x]]$mean$rank_correlation$estimate,
-            par = x,coef = "mean"),
-          c(p.val=blood_effect_models[[x]]$slope$rank_correlation$p.value,
-            rho=blood_effect_models[[x]]$slope$rank_correlation$estimate,
-            par = x,coef = "slope")
-    ) %>%
-      return
-  }
-}) %>% 
-  do.call(what = rbind) %>%
-  as.data.frame() %>%
-  mutate(p.val = as.numeric(as.character(p.val)),
-         rho = as.numeric(as.character(rho.rho)))
-```
-
-```{r uc_blood_effect_significance,fig.width=3,fig.height=2}
-model_significance_tet2_dnmt3a <- rbind(
-  cbind(all_model_significance_dnmt3a,gene = "DNMT3A"),
-  cbind(all_model_significance_tet2,gene = "TET2")
-)
-bht <- bh_threshold(model_significance_tet2_dnmt3a$p.val)
-cat(sprintf("\nNumber of significant hits: %s\n",
-            sum(model_significance_tet2_dnmt3a$p.val < 0.05)))
-cat(sprintf("Number of significant hits after controlling for multiple testing: %s\n",
-            sum(model_significance_tet2_dnmt3a$p.val < bht)))
-
-ggplot(model_significance_tet2_dnmt3a,
-       aes(x = rho,y = -log10(p.val),shape = coef,colour = gene)) + 
-  geom_point(aes(group = gene),position = position_dodge(width = 0.5)) + 
-  theme_gerstung(base_size = 6) + 
-  scale_y_continuous(breaks = c(0,2,4,6),labels = scientific(c(1,1e-2,1e-4,1e-6))) + 
-  geom_hline(yintercept = -log10(bht),linetype = 2) + 
-  xlab("Spearman's rho") + 
-  ylab("p-value") + 
-  theme(legend.position = "top",
-        legend.margin = margin(),
-        legend.key.height = unit(0.1,"cm"),
-        axis.text = element_text(size = 6),
-        legend.text = element_text(size = 6)) + 
-  scale_colour_manual(values = gene_colours,
-                      name = NULL) + 
-  scale_shape(name = NULL) +
-  rotate_x_text() +
-  ggsave(useDingbats=FALSE,
-         filename = sprintf("figures/%s/dynamic_coefficients/blood_count_significance.pdf",model_id),
-         width = 3,height = 2)
-```
 
 ## Survival analysis 
 
