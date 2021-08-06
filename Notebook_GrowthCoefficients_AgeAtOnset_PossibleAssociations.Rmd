@@ -3818,7 +3818,8 @@ predictions_6th_tp <- data_6th_tp %>%
          pred_005 = as.numeric(as.character(pred_005)),
          pred = as.numeric(as.character(pred)),
          pred_095 = as.numeric(as.character(pred_095)),
-         VAF = as.numeric(as.character(VAF)))
+         VAF = as.numeric(as.character(VAF))) %>%
+  na.omit
 
 last_tp <- r_values_full %>%
   mutate(site = paste(str_match(site,'[A-Z0-9]+'),str_match(site,'-.*'),sep = '')) %>% 

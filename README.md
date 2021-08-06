@@ -1,5 +1,9 @@
 # The Natural History Dynamics of Clonal Haematopoiesis
 
+## Accessing the analysis
+
+*You can access the analysis in this repository at [this dedicated webpage](https://gerstung-lab.github.io/ch-dynamics/).*
+
 ## Motivation
 
 This is the repository for [The Natural History and Dynamics of Clonal Haematopoiesis](). In this work, we investigate the fitness differences between genes, sites and individual clones using longitudinal sequencing data from >300 individuals between 54 and 103 years old.
@@ -21,10 +25,6 @@ The data required to run the code in this repository is available in https://doi
 #### R library
 
 `ape`,`bayesplot`,`castor`,`cowplot`,`default`,`dendextend`,`extraDistr`,`ggplot`,`ggpubr`,`ggrepel`,`ggsci`,`ggtree`,`greta`,`grid`,`gtools`,`Matrix`,`minpack.lm`,`openxlsx`,`parallel`,`phangorn`,`phylodyn`,`reghelper`,`reticulate`,`scatterpie`,`survival`,`survminer`,`tidyverse`
-
-### Accessing the analysis
-
-You can access the analysis in [this dedicated webpage](https://ch-dynamics.netlify.app/).
 
 ### Running the analysis
 
