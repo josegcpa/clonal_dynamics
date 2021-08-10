@@ -708,8 +708,9 @@ subset(all_growth_estimates_df_var,alpha_W == T) %>%
                                  `Other driver` = "#18A558",
                                  `No known driver` = "grey40"),
                       guide = F) + 
+  scale_x_continuous(expand = c(0,0)) +
   scale_y_continuous(trans = 'log10',expand = c(0,0),breaks = c(1e-2,1,1e2,1e4,1e6)) +
-  coord_cartesian(ylim = c(1e-2,1e7)) +
+  coord_cartesian(ylim = c(0.5,1e7)) +
   theme_gerstung(base_size = 6) + 
   xlab("Time since first coal. (years)") +
   ylab("Neff") +

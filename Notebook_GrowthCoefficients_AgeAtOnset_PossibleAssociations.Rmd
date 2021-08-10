@@ -2286,7 +2286,8 @@ uc_age_plot +
 
 ```{r uc_age_pearson,fig.width=1.3,fig.height=1}
 pearson_correlations %>%
-  select(Gene = gene,`Spearman's rho` = rho,`p-value` = p.val,`Significant after correction` = Significant)
+  select(Gene = gene,`Spearman's rho` = rho,`p-value` = p.val,`Significant after correction` = Significant) %>%
+  mutate(`p-value` = p.adjust(`p-value`,"BH"))
 Parameters %>% 
   subset(gene == "TET2") %>%
   mutate(fraction = exp(b_clone_mean)-1) %>%
@@ -5339,18 +5340,6 @@ dd %>%
          width = 2.5,height = 1.5)
 
 lm(formula = dnds ~ mean,data = dd) %>%
-  summary
-
-lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "AML") %>%
-  summary
-
-lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "MDS") %>%
-  summary
-
-lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "AML" & dd$gene == "DNMT3A") %>%
-  summary
-
-lm(formula = dnds ~ mean,data = dd,subset = dd$condition == "MDS" & dd$gene == "DNMT3A") %>%
   summary
 
 lm(formula = dnds ~ mean + condition,data = dd) %>%

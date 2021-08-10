@@ -1107,7 +1107,7 @@ coefficients_df <- plot_list %>%
          b95 = ifelse(source == "Longitudinal",b_q95,relevant_growth+relevant_growth_se*1.96))
 
 site_labels <- sapply(
-  strsplit(rev(c("SF3B1-K666N","U2AF1-Q157R","UD1","UD2","UD3")), "-"), 
+  strsplit(c("SF3B1-K666N","U2AF1-Q157R","UD1","UD2","UD3"), "-"), 
   function(x) ifelse(
     length(x) > 1,
     parse(text = sprintf("atop(atop(textstyle(italic('%s')),textstyle('%s')),'')",x[1],x[2])),
@@ -1139,7 +1139,7 @@ coefficients_df_long <- rbind(
 coefficient_age_comparison_plot <- coefficients_df_long %>% 
   mutate(plot_label = factor(
     plot_label,
-    levels = rev(c("SF3B1-K666N","U2AF1-Q157R","UD1","UD2","UD3")))) %>%
+    levels = c("SF3B1-K666N","U2AF1-Q157R","UD1","UD2","UD3"))) %>%
   ggplot(aes(x = as.numeric(as.factor(plot_label)),
              y = mean,
              ymin = q05,
@@ -1159,8 +1159,8 @@ coefficient_age_comparison_plot <- coefficients_df_long %>%
                      breaks = c(1,2,3,4,5),
                      trans = "reverse",
                      expand = c(0,0)) + 
-  facet_grid(id ~ individual,
-             scales = "free",switch = "y",space = "free_x") + 
+  facet_grid(individual ~ id,
+             scales = "free",switch = "x",space = "free_y") + 
   scale_y_continuous(expand = c(0,0)) + 
   theme(strip.background = element_blank(),
         strip.text = element_text(size = 6),
@@ -1175,7 +1175,8 @@ coefficient_age_comparison_plot <- coefficients_df_long %>%
         plot.title = element_text(size = 6,margin = margin(b = 0))) + 
   xlab("") + 
   ylab("") +
-  theme(strip.text.y = element_text(angle = 0))
+  theme(strip.text.y = element_text(angle = 0)) + 
+  coord_flip()
 
 linear_coefficients_only_plot <- coefficients_df %>% 
   mutate(plot_label = factor(plot_label,
@@ -1359,8 +1360,8 @@ tree_plot_reordered <- plot_grid(
 
 tree_plot_reordered %>% 
   ggsave(filename = sprintf("figures/%s/trees/all_trees_and_dynamics_full.pdf",model_id),
-         height = 8,
-         width = 8,
+         height = 6,
+         width = 6,
          useDingbats = F)
 tree_plot_reordered %>% 
   ggsave(filename = sprintf("figures/%s/trees/all_trees_and_dynamics_full_redux.pdf",model_id),
@@ -1368,9 +1369,9 @@ tree_plot_reordered %>%
          width = 5,
          useDingbats = F)
 
-ggsave(plot = coefficient_age_comparison_plot,
+ggsave(plot = coefficient_age_comparison_plot + theme(strip.text.y = element_text(angle = 90)),
        filename = sprintf("figures/%s/trees/coef_age_plot.pdf",model_id),
-       width = 8.6 / 3,height = 2.7,
+       width = 2.2,height = 2.5,
        useDingbats = F)
 
 ggsave(plot = linear_coefficients_only_plot + ylab("Growth per year"),
