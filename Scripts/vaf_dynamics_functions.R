@@ -378,55 +378,9 @@ load_smoking_data <- function() {
   read.table("data/smoke.txt",header = T,sep = '\t') 
 }
 
-#' Load survival data.
+#' Load phylogenetic trees.
 #' 
-#' @returns Returns the time of death for all individuals.
-load_survival_data <- function() {
-  read.xlsx("data/AliveDead_final.xlsx")
-}
-
-#' Load comorbidity data.
-#' 
-#' @returns Returns the comorbidities for all individuals.
-load_comorbidity_data <- function() {
-  tmp <- read_tsv("data/comorbidities.tsv")
-  tmp_cn <- colnames(tmp)
-  tmp[,2:ncol(tmp)] <- apply(tmp[,2:ncol(tmp)],2,function(x) x=='Y') %>% 
-    as.data.frame()
-  tmp <- as_tibble(tmp)
-  colnames(tmp) <- tmp_cn
-  tmp <- tmp[,-ncol(tmp)] %>% 
-    mutate(SardID=INDIVIDUAL) %>% 
-    select(-INDIVIDUAL)
-  return(tmp)
-}
-
-#' Load JAK2 genotype data.
-#' 
-#' @returns Returns the JAK2 genotype data.
-load_jak2_genotype <- function() {
-  file_name <- "data/CHP_data.xlsx"
-  all_workbook_names <- loadWorkbook(file = file_name)$sheet_names %>%
-    as.list()
-  
-  all_sheets <- lapply(all_workbook_names,function(x) read.xlsx(file_name,sheet = x)) 
-  names(all_sheets) <- all_workbook_names
-  
-  output <- list()
-  for (x in all_workbook_names[3:length(all_workbook_names)]) {
-    tmp <- all_sheets[[x]]
-    colnames(tmp) <- c("SardID","Dose","Genotype")
-    tmp <- tmp %>%
-      mutate(Site = x) %>%
-      mutate(Chromosome = str_match(Site,'[0-9]+'),
-             Site = gsub('\\.','',str_match(Site,'\\.[0-9]+\\.')))
-    output[[x]] <- tmp
-  }
-  output <- do.call(rbind,output)
-  rownames(output) <- NULL
-  return(output)
-}
-
+#' @returns Returns a list containing each tree and its respective SardID.
 load_trees <- function() {
   all_trees <- list.files('data',pattern = "tree",full.names = T)
   ids <- str_match(all_trees,'id[0-9]+') %>%
@@ -443,6 +397,10 @@ load_trees <- function() {
   return(output)
 }
 
+#' Load phylogenetic tree details.
+#' 
+#' @returns Returns a list containing details concerning branch annotation
+#' and Sard ID for each tree.
 load_tree_details <- function() {
   all_details <- list.files('data',pattern = 'details_id',full.names = T)
   ids <- str_match(all_details,'id[0-9]+') %>%
@@ -574,99 +532,6 @@ format_data <- function(full_data) {
     unique_individual_true = unique_individual_true,
     ages = ages
     ) %>%
-    return
-}
-
-#' Subsamples the formatted data from \code{format_data} given a set of 
-#' indices.
-#' 
-#' @param formatted_data_ the formatted data from \code{format_data}
-#' @param included_ids_individual a vector containing the indices that sample
-#' based on an individual.
-#' @param included_ids_individual_age a vector containing the indices that sample
-#' based on an individual and their age.
-#' @returns A subsampled version of \code{formatted_data_}.
-subsample_formatted_data_index <- function(formatted_data_,included_ids_individual,included_ids_individual_age) {
-  formatted_data_$unique_individual <- formatted_data_$unique_individual[included_ids_individual_age]
-  formatted_data_$unique_individual_true <- formatted_data_$unique_individual_true[included_ids_individual]
-  formatted_data_$ages <- formatted_data_$ages[,included_ids_individual_age] %>% matrix %>% t
-
-  formatted_data_$site_to_individual_indicator <- formatted_data_$site_to_individual_indicator[,included_ids_individual_age]
-  formatted_data_$individual_indicator <- formatted_data_$individual_indicator[included_ids_individual,included_ids_individual_age]
-
-  formatted_data_$counts <- formatted_data_$counts[,included_ids_individual_age]
-  formatted_data_$coverage <- formatted_data_$coverage[,included_ids_individual_age]
-  
-  return(formatted_data_)
-}
-
-#' Randomly subsamples N individuals from the formatted data from 
-#' \code{format_data}.
-#' 
-#' @param formatted_data the formatted data from \code{format_data}
-#' @param size the number of individuals in the subsample.
-#' @returns A list containing two subsampled versions of 
-#' \code{formatted_data} - \code{train}, containing \code{size}
-#' individuals and \code{test} containing the remaining individuals.
-subsample_formatted_data_individuals <- function(formatted_data,size = 300) {
-  formatted_data_ <- formatted_data
-  
-  excluded_ids_individual <- sample(1:length(formatted_data_$unique_individual_true),
-                                    size = length(formatted_data_$unique_individual_true) - size,replace = FALSE)
-  excluded_ids_individual_age <- formatted_data_$individual_indicator[-excluded_ids_individual,]
-  excluded_ids_individual_age <- seq(1,ncol(excluded_ids_individual_age))[colSums(excluded_ids_individual_age) == 0]
-
-  included_ids_individual <- seq(1,length(formatted_data_$unique_individual_true))[-excluded_ids_individual]
-  included_ids_individual_age <- seq(1,length(formatted_data_$unique_individual))[-excluded_ids_individual_age]
-
-  formatted_data_train <- subsample_formatted_data_index(formatted_data_,
-                                                         included_ids_individual,
-                                                         included_ids_individual_age)
-  formatted_data_validation <- subsample_formatted_data_index(formatted_data_,
-                                                              excluded_ids_individual,
-                                                              excluded_ids_individual_age)
-  
-  
-  list(train = formatted_data_train,
-       validation = formatted_data_validation) %>%
-    return
-}
-
-#' Subsample the formatted data given a list of timepoints.
-#' 
-#' @param formatted_data the formatted data from \code{format_data}
-#' @param timepoint a vector containing the timepoints to keep.
-#' @returns A list containing two subsampled versions of 
-#' \code{formatted_data} - \code{train}, containing the timepoints in 
-#' \code{timepoint} and \code{test}, containing the remaining timepoints.
-subsample_formatted_data_timepoints <- function(formatted_data,timepoint = c(1)) {
-  formatted_data_ <- formatted_data
-
-  included_ids_individual_age <- match(
-    unique(formatted_data_$full_data$individual_age[formatted_data_$full_data$relative_timepoint %in% timepoint]),
-    formatted_data_$unique_individual) %>% 
-    na.exclude() %>% c
-
-  excluded_ids_individual_age <- seq(1,length(formatted_data_$unique_individual))[-included_ids_individual_age]
-
-  formatted_data_train <- formatted_data_
-  formatted_data_train$unique_individual <- formatted_data_train$unique_individual[included_ids_individual_age]
-  formatted_data_train$ages <- formatted_data_train$ages[,included_ids_individual_age] %>% matrix %>% t
-  formatted_data_train$site_to_individual_indicator <- formatted_data_train$site_to_individual_indicator[,included_ids_individual_age]
-  formatted_data_train$individual_indicator <- formatted_data_train$individual_indicator[,included_ids_individual_age]
-  formatted_data_train$counts <- formatted_data_train$counts[,included_ids_individual_age]
-  formatted_data_train$coverage <- formatted_data_train$coverage[,included_ids_individual_age]
-
-  formatted_data_validation <- formatted_data_
-  formatted_data_validation$unique_individual <- formatted_data_validation$unique_individual[excluded_ids_individual_age]
-  formatted_data_validation$ages <- formatted_data_validation$ages[,excluded_ids_individual_age] %>% matrix %>% t
-  formatted_data_validation$site_to_individual_indicator <- formatted_data_validation$site_to_individual_indicator[,excluded_ids_individual_age]
-  formatted_data_validation$individual_indicator <- formatted_data_validation$individual_indicator[,excluded_ids_individual_age]
-  formatted_data_validation$counts <- formatted_data_validation$counts[,excluded_ids_individual_age]
-  formatted_data_validation$coverage <- formatted_data_validation$coverage[,excluded_ids_individual_age]
-
-  list(train = formatted_data_train,
-       validation = formatted_data_validation) %>%
     return
 }
 
