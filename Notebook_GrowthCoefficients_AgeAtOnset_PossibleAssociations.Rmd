@@ -1,5 +1,5 @@
 ---
-title: "The Natural History and Dynamics of Clonal Haematopoiesis"
+title: "The longitudinal dynamics and natural history of clonal haematopoiesis"
 subtitle: "Growth coefficient inference, age at onset estimation and possible associations"
 author: 
     - José Guilherme de Almeida
@@ -3563,86 +3563,6 @@ all_samples_for_age_estimation_gene_specific_df %>%
   scale_colour_aaas(name = "Generations/year") + 
   ggsave(useDingbats=FALSE,
          sprintf("figures/%s/age_at_clone_foundation/variability_density.pdf",model_id),width = 7,height = 4)
-```
-
-```{r,fig.height=4,fig.width=6.5}
-hist_entropy <- function(x,M=100) {
-  x <- x[!is.na(x)]
-  D <- density(x,bw = M/10)
-  x <- data.frame(dx = D$x,dy = D$y) %>%
-    mutate(groups = cut(dx,seq(-1,M,length.out = 10))) %>%
-    group_by(groups) %>%
-    summarise(S = sum(dy))
-  x <- x$S
-  x <- x / sum(x)
-  x <- x[x > 0]
-  return(-sum(x * log(x)))
-}
-
-uniformity <- all_age_estimates %>% 
-  mutate(Gene = str_match(site,"[A-Z0-9]+")) %>% 
-  mutate(
-    Gene = ifelse(Gene == "SRSF2",
-                  ifelse(site == "SRSF2-P95H",
-                         "SRSF2-P95H",
-                         "SRSF2-other"),
-                  Gene)
-  ) %>% 
-  group_by(Gene,population,gen_time) %>%
-  arrange(Q50) %>%
-  mutate(DistToPrevious = c(NA,diff(Q50))) %>%
-  mutate(DistToPrevious_ = DistToPrevious/max(DistToPrevious)) %>%
-  mutate(Q50_ = Q50 / max(Q50,na.rm = T)) %>% 
-  summarise(D = suppressWarnings(ks.test(Q50_,"punif",0,1)$statistic),
-            entropy = hist_entropy(Q50_,1))
-
-uniformity %>% 
-  group_by(Gene) %>% 
-  mutate(R = rank(-entropy,ties.method = "min")) %>% 
-  mutate(R = ifelse(R <= 3,R,NA)) %>% 
-  ggplot(aes(x = as.factor(population),y = as.factor(gen_time),fill = entropy)) + 
-  geom_tile() + 
-  geom_text(aes(label = R),size = 2, colour = "white") + 
-  facet_wrap(~ Gene,ncol = 4) + 
-  theme_gerstung(base_size = 6) + 
-  ggtitle("Entropy of the age at onset estimates") +
-  ylab("Generations/year") + 
-  xlab("Population size") + 
-  theme(legend.key.width = unit(0.2,"cm")) +
-  scale_fill_material(palette = "deep-purple",reverse = T) + 
-  ggsave(useDingbats=FALSE,
-         sprintf("figures/%s/age_at_clone_foundation/variability_entropy.pdf",model_id),width = 6.5,height = 4)
-
-uniformity %>% 
-  group_by(Gene) %>% 
-  mutate(R = rank(D,ties.method = "min")) %>% 
-  mutate(R = ifelse(R <= 3,R,NA)) %>% 
-  ggplot(aes(x = as.factor(population),y = as.factor(gen_time),fill = D)) + 
-  geom_tile() + 
-  geom_text(aes(label = R),size = 2, colour = "white") + 
-  facet_wrap(~ Gene,ncol = 4) + 
-  theme_gerstung(base_size = 6) + 
-  ggtitle("Kolmogorof statistic for the age at onset against a uniform distribution") +
-  ylab("Generations/year") + 
-  xlab("Population size") + 
-  theme(legend.key.width = unit(0.2,"cm")) +
-  scale_fill_material(palette = "deep-purple",reverse = T) + 
-  ggsave(useDingbats=FALSE,
-         sprintf("figures/%s/age_at_clone_foundation/variability_ks.pdf",model_id),width = 6.5,height = 4)
-
-uniformity %>%
-  arrange(gen_time,population) %>% 
-  #subset(Gene %in% c("BRCC3","DNMT3A","TET2","U2AF1")) %>%
-  ggplot(aes(x = D,y = entropy,colour = gen_time,size = population)) +
-  geom_point(alpha = 0.5) + 
-  facet_wrap(~ Gene) +
-  theme_gerstung(base_size = 6) + 
-  scale_size(range = c(0.5,2)) + 
-  theme(legend.key.size = unit(0.3,"cm")) + 
-  xlab("KS statistic") + 
-  ylab("Entropy") +
-  ggsave(useDingbats=FALSE,
-         sprintf("figures/%s/age_at_clone_foundation/variability_ks_vs_entropy.pdf",model_id),width = 6.5,height = 4)
 ```
 
 #### Smoking and age at onset

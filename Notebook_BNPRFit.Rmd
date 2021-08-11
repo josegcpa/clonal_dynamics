@@ -1,5 +1,5 @@
 ---
-title: "The Natural History and Dynamics of Clonal Haematopoiesis"
+title: "The longitudinal dynamics and natural history of clonal haematopoiesis"
 subtitle: "Investigating fit to BNPR"
 author: 
     - José Guilherme de Almeida
