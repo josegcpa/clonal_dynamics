@@ -1,4 +1,4 @@
-# The Natural History Dynamics of Clonal Haematopoiesis
+# The longitudinal dynamics and natural history of clonal haematopoiesis
 
 ## Accessing the analysis
 
@@ -6,7 +6,7 @@
 
 ## Motivation
 
-This is the repository for [The longitudinal dynamics and natural history of clonal haematopoiesis](). In this work, we investigate the fitness differences between genes, sites and individual clones using longitudinal sequencing data from >300 individuals between 54 and 103 years old.
+This is the repository for [The longitudinal dynamics and natural history of clonal haematopoiesis](). In this work, we investigate the fitness differences between genes, sites and individual clones using longitudinal sequencing data from >300 individuals between 54 and 103 years old, complementing this analysis with phylogenetic and phylodynamic analysis of single-cell derived WBS colonies for 7 individuals.
 
 ## Data
 

@@ -295,6 +295,34 @@ for (tree_name in names(trees)) {
 }
 ```
 
+```{r,fig.height=2,fig.width=4}
+tree_subsets <- trees[c(3,45,68,88)]
+all_trees <- list()
+for (tree_name in names(tree_subsets)) {
+  fitness <- str_match(tree_name,"[0-9.]+")
+  tree_ <- tree_subsets[[tree_name]]
+  tree_ultra <- tree_$tree_ultra
+  driver_list <- tree_$driver_list
+  clades_plot <- list()
+  for (driver in names(driver_list)) {
+    clades_plot[[driver]] <- which(tree_$tree$S %in% driver_list[[driver]])
+  }
+  tree_groups <- groupOTU(tree_ultra,clades_plot) 
+  all_trees[[tree_name]] <- ggtree(tree_groups,aes(colour = group!='0')) + 
+    scale_color_jama(name=NULL,labels = c("Comb","Expansion")) + 
+    ggtitle(sprintf("s=%s",fitness)) + 
+    theme_gerstung(base_size = 6) + 
+    theme(legend.position = 'bottom') + 
+    theme(axis.line.y = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank()) 
+}
+
+plot_grid(plotlist = lapply(all_trees,function(x) x + theme(legend.position = 'none')),nrow=1) %>%
+  plot_grid(get_legend(all_trees[[3]]),rel_heights = c(1,0.1),ncol = 1) + 
+  ggsave("figures/simulations/tree_examples.pdf",height=2,width=4)
+```
+
 ## Calculating BNPR trajectories for the whole trees
 
 Here we calculate the actual EPS trajectories using BNPR and display them.
@@ -471,7 +499,7 @@ if (file.exists(file_name) == T) {
       as.numeric
     Tree <- list(tree = obj$tree_ultra)
     Tree$tree$tip.label <- obj$tree$S
-    Tree$tree <- trim_tree(Tree$tree,l = 50)
+    Tree$tree <- trim_tree(Tree$tree,l = 100)
     Tree$tree$edge.length[is.infinite(Tree$tree$edge.length)] <- 0
     tree <- Tree$tree
     tree_ <- tree
@@ -682,6 +710,62 @@ for (obj_name in names(all_estimates)) {
 }
 ```
 
+```{r,fig.height=2,fig.width=3}
+plot_tree_list <- list()
+plot_list <- list()
+for (b in list(all_estimates[[110]][[2]],all_estimates[[115]][[2]])) {
+  ll <- predict(object = b$linear_estimate,newdata = data.frame(X = b$data$X))
+  sig <- predict(b$non_linear_estimate,b$data$X)
+  biph_par <- b$change_point_regression$par
+  biph <- change_point(b$data$X,biph_par[1],biph_par[2],
+                       biph_par[3],biph_par[4])
+  
+  n_tips <- length(b$clade)
+  
+  plot_tree_list[[length(plot_tree_list)+1]] <- b$tree %>%
+    keep.tip(b$clade) %>% 
+    multi2di() %>%
+    ggtree +
+    theme(panel.spacing = unit(0,"cm"))
+  
+  plot_list[[length(plot_list)+1]] <- data.frame(
+    Y=b$data$Y_exp,ll=exp(ll),sig=sig,bi=exp(biph),
+    Ymin=exp(b$data$Y025),Ymax=exp(b$data$Y975),X=b$data$X) %>%
+    ggplot(aes(x = X)) + 
+    geom_ribbon(aes(ymin = Ymin,ymax = Ymax,fill = "BNPR"),alpha = 0.2) +
+    geom_line(aes(y = Y,colour = "BNPR"),size = 1,alpha = 0.5) + 
+    geom_line(aes(y = ll,colour = "Log-linear"),linetype=2) + 
+    geom_line(aes(y = sig,colour = "Sigmoid"),linetype=2) +
+    geom_line(aes(y = bi,colour = "Biphasic"),linetype=2) + 
+    theme_gerstung(base_size = 6) +
+    scale_y_continuous(trans = 'log10') + 
+    theme(legend.position="bottom",legend.key.height=unit(0,"cm")) +
+    scale_colour_d3(breaks = c("BNPR","Log-linear","Sigmoid","Biphasic"),
+                    limits = c("BNPR","Log-linear","Sigmoid","Biphasic"),
+                    name=NULL) + 
+    scale_fill_d3(breaks = c("BNPR","Log-linear","Sigmoid","Biphasic"),
+                  limits = c("BNPR","Log-linear","Sigmoid","Biphasic"),
+                  name=NULL) + 
+    xlab("Generations") + 
+    ylab("Neff") + 
+    coord_cartesian(ylim = c(10,1e8)) + 
+    ggtitle(sprintf("No. of tips in clade: %s",n_tips)) + 
+    guides(colour = guide_legend(nrow = 2))
+}
+
+plot_grid(
+  plot_grid(
+    plot_tree_list[[2]],plot_tree_list[[1]],
+    plot_list[[2]] + theme(legend.position = "none"),
+    plot_list[[1]] + theme(legend.position = "none"),
+    ncol = 2,align = "v",axis="tb",
+    rel_heights = c(0.5,1)
+  ),
+  get_legend(plot_list[[1]]),rel_heights = c(1,0.2),ncol=1
+) + 
+  ggsave("figures/simulations/bnpr-fit-examples.pdf",height=2,width=3)
+```
+
 ## Fitting different models to BNPR trajectory (5 year trimmed)
 
 ```{r}
@@ -873,7 +957,7 @@ for (obj_name in names(all_estimates_trimmed_10_years)) {
 
 ### Plotting estimates with distinct trimming
 
-```{r,fig.height=5,fig.width=6}
+```{r,fig.height=2.5,fig.width=3.5}
 trajectories_trimmed_0 <- names(all_estimates) %>%
   lapply(function(x) do.call(
     rbind,lapply(all_estimates[[x]],
@@ -903,7 +987,7 @@ rbind(trajectories_trimmed_0,
       trajectories_trimmed_10) %>%
   group_by(clade,id) %>%
   filter(all(c(0,5,10) %in% Trimmed)) %>%
-  subset(paste(id,clade) %in% sample(unique(paste(id,clade)),40,replace = F)) %>% 
+  subset(paste(id,clade) %in% sample(unique(paste(id,clade)),20,replace = F)) %>% 
   group_by(clade,id,Trimmed) %>%
   mutate(w_sum = mean(W)) %>% 
   mutate(X = X - min(X)) %>% 
@@ -925,8 +1009,9 @@ rbind(trajectories_trimmed_0,
   scale_size_manual(values = c(0.5,1.0,1.5),name = NULL) +
   xlab("Time since first coalescence (generations)") + 
   ylab("Neff") + 
-  theme(legend.position = "bottom",legend.box.spacing = unit(0,"cm")) + 
-  ggsave("figures/simulations/trimmed_representation.pdf",height = 5,width = 6)
+  theme(legend.position = "bottom",legend.box.spacing = unit(0,"cm"),
+        legend.key.height = unit(0,"cm")) + 
+  ggsave("figures/simulations/trimmed_representation.pdf",height = 2.5,width = 3.5)
 ```
 
 ## Fitting different models to BNPR trajectory (only at coalescence)
@@ -1354,7 +1439,7 @@ all_driver_fits_df <- names(all_driver_fits) %>%
 Here, we plot all of the inferred BNPR trajectories for each clade. 
 
 ```{r,fig.height=2,fig.width=3}
-all_fits %>%
+plot_data <- all_fits %>%
   do.call(what = rbind) %>%
   mutate(fitness = str_match(obj_name,"[0-9.]+")) %>% 
   group_by(n,obj_name) %>%
@@ -1364,16 +1449,40 @@ all_fits %>%
   mutate(fitness = factor(
     fitness,
     levels = seq(0.005,0.03,by = 0.005),
-    labels = sprintf("s=%s",seq(0.005,0.03,by = 0.005)))) %>% 
+    labels = sprintf("s=%s",seq(0.005,0.03,by = 0.005))))
+
+fitness_fits <- list()
+for (f in unique(plot_data$fitness)) {
+  tmp <- plot_data[plot_data$fitness == f,] %>%
+    arrange(x) %>%
+    subset(x < 400)
+  min_Y <- mean(tmp$y[tmp$x == 0])
+  tmp$y <- tmp$y/min_Y
+  fitness_fits[[f]] <- lm(log(y) ~ x-1,tmp,weights = 1/tmp$w)
+  fitness_fits[[f]]$min_Y <- min_Y
+}
+
+fitness_fits_df <- names(fitness_fits) %>%
+  lapply(function(x) {
+    X <- seq(0,max(plot_data$x))
+    min_Y <- fitness_fits[[x]]$min_Y
+    C <- fitness_fits[[x]]$coefficients
+    data.frame(x = X,y = min_Y * exp(C[1] * X),
+               fitness = x)
+  }) %>%
+  do.call(what = rbind)
+
+plot_data %>% 
   ggplot(aes(x = x,y = y)) + 
   geom_line(aes(group = n),alpha = 0.25,size = 0.25) + 
-  geom_hline(yintercept = 2e5,size = 0.25) +
+  geom_hline(yintercept = 2e5,size = 0.25) + 
+  geom_line(data = fitness_fits_df,colour = "red",alpha = 1) +
   facet_wrap(~ fitness) + 
   scale_y_continuous(trans = 'log10',expand = c(0,0),breaks = c(1e-2,1,1e2,1e4,1e6)) +
   scale_x_continuous(expand = c(0,0)) +
   theme_gerstung(base_size = 6) + 
   theme(strip.text = element_text(margin = margin(b = 0.5))) +
-  ylab("Effective population size (EPS)") + 
+  ylab("Neff") + 
   xlab("Time since first coal. (generations)") + 
   coord_cartesian(ylim = c(0.5,1e7)) +
   ggsave("figures/simulations/trajectories_BNPR.pdf",height = 1.5,width = 2.3)
@@ -1533,6 +1642,7 @@ ggplot(data = NULL) +
   scale_colour_manual(values = c(Simulated = "black",`BNPR estimate` = "orchid"),name = NULL) + 
   scale_fill_manual(values = c(Simulated = "black",`BNPR estimate` = "orchid"),name = NULL) + 
   xlab("Generation (x100)") + 
+  ylab("Neff") + 
   ggsave("figures/simulations/trajectories_wf_bnpr_subset.pdf",height = 2.2,width = 3)
 ```
 
@@ -1639,6 +1749,130 @@ df_benchmark %>%
 
 We define here a measure of excessive observed variance in the BNPR trajectory - whenever the average log-EPS variance is larger than 10 we define these trajectories as "high variance" trajectories, noting that they are trajectories which were obtained from fairly small clades (fewer than 10 tips).
 
+```{r,fig.height=2,fig.width=5}
+set.seed(42)
+all_bnpr_estimates_df <- do.call(rbind,bnpr_estimates_) %>% 
+  mutate(w = (log(quant0.975) - log(quant0.025))^2/16) %>% 
+  group_by(id, clade) %>% 
+  mutate(w_sum = mean(w))
+
+n_examples <- 4
+
+high_var_ids <- all_bnpr_estimates_df %>% 
+  subset(w_sum > 5) %>%
+  group_by(id,clade) %>%
+  filter(all(mean < 1e9)) %>%
+  subset(paste(id,clade) %in% sample(paste(id,clade),n_examples)) %>% 
+  ungroup %>%
+  arrange(w_sum) %>% 
+  select(id,clade) %>% 
+  distinct
+
+low_var_ids <- all_bnpr_estimates_df %>% 
+  subset(w_sum < 5) %>%
+  group_by(id,clade) %>%
+  filter(all(mean < 1e9)) %>%
+  subset(paste(id,clade) %in% sample(paste(id,clade),n_examples)) %>% 
+  ungroup %>%
+  arrange(w_sum) %>% 
+  select(id,clade) %>% 
+  distinct
+
+plot_tree_list <- list()
+plot_list <- list()
+low_var_estimates <- apply(low_var_ids,1,function(x) {
+  X <- all_estimates[[x[1]]][[as.numeric(x[2])]]
+  
+  X$true_count <- all_driver_fits[[x[1]]][[x[2]]]$data %>% 
+    ungroup %>% 
+    subset(Gen == max(Gen))
+  return(X)
+})
+for (b in low_var_estimates) {
+  ll <- predict(object = b$linear_estimate,newdata = data.frame(X = b$data$X))
+  n_tips <- length(b$clade)
+  
+  plot_tree_list[[length(plot_tree_list)+1]] <- b$tree %>%
+    keep.tip(b$clade) %>% 
+    multi2di() %>%
+    ggtree(size = 0.5) +
+    theme(panel.spacing = unit(0,"cm"))
+  
+  plot_list[[length(plot_list)+1]] <- data.frame(
+    Y=b$data$Y_exp,ll=exp(ll),sig=sig,bi=exp(biph),
+    Ymin=exp(b$data$Y025),Ymax=exp(b$data$Y975),X=b$data$X) %>%
+    ggplot(aes(x = X)) + 
+    geom_line(aes(y = Y)) +
+    geom_ribbon(aes(ymin = Ymin,ymax = Ymax),alpha = 0.2) +
+    geom_point(data = b$true_count,aes(x = Gen,y = Count),inherit.aes = F) +
+    theme_gerstung(base_size = 6) +
+    scale_y_continuous(trans = 'log10') + 
+    theme(legend.position="bottom",legend.key.height=unit(0,"cm")) +
+    xlab("Generations") + 
+    ylab("Neff") + 
+    coord_cartesian(ylim = c(10,1e8)) + 
+    ggtitle(sprintf("No. of tips in clade: %s\nAverage variance: %.2f",n_tips,mean(b$data$W,na.rm=T))) + 
+    guides(colour = guide_legend(nrow = 2))
+}
+
+plot_grid(
+  plot_tree_list[[1]],plot_tree_list[[2]],plot_tree_list[[3]],plot_tree_list[[4]],
+  plot_list[[1]] + theme(legend.position = "none"),
+  plot_list[[2]] + theme(legend.position = "none"),
+  plot_list[[3]] + theme(legend.position = "none"),
+  plot_list[[4]] + theme(legend.position = "none"),
+  nrow = 2,align = "v",axis="tb",
+  rel_heights = c(0.8,1)) + 
+  ggsave("figures/simulations/low_var_trajectory_examples.pdf",height = 2,width = 5)
+
+plot_tree_list <- list()
+plot_list <- list()
+high_var_estimates <- apply(high_var_ids,1,function(x) {
+  X <- all_estimates[[x[1]]][[as.numeric(x[2])]]
+  
+  X$true_count <- all_driver_fits[[x[1]]][[x[2]]]$data %>% 
+    ungroup %>% 
+    subset(Gen == max(Gen))
+  return(X)
+})
+for (b in high_var_estimates) {
+  ll <- predict(object = b$linear_estimate,newdata = data.frame(X = b$data$X))
+  n_tips <- length(b$clade)
+  
+  plot_tree_list[[length(plot_tree_list)+1]] <- b$tree %>%
+    keep.tip(b$clade) %>% 
+    multi2di() %>%
+    ggtree(size = 0.5) +
+    theme(panel.spacing = unit(0,"cm"))
+  
+  plot_list[[length(plot_list)+1]] <- data.frame(
+    Y=b$data$Y_exp,ll=exp(ll),sig=sig,bi=exp(biph),
+    Ymin=exp(b$data$Y025),Ymax=exp(b$data$Y975),X=b$data$X) %>%
+    ggplot(aes(x = X)) + 
+    geom_line(aes(y = Y)) +
+    geom_ribbon(aes(ymin = Ymin,ymax = Ymax),alpha = 0.2) +
+    geom_point(data = b$true_count,aes(x = Gen,y = Count),inherit.aes = F) +
+    theme_gerstung(base_size = 6) +
+    scale_y_continuous(trans = 'log10') + 
+    theme(legend.position="bottom",legend.key.height=unit(0,"cm")) +
+    xlab("Generations") + 
+    ylab("Neff") + 
+    coord_cartesian(ylim = c(10,1e8)) + 
+    ggtitle(sprintf("No. of tips in clade: %s\nAverage variance: %.2f",n_tips,mean(b$data$W,na.rm=T))) + 
+    guides(colour = guide_legend(nrow = 2))
+}
+
+plot_grid(
+  plot_tree_list[[1]],plot_tree_list[[2]],plot_tree_list[[3]],plot_tree_list[[4]],
+  plot_list[[1]] + theme(legend.position = "none"),
+  plot_list[[2]] + theme(legend.position = "none"),
+  plot_list[[3]] + theme(legend.position = "none"),
+  plot_list[[4]] + theme(legend.position = "none"),
+  nrow = 2,align = "v",axis="tb",
+  rel_heights = c(0.8,1)) + 
+  ggsave("figures/simulations/high_var_trajectory_examples.pdf",height = 2,width = 5)
+```
+
 ```{r,fig.height=1.5,fig.width=1.5}
 bnpr_wf_merge_df <- merge(all_bnpr_fits,all_driver_fits_df,by = c("name","clade")) %>%
   mutate(vaf_at_detection_low = pop_at_detection_low/2e5,
@@ -1669,6 +1903,10 @@ ggplot(bnpr_wf_merge_df) +
   theme_gerstung(base_size = 6) + 
   xlab("Trajectory type") + 
   ylab("Clade size")
+
+bnpr_wf_merge_df %>%
+  group_by(col) %>%
+  summarise(m = min(clade_size),median = median(clade_size),M = max(clade_size))
 ```
 
 ## Comparing the expected and observed late growth 
@@ -1829,6 +2067,17 @@ plot_grid(
   rel_heights = c(1,1,0.6),
   ncol = 2) + 
   ggsave("figures/simulations/validation_BNPR.pdf",height = 5,width = 4.7,useDingbats=FALSE)
+
+plot_grid(
+  plot_list$l + ggtitle("Linear growth"),
+  plot_list$cp_1 + ggtitle("Early linear growth"),
+  plot_list$cp_late + ggtitle("Late linear growth"),
+  plot_list$nl + ggtitle("Sigmoidal growth"),
+  r2_plot,
+  mse_plot,
+  rel_heights = c(1,1,0.8),
+  ncol = 2) +
+  ggsave("figures/simulations/validation_BNPR_smaller.pdf",height = 3.9,width = 3,useDingbats=FALSE)
 
 write.csv(bnpr_wf_merge_df,"data_output/simulated_bnpr_coefficients.csv",row.names = F)
 ```

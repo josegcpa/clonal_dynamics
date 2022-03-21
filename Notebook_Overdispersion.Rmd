@@ -35,7 +35,7 @@ Technical replicate data shows some level of technical overdispersion. This can 
 
 Considering the above, we can model the counts as $counts \sim BB(n =  coverage,alpha = \frac{\beta p}{1 - p},beta = \beta)$
 
-```{r visualising overdispersion,fig.height=14,fig.width=14}
+```{r visualising overdispersion,fig.height=2,fig.width=2.5}
 one_hot_encode <- function(factor_vector) {
   factor_levels <- sort(as.character(unique(factor_vector)))
   print(factor_levels)
@@ -48,7 +48,9 @@ one_hot_encode <- function(factor_vector) {
   return(t(output))
 }
 
-tru_q_data <- read.table('data/TruQ.txt',header = T)
+tru_q_data <- read.table('data/TruQ.txt',header = T) %>%
+  mutate(low = qbeta(0.05,MUTcount,TOTALcount - MUTcount),
+         high = qbeta(0.95,MUTcount,TOTALcount - MUTcount))
 replicate_data <- read.table('data/Replicates_all.txt',header = T) %>%
   mutate(VAF = ifelse(CHR == "X", VAF / 2,VAF),
          MUTcount = ifelse(CHR == "X", floor(MUTcount / 2),MUTcount))
@@ -65,49 +67,58 @@ replicate_data <- merge(
   by = c("SardID","Phase"),
   all = T
 ) %>% 
-  subset(SardID %in% replicated_data_multiple$SardID & variant %in% replicated_data_multiple$variant)
+  subset(SardID %in% replicated_data_multiple$SardID & 
+           variant %in% replicated_data_multiple$variant) %>% 
+  rowwise() %>% 
+  mutate(position = str_split(variant,'_')[[1]][2],
+         change = gsub('_','>',paste(str_split(variant,'_')[[1]][3:4],collapse='_'))) %>%
+  mutate(l = sprintf('%s (%s)\nSardID=%s',position,change,SardID)) %>%
+  mutate(low = qbeta(0.05,MUTcount,TOTALcount - MUTcount),
+         high = qbeta(0.95,MUTcount,TOTALcount - MUTcount))
 
 tru_q_data %>% 
-  ggplot(aes(x = VAF_expected,y = VAF_observed)) + 
-  geom_point(aes(colour = as.factor(Replicate))) + 
-  geom_errorbar(
-    aes(
-      ymin = qbeta(0.05,MUTcount + 1,TOTALcount - MUTcount + 1),
-      ymax = qbeta(0.95,MUTcount + 1,TOTALcount - MUTcount + 1)
-  )) + 
-  theme_gerstung(base_size = 15) +
+  ggplot(aes(x = VAF_expected,y = VAF_observed,group = Replicate)) + 
+  geom_errorbar(aes(ymin = low,ymax = high,colour = as.factor(Replicate)),
+                size = 0.25,width = 0.001,
+                position = position_dodge(width = 0.0025)) + 
+  geom_point(aes(colour = as.factor(Replicate)),size = 0.5,
+             position = position_dodge(width = 0.0025)) + 
+  theme_gerstung(base_size = 6) +
   facet_wrap(~ Gene) + 
   ggsci::scale_color_lancet(name = "Replicate") +
-  theme(legend.position = 'bottom') + 
-  xlab("VAF expected") +
-  ylab("VAF observed") + 
-  ggtitle("TruQ data") + 
-  ggsave(useDingbats=FALSE,"figures/overdispersion/overdispersion_vis_truq.pdf",height=14,width=14)
+  theme(legend.position = 'bottom',legend.key.size = unit(0.1,"cm")) + 
+  xlab("Expected VAF") +
+  ylab("Observed VAF") + 
+  scale_x_continuous(labels = function(x) sprintf('%s%%',x*100)) +
+  scale_y_continuous(labels = function(x) sprintf('%s%%',x*100)) +
+  ggsave(useDingbats=FALSE,"figures/overdispersion/overdispersion_vis_truq.pdf",
+         height=2,width=2.5)
+```
 
+```{r,fig.height=3.5,fig.width=4.5}
 replicate_data %>% 
-  ggplot(aes(x = as.factor(Phase),y = VAF)) + 
-  geom_point(aes(colour = as.factor(Replicate)),
-             size = 2) + 
-  geom_linerange(
-    aes(
-      ymin = qbeta(0.05,MUTcount + 1,TOTALcount - MUTcount + 1),
-      ymax = qbeta(0.95,MUTcount + 1,TOTALcount - MUTcount + 1)
-    )) + 
-  theme_gerstung(base_size = 15) +
-  facet_wrap(~ paste(Gene,variant,SardID,sep = '-'),scale = 'free') + 
+  mutate(low = ifelse(low == 0,1e-8,low)) %>% 
+  ggplot(aes(x = as.factor(Phase),y = VAF,colour = as.factor(Replicate))) + 
+  geom_point(size = 0.5,position = position_dodge(width = 0.3)) + 
+  geom_linerange(aes(ymin = low,ymax = high),size = 0.25,
+                 position = position_dodge(width = 0.3)) + 
+  theme_gerstung(base_size = 6) +
+  facet_wrap(~ reorder(l,SardID),scale = 'free_y') + 
   ggsci::scale_color_lancet(name = "Replicate") +
-  theme(legend.position = 'bottom') + 
+  theme(legend.position = 'bottom',legend.key.size = unit(0.1,"cm")) + 
   xlab("Phase") +
   ylab("VAF") + 
-  ggtitle("Replicate data from Sardinian samples") + 
-  ggsave(useDingbats=FALSE,"figures/overdispersion/overdispersion_vis_sard.pdf",height=14,width=14)
+  coord_cartesian(ylim = c(0.001,NA)) +
+  scale_y_continuous(labels = function(x) sprintf('%s%%',x*100),trans = 'log10') +
+  ggsave(useDingbats=FALSE,"figures/overdispersion/overdispersion_vis_sard.pdf",
+         height=3.5,width=4.5)
 ```
 
 The invervals here are estimated using a beta distribution ($Beta(alpha = count+1,beta = coverage - count + 1)$).
 
 ## Modelling the overdispersion for TruQ data
 
-```{r,fig.height=8,fig.width=10}
+```{r,fig.height=3,fig.width=6}
 VAF_expected <- tru_q_data$VAF_expected + 1/tru_q_data$TOTALcount
 VAF_observed <- tru_q_data$VAF_observed + 1/tru_q_data$TOTALcount
 
@@ -164,12 +175,12 @@ replicate_data_samples %>%
   ggplot(aes(x = as.numeric(Age),colour = Replicate)) + 
   geom_point(aes(y = Samples),
              alpha = 0.1,
-             size = 0.2,
+             size = 0.1,
              position = "jitter") + 
   geom_point(aes(y = VAF),
-             size = 2,
+             size = 0.5,
              alpha = 0.9) +
-  theme_minimal(base_size = 15) +
+  theme_minimal(base_size = 6) +
   facet_wrap(~ paste(Gene,variant,SardID,sep = '-'),scale = 'free') + 
   ggsci::scale_color_lancet(name = "Replicate") +
   theme(legend.position = 'bottom') + 
@@ -207,7 +218,7 @@ For this subsubsection, the model is specified in `scripts/estimating_overdisper
 
 We used this model to infer the $\mu_{\beta}$ and $\sigma_{\beta}$ mentioned in the model specification above.
 
-```{r,fig.height=10,fig.width=10}
+```{r,fig.height=4,fig.width=4.5}
 VAF_expected <- tru_q_data$VAF_expected + 1/tru_q_data$TOTALcount
 VAF_observed <- tru_q_data$VAF_observed + 1/tru_q_data$TOTALcount
 Sard_count <- replicate_data$MUTcount 
@@ -293,19 +304,34 @@ prediction_matrix <- data.frame(
   Gene = replicate_data$Gene,
   Age = replicate_data$Age,
   SardID = replicate_data$SardID,
-  Replicate = replicate_data$Replicate
+  Replicate = replicate_data$Replicate,
+  l = replicate_data$l
 ) 
 
 prediction_matrix %>% 
   gather(key = 'key',value = 'value',true,prob) %>%
-  ggplot(aes(x = Age,y = value,colour = key,shape = as.factor(Replicate))) + 
-  geom_point() +
-  geom_errorbar(aes(ymin = pred_005,ymax = pred_095)) +
-  geom_line() +
-  theme_minimal(base_size = 15) +
-  facet_wrap(~ paste(variant,SardID),scales = 'free') + 
-  theme(legend.position = "bottom")
+  mutate(key = ifelse(key == 'true','Real data','Inferred trajectory')) %>% 
+  ggplot(aes(x = Age,y = value,linetype = key)) + 
+  geom_point(size = 0.5) +
+  geom_linerange(aes(ymin = pred_005,ymax = pred_095),size = 0.25) +
+  geom_line(aes(group = paste(Replicate,key)),size = 0.25) +
+  theme_minimal(base_size = 6) +
+  scale_linetype_manual(values = c(1,3),name = NULL) +
+  facet_wrap(~ reorder(l,SardID),scales = 'free') + 
+  ylab("VAF") +
+  scale_y_continuous(labels = function(x) sprintf('%s%%',x*100), trans = 'log10') +
+  theme(legend.position = "bottom",legend.key.height = unit(0.1,"cm")) + 
+  ggsave("figures/overdispersion/example-trajectories.pdf",height=3.5,width = 3.5)
 
 Values$beta %>%
   saveRDS("models/overdispersion.RDS")
+```
+
+```{r,fig.height=1.5,fig.width=2.5}
+mcmc_trace(draws,regex_pars = 'beta_variable') + 
+  theme_gerstung(base_size = 6) + 
+  ylab("Technical overdispersion (beta)") + 
+  xlab("Sample index") + 
+  theme(legend.key.height = unit(0.1,"cm")) + 
+  ggsave("figures/overdispersion/beta-chain.pdf",height=1.5,width = 2.5)
 ```

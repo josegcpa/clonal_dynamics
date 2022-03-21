@@ -180,14 +180,59 @@ We now need to set a model similar to the one described below, which is similar 
 #### N=200,000; g=13
 
 ```{r diagnostics_200k,fig.height=7,fig.width=10}
-mcmc_trace(all_data$N200$draws,regex_pars = "genetic")
+1:length(all_data$N200$draws) %>%
+  lapply(function(x) data.frame(as.matrix(all_data$N200$draws[[x]]),
+                                chain=x,
+                                idx=1:nrow(all_data$N200$draws[[x]]))) %>%
+  do.call(what = rbind) %>% 
+  gather(key = 'key',value = 'value',-chain,-idx) %>% 
+  subset(grepl('genetic_coef',key)) %>% 
+  mutate(key = str_match(key,'1\\.[0-9]+')) %>%
+  mutate(key = as.numeric(str_match(key,'[0-9]+$'))/1000) %>% 
+  ggplot(aes(x = idx,y = value,colour = as.factor(chain))) + 
+  geom_line(size = 0.25,alpha = 0.8) + 
+  facet_wrap(~ reorder(sprintf('s=%s',key),key),scales = "free_y") + 
+  xlab("Sample index") + 
+  ylab("Value") +
+  theme_gerstung(base_size = 6) + 
+  scale_color_manual(values = paste0("skyblue",c(4,3,2,1)),name = "Chain") + 
+  theme(legend.key.height = unit(0,"cm")) + 
+  scale_x_continuous(breaks = c(0,500,1000)) +
+  ggsave('figures/simulations/chains-genetic.pdf',height = 3.5,width = 5)
+```
 
+```{r diagnostics_200k_2}
 rg_stat <- coda::gelman.diag(all_data$N200$draws)
 ess <- coda::effectiveSize(all_data$N200$draws)
-plot(rg_stat$psrf[,1],main = "Distribution of Rubin-Gelman Statistic",ylab = "Rubin Gelman Statistic",xlab = "Variable index")
-plot(ess,main = "Effective sample sizes for all variables",ylab = "Effective sample size",xlab = "Variable index",ylim = c(0,max(ess)),axes=F)
-axis(side = 2, at=seq(0,max(ess),by = 500),las=2)
-axis(side = 1)
+```
+
+```{r diagnostics_200k_2_plot,fig.height=1.3,fig.width=3}
+rg_stat_df <- data.frame(rg = rg_stat$psrf[,1],idx = 1:length(rg_stat$psrf[,1]),ess = ess)
+rg_stat_df$var_type <- c(genetic='Genetic',clone='Unknown-cause',individual='Offset',beta='Beta')[
+  str_match(rownames(rg_stat_df),'[a-z]+')]
+rg_stat_plot <- rg_stat_df %>%
+  ggplot(aes(x = idx,y = rg,colour = var_type)) +
+  geom_point(size = 0.5,alpha = 0.6) +
+  theme_gerstung(base_size = 6) + 
+  xlab("Variable index") + 
+  ylab("Gelman-Rubin statistic") + 
+  scale_color_aaas(name = NULL)
+
+ess_plot <- rg_stat_df %>%
+  ggplot(aes(x = idx,y = ess,colour = var_type)) +
+  geom_point(size = 0.5,alpha = 0.6) +
+  theme_gerstung(base_size = 6) + 
+  xlab("Variable index") + 
+  ylab("Effective sample size") + 
+  scale_color_aaas(name = NULL,breaks = c('Genetic','Unknown-cause','Offset','Beta')) + 
+  theme(legend.position = 'bottom',
+        legend.key.size = unit(0,"cm"))
+
+plot_grid(
+  plot_grid(rg_stat_plot + theme(legend.position = 'none'),
+            ess_plot + theme(legend.position = 'none')),
+  get_legend(ess_plot),ncol = 1,rel_heights = c(1,0.1)) + 
+  ggsave('figures/simulations/rg-ess.pdf',height = 1.3,width=3)
 ```
 
 #### N=100,000; g=5
@@ -220,9 +265,20 @@ We can see clearly from analysing the draws for the genetic coefficients that th
 
 ### Goodness of fit (residual effect)
 
-To assess the goodness of fit we assume that, for each trajectory, the probability density of our true counts under the inferred model - $p$ - should follow a uniform distribution if the fit is perfect. As such, the normal normal quantiles of $p$ should follow a normal distribution and the sum of their squares should follow a Chi-squared distribution. This allows us to have a "goodness of fit" for each trajectory varying between 0 (not good) and 1 (perfect), which can be stated as $s=CDF_{\chi^2}(\sum_{i=1}^{n}Q_{N(0,1)}(CDF_{BBinom(coverage,\alpha_{inferred},\beta_{inferred})}(counts))^2)$ (here $p=CDF_{BBinom(coverage,\alpha_{inferred},\beta_{inferred})}(counts)$). Using this, we now define a residual effect (RE) as $RE = 1 - s$ and 0.7 as a threshold for declaring a trajectory as good ($RE\lt0.7$) or bad ($RE\geq0.7$). Unless noted otherwise, we here use only the simulations with N = 200,000 and g = 13.
+To assess the goodness of fit we calculate, for each timepoint, the likelihood under our model. If the tail probability of that point under our model is not contained within the 95\% confidence interval of the model, we consider this to be an outlier; whenever a trajectory has at least one outlier, we discard it and do not analyse it any further. Unless noted otherwise, we here use only the simulations with N = 200,000 and g = 13.
 
 ```{r calculate_gof,fig.height=3,fig.width=3}
+get_draws <- function(D,individual_factor,genetic_factor) {
+  c_names <- colnames(D)
+  c_list <- list(genetic=grep('genetic',c_names),clone_specific=grep('clone_specific',c_names),
+                 offset=grep('offset',c_names),beta=grep('beta',c_names))
+  output <- list(genetic = D[,c_list$genetic[genetic_factor]],
+                 clone_specific = D[,c_list$clone_specific[individual_factor]],
+                 offset = D[,c_list$offset[individual_factor]],
+                 beta = D[,c_list$beta[1]])
+  return(output)
+}
+
 get_r_values <- function(draws,Data,Age,gen_time) {
   all_predicted_variables <- variable_summaries(do.call(rbind,draws)) %>% 
     as_tibble() %>%
@@ -246,6 +302,18 @@ get_r_values <- function(draws,Data,Age,gen_time) {
   
   min_age <- min(Data$Gen / gen_time * age_mult)
   
+  traj_estimates <- data.frame(q05=rep(0,nrow(Data)),q50=rep(0,nrow(Data)),
+                               q95=rep(0,nrow(Data)),mean=rep(0,nrow(Data)))
+  for (i in 1:nrow(Data)) {
+    tmp <- Data[i,]
+    o <- get_draws(draws[[1]],tmp$individual_factor,tmp$fitness_factor)
+    x <- (o$genetic + o$clone_specific) * (tmp$Gen / gen_time-min_age) + o$offset
+    p <- inv.logit(x)/2
+    alpha_values <- (p * o$beta)/(1-p)
+    S <- rbbinom(1000,tmp$coverage,alpha = alpha_values,o$beta)
+    traj_estimates[i,] <- c(quantile(S,c(0.05,0.5,0.95),na.rm=T),mean(S,na.rm=T))
+    }
+  
   r_values <- data.frame(
     fitness = Data$fitness,
     fitness_factor = Data$fitness_factor,
@@ -264,16 +332,20 @@ get_r_values <- function(draws,Data,Age,gen_time) {
     coverage = Data$coverage,
     age = Age,
     Mutation = Data$Mutation,
+    Mutation_C = Data$Mutation_C,
     Individual = Data$Individual,
-    min_age = min_age) %>%
+    min_age = min_age,
+    q05 = traj_estimates$q05,
+    q50 = traj_estimates$q50,
+    q95 = traj_estimates$q95) %>%
     as_tibble() %>% 
     mutate(mu_val = inv.logit((genetic_effect + clone_effect)*age + individual_offset)/2) %>%
     mutate(
       tail_prob = extraDistr::pbbinom(
-      q = true_count,
-      size = coverage,
-      alpha = (mu_val * beta_val$mean)/(1 - mu_val),
-      beta = beta_val$mean)) %>% 
+        q = true_count,
+        size = coverage,
+        alpha = (mu_val * beta_val$mean)/(1 - mu_val),
+        beta = beta_val$mean)) %>% 
     group_by(individual_offset) %>%
     mutate(sum_stat = all(tail_prob > 0.025 & tail_prob < 0.975))
   return(r_values)
@@ -303,7 +375,9 @@ gof_plot_values <- r_values_N200 %>%
   distinct() %>%
   mutate(bad = sum_stat == F) %>%
   mutate(bad = factor(bad,levels = c(T,F),labels = c("One or more\noutliers","No outliers")))
+```
 
+```{r explained_variants_plot,fig.height=1.4,fig.width=2}
 explained_variants_plot <- gof_plot_values %>%
   mutate(fitness = cut(fitness,c(0.000,0.005,0.010,0.015,0.020,0.026),
                        c("0.001-0.005","0.005-0.010","0.010-0.015","0.015-0.020","0.020-0.025"))) %>% 
@@ -313,40 +387,48 @@ explained_variants_plot <- gof_plot_values %>%
   summarise(N = length(unique(individual_offset)),
             Total = Total[1]) %>%
   ggplot(aes(x = fitness,y = N/Total,fill = bad)) + 
-  geom_bar(alpha=1,
-           stat = "identity") +
-  theme_gerstung(base_size = 8) + 
+  geom_bar(alpha=1,stat = "identity") +
+  theme_gerstung(base_size = 6) + 
   scale_x_discrete(expand = c(0,0)) + 
   scale_y_continuous(expand = c(0,0)) + 
   scale_fill_lancet(name=NULL) + 
   theme(legend.position = "bottom") + 
   ylab("Fraction") + 
-  xlab("Fitness") 
+  xlab("Fitness") +
+  coord_flip() +
+  theme(legend.key.size = unit(0.2,"cm"),plot.margin = margin(4,8,4,4),
+        legend.margin = margin())
 
-explained_variants_plot_bar <- gof_plot_values %>% 
-  group_by(bad) %>%
-  summarise(N = length(bad)) %>%
-  ungroup() %>%
-  mutate(Freq = N / sum(N)) %>% 
-  ggplot(aes(x = 1,
-             y = Freq,
-             fill = bad)) + 
-  geom_bar(stat="identity") + 
-  theme_gerstung() + 
-  scale_x_discrete(expand = c(0,0)) + 
-  scale_y_continuous(expand = c(0,0)) + 
-  scale_fill_manual(values = rev(ggsci::pal_lancet()(2)),
-                  breaks = c(F,T),
-                  name = NULL,
-                  labels = c("Good fit","Poor fit")) +
-  theme(legend.position = "bottom") + 
-  xlab("") + 
-  ylab("Proportion of trajectories")
-
-explained_variants_plot
+explained_variants_plot + 
+  ggsave('figures/simulations/explained-trajectories.pdf',height = 1.4,width = 2)
 ```
 
 The graphic shown above shows that a fairly good amount of trajectories ($\sim87\%$) are explained by our model. We exclude the non-explained trajectories from the calculation of age at clone foundation.
+
+```{r trajectory_examples,fig.height=2,fig.width=2.5}
+min_data <- min(all_data$N200$min_age_data)
+r_values_N200 %>%
+  subset(fitness %in% c(0.002,0.010,0.015,0.020)) %>%
+  group_by(fitness) %>%
+  mutate(average_age = mean(age)) %>% 
+  group_by(fitness,individual_factor) %>%
+  mutate(d = mean(age)-average_age) %>% 
+  group_by(fitness) %>%
+  filter(d %in% c(range(d),d[which.min(abs(d))])) %>%
+  group_by(d,fitness) %>%
+  filter(individual_factor %in% sample(individual_factor,1)) %>% 
+  ggplot(aes(x = age + min_data,y = true_count/coverage)) + 
+  geom_ribbon(aes(group = individual_factor,ymin = q05/coverage,ymax = q95/coverage),alpha = 0.3) +
+  geom_point(size = 0.5) + 
+  geom_line(aes(group = individual_factor),linetype=3,size = 0.25) +
+  geom_line(aes(y = q50/coverage, group = individual_factor)) +
+  facet_wrap(~ fitness,ncol=2,scales = 'free_x') + 
+  scale_y_continuous(trans = 'log10') + 
+  theme_gerstung(base_size = 6) + 
+  ylab("VAF") +
+  xlab("Age") + 
+  ggsave('figures/simulations/example-trajectories.pdf',height = 2,width = 2.5)
+```
 
 ### Genetic coefficients
 
@@ -406,7 +488,7 @@ calculate_age_estimates <- function(draws,r_values,min_age) {
       fitness,fitness_factor,
       Individual,individual_factor,
       true_clone_age,
-      Mutation
+      Mutation,Mutation_C
     ) %>% 
     summarise(
       minAge = min(age[which(round(true_count/coverage,4) > 0.005)]),
@@ -431,7 +513,7 @@ calculate_age_estimates <- function(draws,r_values,min_age) {
         b_genetic <- genetic_samples[,genetic_numeric]
         b_clone <- clone_samples[,clone_numeric]
         u <- offset_samples[,clone_numeric]
-        t1 <- as.numeric(x[7]) + min_age
+        t1 <- as.numeric(x[8]) + min_age
         t1 <- t1 / age_mult
         b <- b_genetic + b_clone
         age_distribution <- t0_adjusted(u,b_genetic+b_clone,gen_time / age_mult,population) + min_age
@@ -551,8 +633,45 @@ age_threshold_accounting <- parameters_age_df %>%
          plausible_005 = limit_005 >= 0,
          plausible_095 = limit_095 >= 0)
 
-estimated_ages_plot
+
 table(age_threshold_accounting$plausible) / nrow(age_threshold_accounting)
+```
+
+```{r}
+ma <- function(x, n = 3){stats::filter(x, rep(1 / n, n), sides = 2)}
+
+age_quantile_data <- age_data %>% 
+  mutate(true_clone_age = 5 * floor(true_clone_age/5)) %>%
+  group_by(true_clone_age) %>% 
+  summarise(ymin = quantile(Q50,0.25),
+            ymax = quantile(Q50,0.75),
+            y = quantile(Q50,0.5)) %>%
+  arrange(true_clone_age) %>%
+  mutate(ymin = ma(ymin),y = ma(y),ymax = ma(ymax))
+
+age_data %>% 
+  ggplot(aes(x = true_clone_age,y = Q50)) + 
+  geom_abline(slope=1,intercept=0,linetype=2,color = 'grey4') + 
+  geom_point(aes(x = true_clone_age),
+             colour = "grey",
+             size = 0.5,alpha = 0.8) + 
+  geom_linerange(aes(x = true_clone_age,
+                     ymin = Q05,
+                     ymax = Q95),
+                 colour = "grey",
+                 size = 0.2,
+                 alpha = 0.8) + 
+  geom_smooth(data = age_quantile_data,aes(y = y),colour = "green4",se=F) + 
+  geom_smooth(data = age_quantile_data,aes(y = ymin),colour = "red4",se=F) + 
+  geom_smooth(data = age_quantile_data,aes(y = ymax),colour = "red4",se=F) + 
+  scale_color_gradient(low = "pink",high = "red4",name = "Fitness") + 
+  theme_gerstung(base_size = 6) + 
+  ylab("Inferred age\nat clone foundation") +
+  xlab("Simulated age\nat clone foundation") + 
+  theme(legend.position = 'right') +
+  coord_cartesian(ylim = plot_min_max) +
+  scale_shape_discrete(name = "Generation time, population size") + 
+  ggsave(filename = "figures/simulations/estimated_ages_plot_bands.pdf",height = 3,width = 3)
 ```
 
 ```{r correlation_age}
@@ -564,7 +683,7 @@ cat(paste("Rsquared =",cor_test_ages$estimate^2,'\n'))
 cat(paste('p-value =',cor_test_ages$p.value))
 ```
 
-```{r age_residuals,fig.height=3,fig.width=1.7}
+```{r age_residuals,fig.height=2,fig.width=1.7}
 age_data_post <- age_data
 age_data_post$residuals_005 <- age_data_post$true_clone_age - age_data_post$Q05
 age_data_post$residuals <- age_data_post$true_clone_age - age_data_post$Q50
@@ -572,20 +691,28 @@ age_data_post$residuals_095 <- age_data_post$true_clone_age - age_data_post$Q95
 age_data_post <- age_data_post %>%
   mutate(residuals_min = ifelse(residuals_095 > residuals_005,residuals_005,residuals_095),
          residuals_max = ifelse(residuals_095 < residuals_005,residuals_005,residuals_095)) 
+
 ggplot(age_data_post,aes(x = fitness,y = residuals)) +
-  geom_jitter(width = 0.0002,height = 0,size = 0.5) + 
-  geom_boxplot(aes(group = cut(fitness,c(0,0.010,Inf))),
-               alpha = 0.8,outlier.alpha = 0) + 
-  theme_gerstung(base_size = 6)
+  #geom_jitter(width = 0.0002,height = 0,size = 0.5) + 
+  geom_point(size = 0.5) +
+  geom_boxplot(aes(group = cut(fitness,c(0,0.005,0.010,0.015,0.020,Inf))),
+               alpha = 0.8,outlier.alpha = 0,size = 0.25) + 
+  theme_gerstung(base_size = 6) + 
+  ylab("Age at onset residuals") +
+  xlab("Simulated fitness") + 
+  ggsave('figures/simulations/fitness-vs-inferred-age-residuals.pdf',height = 2,width = 1.7)
+
+age_data_post %>%
+  mutate(fitness_split = fitness <= 0.01) %>%
+  group_by(fitness_split) %>%
+  summarise(mean(abs(residuals)))
 ```
 
-The estimate for the ages, while not as good as the estimate for the coefficients, appears to be quite close to the true value. Additionally, on average, there is a difference of 6 years between our estimates and the true values. Residuals do not appear to be normally distributed, but a wider spread is observable for lower ages at clone foundation as per the figure above. Below we will observe that this is mostly caused by an unexpectedly high amount of time spent during the stochastic growth regime. 
-
-Next, we verify how much changing population sizes and time per generation affects estimates. To assess this we have calculated the values for different population sizes - 50,000 and 200,000 HSC - and for different generation times - 2 and 13 generations per year. For this, we observe that the median difference between all 4 possible combinations, is $\sim19$ for estimates for the upper bound, $\sim17$ for the median value, and $\sim15$ for the lower bound.
+The estimate for the ages, while not as good as the estimate for the coefficients, appears to be quite close to the true value. Additionally, on average, there is a difference of ~9 years between our estimates and the true values. Residuals do not appear to be normally distributed, but a wider spread is observable for lower ages at clone foundation as per the figure above. Below we will observe that this is mostly caused by an unexpectedly high amount of time spent during the stochastic growth regime. 
 
 ```{r compare_population_sizes_gen_time,fig.width=6,fig.height=7}
 age_data_full %>%
-  group_by(Individual,true_clone_age) %>%
+  group_by(Individual,true_clone_age,population,gen_time) %>%
   summarise(m_005 = min(Q05),
             M_005 = max(Q05),
             m = min(Q50),
@@ -596,7 +723,7 @@ age_data_full %>%
   mutate(Range_005 = M_005 - m_005,
          Range = M - m,
          Range_095 = M_095 - m_095) %>%
-  ungroup() %>%
+  group_by(population,gen_time) %>%
   summarise(Range_005Mean = mean(Range_005),
             RangeMean = mean(Range),
             Range_095Mean = mean(Range_095))
@@ -645,59 +772,87 @@ age_data_full %>%
                size = 0.25,outlier.size = 0.5) + 
   facet_wrap(~ label,ncol = 5,dir = "v")
 
+plot_grid(true_clone_age_plot,residual_plot,
+          ncol = 1,align = "v",axis = "tlrb",
+          rel_heights = c(0.15,1))
+```
+
+```{r compare_pop_sizes_gen_time_heatmap,fig.height=2,fig.width=3}
 age_data_full %>%
   group_by(population,gen_time) %>%
   summarise(MAE = sum(abs(true_clone_age - Q50))/length(true_clone_age)) %>%
   mutate(Y = population == 2e5 & gen_time == 13) %>% 
   ggplot(aes(x = as.factor(population),y = as.factor(gen_time),fill = MAE,label = round(MAE,2))) + 
-  geom_tile(aes(colour = Y),size = 0.5) + 
-  geom_label(size = 2.6,label.size = unit(0,"cm"),label.r = unit(0,"cm"),fill = "white") + 
+  geom_tile(size = 0.5) + 
+  geom_tile(aes(colour = Y),size = 0.5,fill=NA) + 
+  geom_label(size = 2,label.size = unit(0,"cm"),
+             label.r = unit(0,"cm"),alpha = 0.8,fill = "white") + 
   theme_gerstung(base_size = 6) + 
-  scale_fill_material(palette = "teal",name = "MAE") + 
+  scale_fill_material(palette = "teal",name = "Mean absolute\nerror for age\nat onset") + 
   scale_colour_manual(values = c(NA,"black"),guide = F) + 
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_discrete(expand = c(0,0)) +
   xlab("Population size") + 
-  ylab("Generations per year")
-  
-plot_grid(true_clone_age_plot,residual_plot,
-          ncol = 1,align = "v",axis = "tlrb",
-          rel_heights = c(0.15,1))
+  ylab("Generations per year") + 
+  theme(legend.key.width = unit(0.4,"cm")) + 
+  ggsave("figures/simulations/age-at-onset-mae.pdf",height=2,width=3)
 ```
 
 ### Rank analysis
 
 We here begin by assessing that we can clearly observe mutations appearing consistently over life for all simulation conditions.
 
-```{r real_age_distribution,fig.height=1,fig.width=4}
+```{r real_age_distribution,fig.height=1.2,fig.width=3.5}
 dir.create(path = "figures/rank_analysis",showWarnings = F)
-plot_grid(
-  all_data$N50$Data %>% 
-    ggplot(aes(x = GenAtCloneFoundation)) +
-    geom_density(width = 2) + 
-    xlab("Age at onset") +
-    theme_gerstung(base_size = 6) + 
-    ggtitle("N = 50,000; Tg = 1"),
-  all_data$N100$Data %>% 
-    ggplot(aes(x = GenAtCloneFoundation / 5)) +
-    geom_density(width = 2) + 
-    xlab("Age at onset") +
-    theme_gerstung(base_size = 6) + 
-    ggtitle("N = 100,000; Tg = 5"),
-  all_data$N200$Data %>% 
-    ggplot(aes(x = GenAtCloneFoundation / 13)) +
-    geom_density(width = 2) + 
-    xlab("Age at onset") +
-    theme_gerstung(base_size = 6) + 
-    ggtitle("N = 200,000; Tg = 13"),
-  nrow = 1
-) + 
-  ggsave("figures/rank_analysis/distributions_real.pdf",height = 1,width = 4)
+age_density_plot_50 <- all_data$N50$Data %>% 
+  select(GenAtCloneFoundation,Mutation_C,fitness) %>%
+  distinct() %>% 
+  mutate(f = ifelse(fitness > 0.15,'>15% annual growth','<15% annual growth')) %>% 
+  ggplot(aes(x = GenAtCloneFoundation,colour = f)) +
+  geom_density() + 
+  geom_density(aes(colour = 'All clones'),linetype = 2) +
+  xlab("Age at onset") +
+  theme_gerstung(base_size = 6) + 
+  scale_colour_d3(name = NULL) +
+  ggtitle("N = 50,000; g = 1")
+age_density_plot_100 <- all_data$N100$Data %>% 
+  select(GenAtCloneFoundation,Mutation_C,fitness) %>%
+  distinct() %>% 
+  mutate(f = ifelse(fitness * 5 > 0.15,'>15% annual growth','<15% annual growth')) %>% 
+  ggplot(aes(x = GenAtCloneFoundation / 5,colour = f)) +
+  geom_density() + 
+  geom_density(aes(colour = 'All clones'),linetype = 2) +
+  xlab("Age at onset") +
+  theme_gerstung(base_size = 6) + 
+  scale_colour_d3(name = NULL) +
+  ggtitle("N = 100,000; g = 5")
+age_density_plot_200 <- all_data$N200$Data %>% 
+  select(GenAtCloneFoundation,Mutation_C,fitness) %>%
+  distinct() %>% 
+  mutate(f = ifelse(fitness * 13 > 0.15,'>15% annual growth','<15% annual growth')) %>% 
+  ggplot(aes(x = GenAtCloneFoundation / 13,colour = f)) +
+  geom_density() + 
+  geom_density(aes(colour = 'All clones'),linetype = 2) +
+  xlab("Age at onset") +
+  theme_gerstung(base_size = 6) + 
+  scale_colour_d3(name = NULL) +
+  ggtitle("N = 200,000; g = 13")
+
+plot_grid(age_density_plot_50 + theme(legend.position = 'none') + coord_cartesian(ylim = c(0,0.03)),
+          age_density_plot_100 + theme(legend.position = 'none') + coord_cartesian(ylim = c(0,0.03)),
+          age_density_plot_200 + theme(legend.position = 'none') + coord_cartesian(ylim = c(0,0.03)),
+  nrow = 1) %>%
+  plot_grid(get_legend(age_density_plot_200 + 
+                         theme(legend.position='bottom',legend.key.size = unit(0.05,"cm"))),
+            rel_heights = c(1.2,0.2),ncol=1) +
+  ggsave("figures/rank_analysis/distributions_real.pdf",height = 1.2,width = 3.5)
 ```
 
 #### Rank distributions 
 
 ```{r rank_analysis,fig.width=3.5,fig.height=5}
 ran <- function(x) {
-  m <- 0#min(x,na.rm=T)
+  m <- min(x,na.rm=T)
   M <- max(x,na.rm=T)
   d <- M-m
   if (d == 0) {
@@ -876,14 +1031,29 @@ plot_grid(
 
 #### Calculating statistical distance between inferred and simulated ages at onset
 
-```{r, fig.height=1.5,fig.width=5}
+```{r, fig.height=1,fig.width=3.5}
 dist_subset <- distances_age_at_onset %>%
   subset(population == true_pop_size & gen_time == true_gen_time)
-d <- c(ran(dist_subset$DistToFirstTrue[dist_subset$true_pop_size == 200e3]),
-       ran(dist_subset$DistToFirstTrue[dist_subset$true_pop_size == 100e3]),
-       ran(dist_subset$DistToFirstTrue[dist_subset$true_pop_size == 50e3]))
-d <- d[!is.na(d)]
-age_at_onset_distribution <- fitdistrplus::fitdist(d,"beta",method = "mse")
+age_at_onset_distribution <- list(
+  g13 = dist_subset$DistToFirstTrue[dist_subset$true_pop_size == 200e3],
+  g5 = dist_subset$DistToFirstTrue[dist_subset$true_pop_size == 100e3],
+  g1 = dist_subset$DistToFirstTrue[dist_subset$true_pop_size == 50e3]) %>%
+  lapply(function(x) {
+    x <- ran(x)
+    x <- x[!is.na(x)]
+    return(fitdistrplus::fitdist(x,"beta",method = "mge"))
+  })
+
+dist_estimate_data <- age_at_onset_distribution %>%
+  lapply(function(x) {
+    a <- x$estimate[1]
+    b <- x$estimate[2]
+    X <- seq(0,1,length.out = 1000)
+    list(
+      data = data.frame(values = x$data),
+      estimation = data.frame(x = X,d = dbeta(X,a,b))) %>%
+      return
+  })
 
 hist_entropy <- function(x,M=100) {
   x <- x[!is.na(x)]
@@ -898,8 +1068,28 @@ hist_entropy <- function(x,M=100) {
   return(-sum(x * log(x)))
 }
 
+plot_list <- dist_estimate_data %>% 
+  lapply(function(x) {
+    ggplot(x$data,aes(x = values)) + 
+      geom_histogram(aes(y = ..density..),bins=10,fill=NA,size = 0.25,colour = 'black') + 
+      geom_line(data = x$estimation,aes(x = x,y = d),colour = "red4") + 
+      theme_gerstung(base_size = 6) + 
+      xlab("Data") + 
+      ylab("Density") + 
+      coord_cartesian(ylim = c(0,3))
+  })
+
+plot_grid(
+  plot_list[[1]] + ggtitle("N=200,000; g=13"),
+  plot_list[[2]] + ggtitle("N=100,000; g=5"),
+  plot_list[[3]] + ggtitle("N=50,000; g=1"),
+  nrow = 1) + 
+  ggsave("figures/rank_analysis/beta_distance_fits.pdf",height = 1,width = 3.5)
+```
+
+
+```{r,fig.height=1,fig.width=5}
 chisq_statistic <- distances_age_at_onset %>%
-  #subset((fitness * true_gen_time) <= 0.05) %>% 
   group_by(population,gen_time,true_pop_size,true_gen_time) %>%
   na.omit() %>% 
   summarise(
@@ -908,83 +1098,53 @@ chisq_statistic <- distances_age_at_onset %>%
     Tau = cor(Rank,RankTrue,method = "kendall"),
     N = sum(!is.na(DistToPrevious)),
     ks_unif = suppressWarnings(ks.test(ran(DistToFirst),"punif",0,1)$statistic),
-    ks_beta = suppressWarnings(ks.test(ran(DistToFirst),"pbeta",age_at_onset_distribution$estimate[1],age_at_onset_distribution$estimate[2])$statistic),
+    ks_beta = suppressWarnings(ks.test(ran(DistToFirst),"pbeta",
+                                       age_at_onset_distribution[[paste0('g',true_gen_time)[1]]]$estimate[1],
+                                       age_at_onset_distribution[[paste0('g',true_gen_time)[1]]]$estimate[2])$statistic),
     HE = hist_entropy(ran(DistToFirst),M=1)) 
 
 plot_stat_data <- chisq_statistic %>% 
   group_by(true_pop_size,true_gen_time) %>% 
-  mutate(R = rank(ks_unif,ties.method = "min")) %>%
+  mutate(R = rank(ks_beta,ties.method = "min")) %>%
+  mutate(R = as.numeric(as.factor(R))) %>% 
   ungroup %>% 
   mutate(Y = (gen_time == true_gen_time) & (population == true_pop_size)) 
 
-plot_grid(
-  plot_stat_data %>% 
-    subset(true_pop_size == 50e3) %>%
-    ggplot(aes(x = as.factor(population),y = as.factor(gen_time), fill = ks_unif)) +
-    geom_tile(colour = NA) +
-    geom_tile(aes(colour = Y),size = 0.25,fill = NA) +
-    geom_text(aes(label = R),size = 2.3) +
-    xlab("Population size") +
-    ylab("Generations/year") +
-    theme_gerstung(base_size = 6) +
-    scale_fill_material(palette = "red",name = "D",n.breaks = 4) +
-    scale_x_discrete(expand = c(0,0)) +
-    scale_y_discrete(expand = c(0,0)) +
-    theme(legend.position = "bottom",
-          legend.key.height = unit(0.2,"cm"),
-          legend.key.width = unit(0.4,"cm"),
-          strip.text = element_text(margin = margin()),
-          panel.spacing = unit(0.1,"cm")) + 
-    scale_color_manual(breaks = c(F,T),values = c(NA,"black"),guide = F) +
-    ggtitle("N = 50,000; Tg = 1"),
-  plot_stat_data %>% 
-    subset(true_pop_size == 100e3) %>%
-    ggplot(aes(x = as.factor(population),y = as.factor(gen_time), fill = ks_unif)) +
-    geom_tile(colour = NA) +
-    geom_tile(aes(colour = Y),size = 0.25,fill = NA) +
-    geom_text(aes(label = R),size = 2.3) +
-    xlab("Population size") +
-    ylab("Generations/year") +
-    theme_gerstung(base_size = 6) +
-    scale_fill_material(palette = "red",name = "D",n.breaks = 4) +
-    scale_x_discrete(expand = c(0,0)) +
-    scale_y_discrete(expand = c(0,0)) +
-    theme(legend.position = "bottom",
-          legend.key.height = unit(0.2,"cm"),
-          legend.key.width = unit(0.4,"cm"),
-          strip.text = element_text(margin = margin()),
-          panel.spacing = unit(0.1,"cm")) + 
-    scale_color_manual(breaks = c(F,T),values = c(NA,"black"),guide = F) +
-    ggtitle("N = 100,000; Tg = 5"),
-  plot_stat_data %>% 
-    subset(true_pop_size == 200e3) %>%
-    ggplot(aes(x = as.factor(population),y = as.factor(gen_time), fill = ks_unif)) +
-    geom_tile(colour = NA) +
-    geom_tile(aes(colour = Y),size = 0.25,fill = NA) +
-    geom_text(aes(label = R),size = 2.3) +
-    xlab("Population size") +
-    ylab("Generations/year") +
-    theme_gerstung(base_size = 6) +
-    scale_fill_material(palette = "red",name = "D",n.breaks = 4) +
-    scale_x_discrete(expand = c(0,0)) +
-    scale_y_discrete(expand = c(0,0)) +
-    theme(legend.position = "bottom",
-          legend.key.height = unit(0.2,"cm"),
-          legend.key.width = unit(0.4,"cm"),
-          strip.text = element_text(margin = margin()),
-          panel.spacing = unit(0.1,"cm")) + 
-    scale_color_manual(breaks = c(F,T),values = c(NA,"black"),guide = F) +
-    ggtitle("N = 200,000; Tg = 13"),
-  ncol = 3
-) + 
-  ggsave("figures/rank_analysis/statistical_distance_d.pdf",height = 1.5,width = 5)
+tps <- c(50e3,100e3,200e3)
+gt <- c(1,5,13)
+
+plot_list <- 1:3 %>%
+  lapply(function(x) {
+    plot_stat_data %>% 
+      subset(true_pop_size == tps[x]) %>%
+      ggplot(aes(x = as.factor(gen_time),y = as.factor(population),fill = ks_beta)) +
+      geom_tile(colour = NA) +
+      geom_tile(aes(colour = Y),size = 0.25,fill = NA) +
+      geom_text(aes(label = R),size = 2.3) +
+      xlab("Generations/year") +
+      ylab("Population size") +
+      theme_gerstung(base_size = 6) +
+      scale_fill_material(palette = "red",name = "KS\nstatistic",limits = c(0,0.6)) +
+      scale_x_discrete(expand = c(0,0)) +
+      scale_y_discrete(expand = c(0,0)) +
+      theme(legend.key.height = unit(0.3,"cm"),
+            legend.key.width = unit(0.2,"cm"),
+            strip.text = element_text(margin = margin()),
+            panel.spacing = unit(0.1,"cm")) + 
+      scale_color_manual(breaks = c(F,T),values = c(NA,"black"),guide = F) +
+      ggtitle(sprintf("N = %s; Tg = %s",tps[x],gt[x]))
+  })
+
+plot_grid(plotlist = lapply(plot_list,function(x) x + theme(legend.position = 'none')),ncol = 3) %>%
+  plot_grid(get_legend(plot_list[[1]]),rel_widths = c(1,0.1),nrow=1) +
+  ggsave("figures/rank_analysis/statistical_distance_d.pdf",height = 1,width = 5)
 ```
 
 ### Inspecting poor age at onset predictions
 
 Below we inspect the clones for which the difference between predicted and true age at clone foundation differed more than by 20 years.
 
-```{r inspecting_bad_ones, fig.width=5,fig.height=3}
+```{r inspecting_bad_ones, fig.width=4.5,fig.height=2}
 root <- "/hps/nobackup/research/gerstung/josegcpa/projects/05VAF_DYNAMICS/hsc_output_200k_13/hsc_%s_%s/r00%s.csv"
 
 individuals_mutations <- age_data_post %>% 
@@ -1002,10 +1162,13 @@ file_ids <- file_ids %>%
   mutate(mutation_rate = mutation_rate / (10^div)) %>% 
   select(-div)
 file_ids$Mutation <- individuals_mutations$Mutation
+file_ids$Mutation_C <- individuals_mutations$Mutation_C
 file_ids$bad <- T
 
-bad_predictions <- file_ids %>%
-  select(-Mutation) %>%
+G <- 5
+
+bad_predictions_list <- file_ids %>%
+  select(-Mutation,Mutation_C) %>%
   apply(1,function(x) {
     x <- as.numeric(x)
     if (x[2] < 1) {
@@ -1025,31 +1188,51 @@ bad_predictions <- file_ids %>%
                                      col_number(),col_number()),
                     progress = F) 
     tmp <- tmp %>%
+      subset(Mutation != 0) %>% 
+      arrange(Mutation,Gen) %>% 
+      group_by(Mutation) %>%
+      filter(length(Gen) > 1) %>%
+      mutate(Break = Gen - c(0,Gen[1:max(0,(length(Gen)-1))]) > G) %>% 
+      mutate(Component = cumsum(Break)) %>%
+      ungroup() %>%
+      mutate(Mutation_C = paste(Mutation,Component,sep = '_')) %>%
+      group_by(Mutation_C) %>% 
+      mutate(GenAtCloneFoundation = min(Gen)) %>%
+      ungroup() 
+
+    tmp <- tmp %>%
       mutate(fitness = x[1],
              mutation_rate = x[2],
              replicate = x[3])
     return(tmp)
-  }) %>%
+  }) 
+
+bad_predictions <- bad_predictions_list %>%
+  lapply(function(x) {
+    fi <- as.numeric(x$fitness[1])
+    mr <- as.numeric(x$mutation_rate[1])
+    tmp <- file_ids %>%
+      subset(as.numeric(as.character(mutation_rate)) == mr &
+               as.numeric(as.character(fitness)) == fi)
+    x %>%
+      mutate(bad = Mutation_C %in% tmp$Mutation_C) %>%
+      return}) %>%
   do.call(what = rbind) %>% 
-  mutate_all(as.numeric) %>% 
   filter(Mutation > 0) %>%
-  group_by(Mutation,Gen,fitness,mutation_rate,replicate) %>%
+  group_by(Mutation,Gen,fitness,mutation_rate,replicate,Mutation_C,bad) %>%
   summarise(Count = max(Count)) %>%
   group_by(Mutation) %>%
   filter(length(Count) > 10) %>% 
   mutate(Driver = Mutation <= (N_DRIVERS)) %>% 
   mutate(Alpha = ifelse(Driver,0.9,0.05)) %>% 
-  ungroup()
-
-bad_predictions <- merge(
-  bad_predictions,file_ids,by = c("fitness","mutation_rate","Mutation","replicate"),all.x=T) %>%
+  ungroup() %>% 
   mutate(bad = ifelse(is.na(bad),F,bad))
 
 bad_predictions <- bad_predictions %>% 
-  arrange(Mutation,Gen) %>% 
+  arrange(Mutation_C,Gen) %>% 
   group_by(Mutation) %>%
   filter(length(Gen) > 1) %>%
-  mutate(Break = Gen - c(0,Gen[1:max(0,(length(Gen)-1))]) > 20) %>% 
+  mutate(Break = Gen - c(0,Gen[1:max(0,(length(Gen)-1))]) > G) %>% 
   mutate(Component = cumsum(Break)) %>%
   ungroup() %>%
   mutate(Mutation_C = paste(Mutation,Component,sep = '_')) 
@@ -1057,29 +1240,39 @@ bad_predictions <- bad_predictions %>%
 bad_predictions %>% 
   group_by(mutation_rate,fitness,replicate) %>%
   filter(Mutation %in% c(1:50,sample(unique(Mutation),10))) %>%
-  ggplot(aes(x = Gen,y = Count,color = Driver,alpha=Alpha,
-             group = paste(Driver,Mutation_C,replicate),
+  group_by(mutation_rate,fitness) %>%
+  filter(replicate == replicate[1]) %>% 
+  filter(all(length(Count[Driver==T & bad == T] > 200) > 190)) %>%
+  mutate(bad = ifelse(bad==T,'Error > 20 years','Not inferred/error < 20 years')) %>%
+  mutate(fitness = as.numeric(as.character(fitness))) %>%
+  mutate(mutation_rate = as.numeric(as.character(mutation_rate))) %>%
+  ggplot(aes(x = Gen/13,y = Count,color = Driver,alpha=Alpha,
+             group = paste(Driver,bad,Mutation_C,replicate),
              size = as.numeric(Driver))) + 
   geom_hline(aes(yintercept = (1 - (1+fitness)^-1) / (1 - (1+fitness)^-pop_size) * pop_size),
              size = 0.25) +
-  geom_line(aes(linetype = bad)) + 
+  geom_line(aes(linetype = bad),size = 0.25) + 
   scale_y_continuous(trans = 'log',
                      breaks = c(10^seq(0,5)),
                      limits = c(10,2e5)) + 
-  scale_x_continuous(limits = c(0,1300)) + 
+  scale_x_continuous(limits = c(0,100)) + 
   scale_alpha(guide = F) + 
   theme_gerstung(base_size = 6) + 
   scale_color_d3(name = NULL,labels = c("Passenger","Driver")) + 
-  theme(legend.position = "bottom",strip.text = element_text(margin = margin())) + 
+  scale_linetype_manual(name = NULL,values = c(1,3)) +
+  theme(legend.position = "bottom",strip.text = element_text(margin = margin()),
+        legend.key.height = unit(0,"cm"),legend.key.width = unit(0.2,"cm"),legend.spacing = unit(0,"cm")) + 
   scale_size(labels = c(FALSE,TRUE),
              breaks = c(FALSE,TRUE),
              limits = c(FALSE,TRUE),
              range = c(0.25,0.5),
              guide = F) + 
   ylab("Count") + 
-  facet_wrap(~ fitness + mutation_rate + replicate,nrow = 3,scales = 'free') + 
-  ggtitle("Trajectories with large errors for the inferred age at clone foundation",
-          "Mean absolute error > 20 years")
+  xlab("Age") + 
+  facet_wrap(~ reorder(sprintf('s=%s; mu=%s',fitness,mutation_rate * (10e-9)),
+                       fitness*10000 + mutation_rate),
+             nrow = 2) + 
+  ggsave("figures/simulations/examples-bad-inference.pdf",height=2,width=4)
 ```
 
 ## Historical growth
@@ -1474,7 +1667,7 @@ ggsave(predicted_coefficients_plot,
 ggsave(explained_variants_plot + theme(legend.position = "top"),
        filename = "figures/simulations/explained_variants_plot.pdf",height = 2,width = 2)
 ggsave(estimated_ages_plot + theme(legend.position = "right"),
-       filename = "figures/simulations/estimated_ages_plot.pdf",height = 2,width = 2)
+       filename = "figures/simulations/estimated_ages_plot.pdf",height = 3,width = 3)
 ```
 
 # Session details

@@ -1,0 +1,713 @@
+---
+title: "The longitudinal dynamics and natural history of clonal haematopoiesis"
+author:
+- José Guilherme de Almeida
+- Moritz Gerstung
+subtitle: Supplementary Note N - Investigating clonality and its impact possible impact
+  on inference
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    fig_caption: yes
+    highlight: tango
+    number_sections: yes
+    theme: lumen
+    toc: yes
+    toc_collapsed: yes
+    toc_depth: 4
+    toc_float: yes
+  pdf_document:
+    fig_caption: yes
+    toc: yes
+    toc_depth: '4'
+  word_document:
+    toc: yes
+    toc_depth: '4'
+--- 
+
+In this Supplementary Note, we tentatively infer clonality (whether or not two mutations are in the same clone) and investigate the potential impact clonality can have on our inference. 
+
+# Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,dpi = 300,fig.align='center')
+```
+
+```{r}
+source("Scripts/vaf_dynamics_functions.R")
+model_file_name <- "models/model_ch.RDS"
+set.seed(42)
+model_id <- 'model_ch'
+load(file = sprintf('data_output/vaf_modelling_coefficients_%s.Rdata',model_id))
+values_model <- readRDS(file = model_file_name)
+
+source("Scripts/prepare_data.R")
+```
+
+# Clonality inference from targeted sequencing data
+
+Our initial assumption, backed up by single-cell studies [1], was that CH clones will commonly harbour a single driver mutation. Nonetheless, we here try to investigate the possibility that two or more driver mutations occur in the same clone. Typically, clonality inference is performed when information on copy number alterations and on several different sites is available. However, very targeted sequencing experiments (54 genes) do not provide this level of information. Indeed, attempting to use PyClone, a popular software for clonality inference [2], with our data - where the maximum number of mutations in a single individual is 12 - is a questionable approach because of this relative absence of mutations; nonetheless we present results for this analysis.
+
+As such, we have to devise heuristic tests to assess the clonal architecture of our cohort. We do this using the following procedures:
+
+* **PyClone** - PyClone is a software tool that relies on copy number data and deep sequencing to infer the clonal architecture of a sample [2];
+* **Fisher test consistency** - if mutation counts are consistently identical (i.e. non-significant in a Fisher's test) through time, it becomes more likely that they are shared by the same clone;
+* **Pigeonhole principle** - if the sum of VAF for a set of mutations is greater than 50%, it is biologically impossible for them to be all in separate clones;
+* **Dynamic similarity** - if two mutations are dynamically similar (i.e. their annual growth is very similar) it may be that they are in the same clone.
+
+## On clonality
+
+Here, it should be noted that, in the absence of high-input data or copy number information, it is possible that clustering mutations by relative frequencies can be indicative of the following:
+
+1. Two separate but similarly sized clones (false positive);
+2. A clone characterised by a driver acquires a second mutation (true positive);
+3. A parental clone with one or more unknown drivers acquires two consecutive known drivers on the same subclone (true positive);
+4. A parental clone with one or more unknown drivers that acquires two low fitness known drivers in distinct subclones - here, while the same, parental, clone harbours both mutations, they are actually constitutive of two separate clones (false positive).
+
+For cases 3 and 4 (represented in the figure below), we should be clear in our nomenclature as both imply that "two mutations are in the same clone" but only one of them is of relevance (3). As such and for clarity, we are interested in detecting 3 and this is what we mean by "two mutations in the same clone"; 4 should be further specified and defined as "two mutations in separate subclones in the same parental clone".
+
+```{r, fig.height=2,fig.width=6}
+a <- -5
+b <- 0.5
+plot_grid(
+  data.frame(ymin = -inv.logit(seq(a,b,length.out = 100)),
+             ymax = inv.logit(seq(a,b,length.out = 100)),
+             ymin_2 = -inv.logit(seq(a-8,b-3,length.out = 100)),
+             ymax_2 = inv.logit(seq(a-8,b-3,length.out = 100)),
+             ymin_3 = -inv.logit(seq(a-15,b-3,length.out = 100)),
+             ymax_3 = inv.logit(seq(a-15,b-3,length.out = 100)),
+             x = seq(a,b,length.out = 100)) %>%
+    ggplot(aes(x = x,ymin = ymin,ymax = ymax)) + 
+    geom_ribbon(aes(fill = "Parental clone")) + 
+    geom_ribbon(aes(ymin = ymin_2,ymax = ymax_2,
+                    fill = "Subclone with mutation 1")) + 
+    geom_ribbon(aes(ymin = ymin_3,ymax = ymax_3,
+                    fill = "Subclone with mutations 1 and 2")) + 
+    theme_gerstung(base_size = 6) + 
+    theme(axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          axis.line.y = element_blank(),
+          legend.position = "bottom",
+          legend.key.size = unit(0.1,"cm")) + 
+    xlab("Time") + 
+    scale_fill_manual(name = NULL,
+                      values = c("red1","green","purple"),
+                      labels = c("Parental clone","Subclone with mutation 1","Subclone with mutations 1 and 2")),
+data.frame(ymin = -inv.logit(seq(a,b,length.out = 100)),
+             ymax = inv.logit(seq(a,b,length.out = 100)),
+             ymin_2 = -inv.logit(seq(a-8,b-3,length.out = 100))-0.1,
+             ymax_2 = inv.logit(seq(a-8,b-3,length.out = 100))-0.1,
+             ymin_3 = 0.1+-inv.logit(seq(a-15,b-3,length.out = 100)),
+             ymax_3 = 0.1+inv.logit(seq(a-15,b-3,length.out = 100)),
+             x = seq(a,b,length.out = 100)) %>%
+    ggplot(aes(x = x,ymin = ymin,ymax = ymax)) + 
+    geom_ribbon(aes(fill = "Parental clone")) + 
+    geom_ribbon(aes(ymin = ymin_2,ymax = ymax_2,
+                    fill = "Subclone with mutation 1")) + 
+    geom_ribbon(aes(ymin = ymin_3,ymax = ymax_3,
+                    fill = "Subclone with mutation 2")) + 
+    theme_gerstung(base_size = 6) + 
+    theme(axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          axis.line.y = element_blank(),
+          legend.position = "bottom",
+          legend.key.size = unit(0.1,"cm")) + 
+    xlab("Time") + 
+    scale_fill_manual(name = NULL,
+                      values = c("red1","green","blue"),
+                      labels = c("Parental clone","Subclone with mutation 1","Subclone with mutation 2")),
+  nrow=1
+)
+```
+
+## PyClone analysis
+
+```{r}
+full_data %>%
+  transmute(mutation_id = mutation_identifier,
+            ref_counts = round(WTcount),var_counts = round(MUTcount_Xadj),
+            normal_cn = 1,minor_cn = 1,major_cn = 1, #we have no way of knowing this
+            variant_case = SardID,
+            variant_freq = round(MUTcount_Xadj) / round(TOTALcount),
+            genotype = "AB") %>%
+  subset(!is.na(ref_counts)) %>% 
+  write_tsv("data_output/data_for_pyclone.tsv")
+```
+
+```{r,fig.height=2,fig.width=7}
+py_clone_data <- list.files(path = 'pyclone_output/output_files',
+                            pattern = '*loci.tsv',full.names = T,
+                            recursive = T) %>%
+  lapply(function(x) read.table(x,sep = '\t',header = T)) %>%
+  do.call(what = rbind) 
+
+mutations_per_individual <- load_data_keep() %>%
+  select(sample_id = SardID,mutation_id = mutation_identifier) %>%
+  distinct %>%
+  group_by(sample_id) %>%
+  summarise(N_mutations = length(unique(mutation_id)))
+
+mutations_to_analyse <- py_clone_data %>% 
+  group_by(sample_id,cluster_id) %>% 
+  mutate(mutations_in_cluser = length(unique(mutation_id))) %>% 
+  subset(mutations_in_cluser > 1) %>%
+  merge(select(full_data,mutation_id = mutation_identifier,Age,sample_id = SardID,
+               Gene,amino_acid_change,VAF),by = c("mutation_id","sample_id"),all=F)
+
+py_clone_data %>%
+  group_by(sample_id,cluster_id) %>%
+  merge(mutations_per_individual,by = c("sample_id")) %>%
+  group_by(sample_id,N_mutations) %>%
+  mutate(Total = length(unique(mutation_id)),
+         N_clusters = length(unique(cluster_id))) %>% 
+  group_by(sample_id,cluster_id,Total,N_mutations,N_clusters) %>%
+  summarise(N = length(unique(mutation_id))) %>%
+  subset(!is.na(cluster_id)) %>% 
+  group_by(sample_id,N_mutations,N_clusters) %>%
+  mutate(L0 = N[cluster_id == 0]/Total) %>% 
+  mutate(N_clones = length(unique(cluster_id))) %>%
+  subset(N_clusters != N_mutations) %>% 
+  ggplot(aes(x = reorder(as.factor(sample_id),-(N_clones - L0)),
+             y = N / Total,fill = as.factor(cluster_id))) +
+  geom_bar(stat = "identity") + 
+  theme_gerstung(base_size = 6) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme(axis.text.x = element_blank(),legend.position = "bottom",
+        legend.key.size = unit(0.2,"cm")) + 
+  scale_fill_lancet(name = "Cluster ID") + 
+  xlab("") + 
+  ylab("Mutation proportion")
+
+py_clone_data %>%
+  group_by(sample_id,cluster_id) %>% 
+  merge(mutations_per_individual,by = c("sample_id"),all.y = T) %>% 
+  group_by(sample_id) %>% 
+  summarise(NClones = length(unique(cluster_id)),
+            NMutations = N_mutations[1]) %>% 
+  subset(NMutations > 1) %>% 
+  group_by(NMutations) %>% 
+  summarise(OneClone = sum(NClones == 1),
+            TwoClones = sum(NClones == 2),
+            ThreeClones = sum(NClones == 3),
+            FourClones = sum(NClones == 4),
+            FiveClones = sum(NClones == 5),
+            Total = length(sample_id))
+```
+
+```{r, fig.height=10,fig.width=5}
+mutations_to_analyse %>%
+  group_by(sample_id) %>%
+  mutate(N_clusters = length(unique(amino_acid_change))) %>% 
+  group_by(sample_id) %>%
+  mutate(cluster_id = cluster_id - min(cluster_id)) %>%
+  ggplot(aes(x = Age,y = VAF,group = amino_acid_change,
+             colour = factor(cluster_id))) + 
+  geom_hline(yintercept = 0.005,size = 0.25,linetype = 3) +
+  geom_line(size = 0.25) + 
+  facet_wrap(~ reorder(sample_id,N_clusters),ncol = 10,scales = "free_x") + 
+  theme_gerstung(base_size = 6) + 
+  theme(legend.position = 'bottom',
+        strip.text = element_text(margin = margin()),
+        legend.key.height = unit(0,"cm")) + 
+  scale_y_continuous(trans = 'log10',labels = function(x) sprintf("%s%%",x*100)) + 
+  scale_x_continuous(n.breaks = 3) +
+  scale_colour_lancet(guide = F)
+```
+
+```{r,fig.height=1,fig.width=4}
+mutations_to_analyse %>%
+  group_by(sample_id) %>%
+  mutate(N_clusters = length(unique(amino_acid_change))) %>% 
+  group_by(sample_id) %>%
+  mutate(cluster_id = cluster_id - min(cluster_id)) %>%
+  subset(sample_id %in% c(158,25169,3877,5247)) %>% 
+  mutate(sample_id = c(`158` = "More likely 1",`25169` = "More likely 2",
+                       `3877` = "Less likely 1", `5247` = "Less likely 2")[as.character(sample_id)]) %>%
+  ggplot(aes(x = Age,y = VAF,group = amino_acid_change,
+             colour = factor(cluster_id))) + 
+  geom_hline(yintercept = 0.005,size = 0.25,linetype = 3) +
+  geom_line(size = 0.25) + 
+  facet_wrap(~ reorder(sample_id,N_clusters),ncol = 10,scales = "free_x") + 
+  theme_gerstung(base_size = 6) + 
+  theme(legend.position = 'bottom',
+        strip.text = element_text(margin = margin()),
+        legend.key.height = unit(0,"cm")) + 
+  scale_y_continuous(trans = 'log10',labels = function(x) sprintf("%s%%",x*100)) + 
+  scale_colour_lancet(guide = F)
+```
+
+```{r, fig.height=2,fig.width=4.4}
+mutations_to_analyse %>%
+  group_by(sample_id) %>%
+  mutate(N_clusters = length(unique(amino_acid_change))) %>% 
+  group_by(sample_id) %>%
+  mutate(cluster_id = cluster_id - min(cluster_id)) %>%
+  group_by(cluster_id,sample_id) %>%
+  filter(length(unique(mutation_id)) == 2) %>%
+  mutate(mutation = ifelse(mutation_id == unique(mutation_id)[1],"A","B"),
+         mutations = paste(unique(mutation_id),collapse = '_')) %>%
+  select(mutation,mutations,sample_id,VAF,Age) %>% 
+  spread(key = mutation,value = VAF) %>%
+  arrange(Age) %>%
+  group_by(mutations,sample_id) %>%
+  mutate(R = cor(log(A+0.001),log(B+0.001))) %>%
+  group_by(sample_id) %>%
+  mutate(is_last_tp = Age == max(Age)) %>% 
+  ggplot(aes(x = A,y = B,group = sample_id,colour = R^2)) +
+  geom_line(size = 0.25) + 
+  geom_point(aes(shape = is_last_tp)) +
+  scale_shape_manual(values = c(NA,4),guide = F) +
+  scale_x_continuous(trans = 'log10',label = function(x) sprintf('%s%%',x*100)) + 
+  scale_y_continuous(trans = 'log10',label = function(x) sprintf('%s%%',x*100)) + 
+  theme_gerstung(base_size = 6) +
+  scale_colour_gradient(low = "white",high = "red4") + 
+  theme(legend.key.width = unit(0.1,"cm")) + 
+  facet_wrap(~ ifelse(R > 0,"Positive correlation","Negative correlation")) + 
+  xlab("VAF for clone 1") + 
+  ylab("VAF for clone 2") + 
+  coord_cartesian(xlim = c(0.0001,0.5),ylim = c(0.0001,0.5))
+```
+
+## Longitudinal consistency of Fisher's test
+
+If a fisher's test are consistently non-significant (i.e. two clones have the same size), it becomes more likely that two mutations are on the same clone. As such, for each timepoint and for each individual, we test for significance according to a Fisher's test using a contingency table with mutated and reference counts for each pair of trajectories in an individual.
+
+```{r}
+pairwise_fisher <- function(a,b,site_names) {
+  n_instances <- length(site_names)
+  possible_combinations <- combn(n_instances,2) %>% t
+  all_ft <- list()
+  for (i in 1:nrow(possible_combinations)) {
+    idx_1 <- possible_combinations[i,1]
+    idx_2 <- possible_combinations[i,2]
+    tmp_dat <- data.frame(a = a[c(idx_1,idx_2)],
+                          b = b[c(idx_1,idx_2)])
+    colnames(tmp_dat) <- site_names[c(idx_1,idx_2)]
+    ft <- suppressWarnings(fisher.test(tmp_dat))
+    all_ft[[i]] <- data.frame(
+      or = ft$estimate,p.val = ft$p.value,
+      a = site_names[idx_1],b = site_names[idx_2]
+    )
+  }
+  return(do.call(rbind,all_ft))
+}
+
+id_phase_df <- full_data %>%
+  select(SardID,Phase) %>%
+  distinct
+
+all_comparisons <- list()
+
+for (n in 1:nrow(id_phase_df)) {
+  id_phase <- id_phase_df[n,]
+  tmp <- full_data %>%
+    subset((SardID==id_phase$SardID) & (Phase == id_phase$Phase))
+  if (nrow(tmp) >= 2) {
+    out <- pairwise_fisher(tmp$MUTcount_Xadj,
+                           tmp$TOTALcount-tmp$MUTcount_Xadj,
+                           tmp$amino_acid_change)
+    out$SardID <- id_phase$SardID
+    out$Phase <- id_phase$Phase
+    all_comparisons[[paste(id_phase$SardID,id_phase$Phase,sep = '_')]] <- out
+  }
+}
+```
+
+```{r figs,fig.height=1.5,fig.width=2.5}
+all_comparisons_df <- do.call(rbind,all_comparisons)
+
+all_comparisons_df %>%
+  group_by(SardID,a,b) %>%
+  summarise(N_sig = sum(p.val < 0.05),N_total = length(p.val)) %>% 
+  mutate(prop = N_sig / N_total) %>%
+  ggplot(aes(x = reorder(paste(a,b,SardID),prop),y = prop)) + 
+  geom_point(size = 0.5) +
+  theme_gerstung(base_size = 6) +
+  scale_y_continuous() + 
+  theme(axis.text.x = element_blank(),axis.ticks.x = element_blank()) + 
+  xlab("Clones") + 
+  ylab("Proportion of signficant clones")
+```
+
+```{r,fig.height=7,fig.width=7}
+all_comparisons_df %>%
+  group_by(SardID,a,b) %>%
+  summarise(N_sig = sum(p.val < 0.05),N_total = length(p.val)) %>% 
+  mutate(prop = N_sig / N_total) %>%
+  ungroup %>%
+  summarise(Similar = sum(prop == 0),Total = length(prop)) %>% 
+  mutate(`Fraction of similar sites` = Similar / Total)
+
+consistently_similar_sites <- all_comparisons_df %>%
+  group_by(SardID,a,b) %>%
+  summarise(N_sig = sum(p.val < 0.05),N_total = length(p.val)) %>% 
+  mutate(prop = N_sig / N_total) %>%
+  subset(prop == 0) %>%
+  ungroup %>% 
+  mutate(comparison_idx = seq(1,length(N_sig))) %>% 
+  gather(value = "amino_acid_change",key = "key",a,b)
+
+merge(full_data,consistently_similar_sites,
+      by = c("SardID","amino_acid_change"),all = F) %>%
+  group_by(SardID,amino_acid_change) %>% 
+  mutate(max_clone_size = max(VAF),mean_clone_size = mean(VAF)) %>%
+  mutate(is_clone_small = max_clone_size < 0.025) %>%
+  ggplot(aes(x = Age,y = VAF,group = paste(SardID,amino_acid_change),
+             colour = str_match(Gene,'[A-Z0-9]+'))) + 
+  geom_hline(yintercept = 0.005,size = 0.25,linetype = 3) +
+  geom_line(aes(size = is_clone_small,alpha = is_clone_small)) + 
+  facet_wrap(~ reorder(SardID,max_clone_size),scales = "free_x") + 
+  scale_y_continuous(trans = 'log10') + 
+  theme_gerstung(base_size = 6) + 
+  theme(strip.text = element_text(margin = margin())) +
+  scale_colour_manual(values = gene_colours,name = NULL) +
+  scale_alpha_manual(
+    values = c(1,0.8),
+    labels = c("max(VAF) > 2.5%","max(VAF) < 2.5%"),name = NULL) + 
+  scale_size_manual(
+    values = c(0.75,0.25),
+    labels = c("max(VAF) > 2.5%","max(VAF) < 2.5%"),name = NULL) + 
+  theme(legend.position = "bottom",legend.key.height = unit(0,"cm")) + 
+  ggtitle("Trajectory pairs which were consistently similar through time",
+          "(dotted line represents the limit of detection)")
+```
+
+This analysis hints that, based on similarity alone, 13.6% of all mutations may not appear in an exclusive clone. However, it should be noted that this does not guarantee that both mutations are harboured in the same clone, especially when mutations are present in small VAF and are more visibly affected by technical overdispersion and genetic drift.
+
+## Pigeonhole principle
+
+Loosely put, the pigeonhole principle states that if the combined VAF of N mutations is greater than the carrying capacity then the mutations cannot be in isolated clones.
+
+```{r,fig.width=4,fig.height=2}
+pigeonhole_individuals <- full_data %>%
+  group_by(SardID) %>%
+  filter(Age == max(Age)) %>% 
+  summarise(TotalVAF = sum(VAF)) %>%
+  arrange(-TotalVAF) %>%
+  subset(TotalVAF > 0.5)
+
+full_data %>%
+  subset(SardID %in% pigeonhole_individuals$SardID) %>% 
+  group_by(SardID,amino_acid_change) %>%
+  filter(any(VAF > 0.1)) %>% 
+  ggplot(aes(x = Age,y = VAF,group = paste(amino_acid_change))) +
+  geom_line(aes(colour = str_match(Gene,'[A-Z0-9]+'))) + 
+  facet_wrap(~ SardID) + 
+  scale_y_continuous(trans = 'log10') + 
+  theme_gerstung(base_size = 6) +
+  scale_colour_manual(values = gene_colours,name = NULL) + 
+  theme(legend.position = "bottom",legend.key.height = unit(0,"cm"),
+        legend.box.spacing = unit(0.1,"cm"))
+
+pigeonhole_output <- full_data %>%
+  subset(SardID %in% pigeonhole_individuals$SardID) %>% 
+  group_by(SardID) %>%
+  filter(Age == max(Age)) %>%
+  subset(VAF > 0.1) %>%
+  distinct() %>% 
+  select(SardID,amino_acid_change,VAF) %>% 
+  mutate(TotalVAF = sum(VAF)) %>%
+  arrange(TotalVAF)
+```
+
+From this analysis we can claim that 6 individuals break the pigeonhole principle:
+
+* **25087** with *ASXL1*-H630fs and *PTPN11*-N308D;
+* **5247** with *ASXL1*-E602X and *SRSF2*-P95H;
+* **28932** with *ASXL1*-NM_015338:exon12:c.1720-2A>C and *TET2*-T1372I;
+* **11959** with *TET2*-Y1245C and *TET2*-P401fs;
+* **11449** with *ASXL1*-G828fs and *SRSF2*-P95H;
+* **5364** with *DNMT3A*-N838D and *GNB1*-K57E.
+
+## Dynamic similarity
+
+If two mutations have relatively similar annual growth rates, they may be in the same clone. To assess this, we subtract the posterior samples for every mutation pair in the same individual - if this difference of coefficients is close to 0, this can make the co-clonality of two mutations more likely. To tackle the fact that our credible intervals are often times wide and can lead to the spurious detection of co-clonality between two mutations, I calculate the empirical probability distribution of the null (the difference of annual growth between two mutations is 0) by comparing mutations *between* individuals. 
+
+```{r}
+draws <- values_model$draws
+
+site_samples <- as.matrix(draws$`11`[,grep('site',colnames(values_model$draws$`11`))])
+gene_samples <- as.matrix(draws$`11`[,grep('gene',colnames(values_model$draws$`11`))])
+clone_samples <- as.matrix(draws$`11`[,grep('clone',colnames(values_model$draws$`11`))])
+offset_samples <- as.matrix(draws$`11`[,grep('u',colnames(values_model$draws$`11`))])
+
+grab_samples <- function(site_numeric,gene_numeric,clone_numeric,sample_size=1000) {
+  S <- sample(nrow(site_samples),sample_size,replace = F)
+  if (!is.na(site_numeric)) {
+    b_site <- site_samples[S,site_numeric]
+  } else {
+    b_site <- 0
+  }
+  b_gene <- gene_samples[S,gene_numeric]
+  b_clone <- clone_samples[S,clone_numeric]
+  u <- offset_samples[S,clone_numeric]
+  return(list(site = b_site,clone = b_clone,gene = b_gene,offset = u))
+}
+
+all_sard_ids <- unique(Parameters_Age$individual)
+
+# calculate empirical cdf
+
+between_individidual_list <- list()
+
+for (i in 1:1000) {
+  s <- sample(all_sard_ids,2,replace = F)
+  A <- Parameters_Age %>%
+    subset(individual == s[1]) %>%
+    subset(clone_numeric == sample(as.list(clone_numeric),1))
+  B <- Parameters_Age %>%
+    subset(individual == s[2]) %>%
+    subset(clone_numeric == sample(as.list(clone_numeric),1))
+  site_numeric <- A$site_numeric
+  gene_numeric <- A$gene_numeric
+  clone_numeric <- A$clone_numeric
+  s_1 <- grab_samples(site_numeric,gene_numeric,clone_numeric,2500)
+  site_numeric <- B$site_numeric
+  gene_numeric <- B$gene_numeric
+  clone_numeric <- B$clone_numeric
+  s_2 <- grab_samples(site_numeric,gene_numeric,clone_numeric,2500)
+  
+  growth_1 <- s_1$site + s_1$clone + s_1$gene
+  growth_2 <- s_2$site + s_2$clone + s_2$gene
+  difference_of_growth <- growth_1 - growth_2
+  
+  between_individidual_list[[i]] <- data.frame(
+        qlow = quantile(difference_of_growth,pnorm(-2,0,1)),
+        q50 = quantile(difference_of_growth,0.5),
+        qhigh = quantile(difference_of_growth,pnorm(2,0,1)),
+        mean = mean(difference_of_growth),
+        site_1 = A$site,site_2 = B$site,
+        individual = paste(A$individual,B$individual,sep='_'))
+}
+
+between_individidual_df <- do.call(rbind,between_individidual_list)
+```
+
+```{r,fig.height=3,fig.width=3}
+all_differences <- list()
+
+for (sard_id in all_sard_ids) {
+  tmp_ <- Parameters_Age %>% 
+    subset(individual == sard_id)
+  if (nrow(tmp_) > 1) {
+    all_combs <- t(combn(nrow(tmp_),2))
+    for (i in 1:nrow(all_combs)) {
+      idx_1 <- all_combs[i,1]
+      idx_2 <- all_combs[i,2]
+      site_numeric <- tmp_$site_numeric[idx_1]
+      gene_numeric <- tmp_$gene_numeric[idx_1]
+      clone_numeric <- tmp_$clone_numeric[idx_1]
+      s_1 <- grab_samples(site_numeric,gene_numeric,clone_numeric,2500)
+      site_numeric <- tmp_$site_numeric[idx_2]
+      gene_numeric <- tmp_$gene_numeric[idx_2]
+      clone_numeric <- tmp_$clone_numeric[idx_2]
+      s_2 <- grab_samples(site_numeric,gene_numeric,clone_numeric,2500)
+      
+      growth_1 <- s_1$site + s_1$clone + s_1$gene
+      growth_2 <- s_2$site + s_2$clone + s_2$gene
+      difference_of_growth <- growth_1 - growth_2
+      all_differences[[length(all_differences)+1]] <- data.frame(
+        qlow = quantile(difference_of_growth,pnorm(-2,0,1)),
+        q50 = quantile(difference_of_growth,0.5),
+        qhigh = quantile(difference_of_growth,pnorm(2,0,1)),
+        mean = mean(difference_of_growth),
+        site_1 = tmp_$site[idx_1],site_2 = tmp_$site[idx_2],
+        individual = tmp_$individual[idx_1])
+    }
+  }
+}
+
+all_differences_df <- do.call(rbind,all_differences)
+
+full_sampling_experiment <- rbind(
+  mutate(all_differences_df,type = "Within individuals"),
+  mutate(between_individidual_df,type = "Between individuals")) %>%
+  group_by(type) %>%
+  arrange(type,q50) %>%
+  mutate(idx = seq(1,length(q50))) %>%
+  mutate(idx = idx / max(idx))
+
+full_sampling_experiment %>%
+  ggplot(aes(x = idx,y = q50,ymin=qlow,ymax=qhigh,colour = type)) + 
+  geom_point(alpha = 0.2,size = 0.5) + 
+  geom_linerange(size = 0.25,alpha = 0.2) + 
+  theme_gerstung(base_size = 6) + 
+  xlab("Mutation pair index") + 
+  ylab("Difference in annual growth rate between\nmutations within a pair") + 
+  theme(legend.position = "bottom",
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) + 
+  scale_colour_aaas(name = NULL)
+```
+
+Comparing both distributions provides clear evidence that trying to use dynamic coefficients to infer clonal structure would lead us to dramatically overstate the presence of co-clonality.
+
+## Potential co-clonality tally
+
+```{r,fig.height=0.8,fig.width=2}
+total_coclonality <- rbind(
+  spread(consistently_similar_sites,key = 'key',value = 'amino_acid_change') %>%
+    select(SardID,a,b) %>%
+    mutate(method = 'Size similarity consistency'),
+  spread(mutate(pigeonhole_output,key = c("a","b")),key = 'key',value = 'amino_acid_change') %>%
+    group_by(SardID) %>%
+    summarise(a = a[!is.na(a)],b = b[!is.na(b)]) %>% 
+    select(SardID,a,b) %>% 
+    mutate(method = 'Pigeonhole principle')) %>% 
+  rowwise() %>%
+  mutate(a_ = sort(c(a,b))[1],b_ = sort(c(a,b))[2]) %>%
+  select(SardID,a = a_,b = b_,method) %>%
+  group_by(SardID,a,b) %>%
+  mutate(method = ifelse(all(c("Size similarity consistence","Pigeonhole principle") %in% method),"Both",method)) %>%
+  group_by(method) 
+
+total_coclonality %>%
+  summarise(N = length(a),Total = 752) %>% 
+  ggplot(aes(x = 1,y = N / Total,fill = method)) + 
+  geom_bar(stat = "identity") + 
+  coord_flip(ylim = c(0,1)) +
+  scale_fill_aaas(name = NULL) + 
+  theme_gerstung(base_size = 6) +
+  scale_x_continuous(expand = c(0.1,0.1)) +
+  scale_y_continuous(expand = c(0,0,0.02,0)) +
+  guides(fill = guide_legend(nrow = 2)) +
+  xlab("") +
+  ylab("Fraction of potential co-clonality events") +
+  theme(legend.position = "bottom",legend.key.size = unit(0.2,"cm"),
+        axis.text.y = element_blank(),axis.ticks.y = element_blank())
+```
+
+Of potential interest in these analyses is the assessment of potentially co-occurring mutations in the same gene. While co-clonality events in small clones ($VAF \leq  1\%$) are not particularly convincing, those in larger clones may be more likely - indeed, whereas most clones are detectable at relatively small sizes and grow at small annual rates, few will have considerable size, raising the possibility of a chance event (two small clones being similarly slow). Further inspection into this reveals that both *DNMT3A* and *TET2*, the two most prevalent genes in CH, show up as being overrepresented when it comes to co-occurrence, raising the possibility that this co-clonality may have synergistic effects. In effect, as shown in Extended Data Fig. 5, mutations in both these genes occur quite frequently in the same individual, with one individual - 4547 - harbouring 8 *TET2* mutations and one *JAK2* mutation. However, most of these mutations - including the *JAK2* mutation - occur at very low levels. 
+
+Two, perhaps more interesting, cases are those of 1716 and 11959 - both individuals harbour two *TET2* mutations which show signs of potentially being in the same clone. However, in both cases a truncating mutation (or potentially truncating - Q674X and P401fs, respectively) precedes, in the protein sequence, a single nucleotide variant (C1298Y, Y1245C). While more functional studies would be necessary, it is possible that such events - where a (potentially) truncating mutation renders a SNV non-functional - can play a considerable role in clonal dynamics and mislead conclusions. Nonetheless, it is important to consider that these mutations may simply be different chromosomes - Bacher *et al.* showed that it is not infrequent for *TET2* deletions to be accompanied by *TET2* mutations in haematological malignancies [3].
+
+```{r}
+data_total_coclonality <- total_coclonality %>%
+  gather(key = "key",value = "amino_acid_change",a,b) %>%
+  merge(select(full_data,SardID,amino_acid_change,VAF,Age),
+        by = c("SardID","amino_acid_change"),all.y = F) %>% 
+  group_by(method,SardID,amino_acid_change,key) %>% 
+  mutate(is_large = any(VAF > 0.01)) %>% 
+  group_by(method,SardID) %>% 
+  filter(all(is_large))
+```
+
+```{r,fig.width=5,fig.height=4.5}
+data_total_coclonality %>% 
+  subset(method == "Size similarity consistency") %>% 
+  ggplot(aes(x = Age,y = VAF,group = paste(SardID,amino_acid_change),
+             colour = str_match(amino_acid_change,'[A-Z0-9]+'))) + 
+  geom_hline(yintercept = 0.005,size = 0.25,linetype = 3) +
+  geom_line() + 
+  facet_wrap(~ reorder(SardID,VAF),scales = "free_x") + 
+  scale_y_continuous(trans = 'log10') + 
+  theme_gerstung(base_size = 6) + 
+  theme(strip.text = element_text(margin = margin())) +
+  scale_colour_manual(values = gene_colours,name = NULL) +
+  theme(legend.position = "bottom",legend.key.height = unit(0,"cm"),
+        panel.spacing.x = unit(0.1,"cm")) + 
+  ggtitle("Potential co-clonality events (size similarity consistency)")
+```
+
+```{r,fig.width=2.7,fig.height=2}
+data_total_coclonality %>% 
+  subset(method == "Pigeonhole principle") %>% 
+  ggplot(aes(x = Age,y = VAF,group = paste(SardID,amino_acid_change),
+             colour = str_match(amino_acid_change,'[A-Z0-9]+'))) + 
+  geom_hline(yintercept = 0.005,size = 0.25,linetype = 3) +
+  geom_line() + 
+  facet_wrap(~ reorder(SardID,VAF),scales = "free_x") + 
+  scale_y_continuous(trans = 'log10') + 
+  theme_gerstung(base_size = 6) + 
+  theme(strip.text = element_text(margin = margin())) +
+  scale_colour_manual(values = gene_colours,name = NULL) +
+  theme(legend.position = "bottom",legend.key.height = unit(0,"cm"),
+        panel.spacing.x = unit(0.1,"cm")) + 
+  ggtitle("Potential co-clonality events (pigeonhole principle)")
+```
+
+# The impact of clonality on inferences
+
+Having inferred the presence of clonality through relatively simple and heuristic principles, another question is necessary - does this clonality affect our inferences? To assess this we look at:
+
+1. The distribution of unknown cause effect by the number of mutations in an individual (also present in the original manuscript as Extended Data Fig. 4d);
+2. The distribution of explained/unexplained trajectories by the number of mutations in an individual.
+
+Below we show that neither are affected by the clonality in an individual.
+
+## Clonality and unknown cause effect and explained trajectories
+
+```{r,fig.height=1.5,fig.width=1.5}
+A <- Parameters_Age %>% 
+  group_by(individual) %>%
+  mutate(N_mut = length(unique(clone_numeric))) %>%
+  ggplot(aes(x = N_mut,y = b_clone_mean)) + 
+  geom_hline(yintercept = 0,linetype = 3,size = 0.25) +
+  geom_jitter(size = 0.25,alpha = 0.5) + 
+  geom_boxplot(aes(group = N_mut),alpha = 0.7,outlier.shape = NA) + 
+  theme_gerstung(base_size = 6) + 
+  scale_x_continuous(breaks = seq(1,10),expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  xlab("Number of mutations/individual") + 
+  ylab("Unknown cause effect")
+
+tmp <- Parameters_Age %>% 
+  group_by(individual) %>%
+  summarise(N_mut = length(unique(clone_numeric)),
+            uc = mean(b_clone_mean))
+
+tmp_dnmt3a <- Parameters_Age %>% 
+  group_by(individual) %>%
+  summarise(N_mut = length(unique(clone_numeric)),
+            uc = mean((b_clone_mean+b_genetic_mean)[gene == "DNMT3A"]))
+
+tmp_tet2 <- Parameters_Age %>% 
+  group_by(individual) %>%
+  summarise(N_mut = length(unique(clone_numeric)),
+            uc = mean((b_clone_mean+b_genetic_mean)[gene == "TET2"]))
+
+summary(glm(uc ~ N_mut,data = tmp))
+```
+
+```{r}
+cor.test(tmp_dnmt3a$N_mut,tmp_dnmt3a$uc)
+cor.test(tmp_tet2$N_mut,tmp_tet2$uc)
+```
+
+```{r,fig.height=1.5,fig.width=1.5}
+B <- Parameters_Age %>% 
+  group_by(individual) %>%
+  mutate(N_mut = length(unique(clone_numeric))) %>% 
+  group_by(N_mut) %>%
+  summarise(P = sum(sum_stat) / length(sum_stat),
+            P05 = qbeta(0.05,sum(sum_stat),length(sum_stat)-sum(sum_stat)),
+            P95 = qbeta(0.95,sum(sum_stat),length(sum_stat)-sum(sum_stat))) %>% 
+  ggplot(aes(x = N_mut,y = P)) + 
+  geom_bar(size=0.25,stat = 'identity') + 
+  geom_linerange(aes(ymin = P05,ymax = P95)) +
+  theme_gerstung(base_size = 6) + 
+  scale_x_continuous(breaks = seq(1,10)) +
+  xlab("Number of mutations/individual") + 
+  ylab("Fraction of explained trajectories")
+
+tmp <- Parameters_Age %>% 
+  group_by(individual) %>%
+  mutate(N_mut = length(unique(clone_numeric))) %>% 
+  group_by(N_mut) %>%
+  summarise(N = sum(sum_stat),Total = length(sum_stat))
+
+summary(glm(cbind(N,Total) ~ N_mut,data = tmp,family = stats::binomial))
+```
+
+```{r,fig.height=1.5,fig.width=3}
+plot_grid(A,B,nrow=1)
+```
+
+# Supplementary note references 
+
+1. Miles LA, Bowman RL, Merlinsky TR, Csete IS, Ooi AT, Durruthy-Durruthy R, Bowman M, Famulare C, Patel MA, Mendez P, Ainali C, Demaree B, Delley CL, Abate AR, Manivannan M, Sahu S, Goldberg AD, Bolton KL, Zehir A, Rampal R, Carroll MP, Meyer SE, Viny AD, Levine RL. Single-cell mutation analysis of clonal evolution in myeloid malignancies. Nature. 2020 Nov;587(7834):477-482. doi: 10.1038/s41586-020-2864-x.
+
+2. Roth A, Khattra J, Yap D, Wan A, Laks E, Biele J, Ha G, Aparicio S, Bouchard-Côté A, Shah SP. PyClone: statistical inference of clonal population structure in cancer. Nat Methods. 2014 Apr;11(4):396-8. doi: 10.1038/nmeth.2883.
+
+3. Bacher, U., Weissmann, S., Kohlmann, A., Schindela, S., Alpermann, T., Schnittger, S., Kern, W., Haferlach, T. and Haferlach, C. (2012), TET2 deletions are a recurrent but rare phenomenon in myeloid malignancies and are frequently accompanied by TET2 mutations on the remaining allele. British Journal of Haematology, 156: 67-75. https://doi.org/10.1111/j.1365-2141.2011.08911.x
